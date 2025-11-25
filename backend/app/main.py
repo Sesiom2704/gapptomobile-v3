@@ -1,0 +1,196 @@
+# backend/app/main.py
+
+"""
+Punto de entrada principal del backend de GapptoMobile v3.
+
+Aquí definimos:
+- La instancia de FastAPI.
+- La configuración básica de CORS.
+- Endpoints de salud (/health y /api/health).
+- El arranque de la aplicación (evento startup) y uso de la base de datos.
+
+Más adelante:
+- Iremos añadiendo los routers de negocio en backend/app/api/v1/*
+  (gastos, ingresos, daybyday, balance, etc.) sin perder funcionalidades.
+"""
+
+from typing import Callable
+
+from fastapi import FastAPI, Depends
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.routing import APIRoute
+from sqlalchemy import text as sa_text
+from sqlalchemy.exc import SQLAlchemyError
+
+from backend.app.db.session import engine, get_db
+from backend.app.db.base import Base
+from sqlalchemy.orm import Session
+
+
+# ---------------------------------------------------------------------------
+# 1) Generador de operation_id únicos
+# ---------------------------------------------------------------------------
+def custom_generate_unique_id(route: APIRoute) -> str:
+    """
+    Genera un identificador único para cada operación de la API.
+
+    ¿Para qué sirve esto?
+    ---------------------
+    - FastAPI genera por defecto operation_id a partir del nombre de la función.
+    - Si tienes muchas rutas o reusas nombres, puede haber colisiones en la
+      documentación OpenAPI/Swagger.
+    - Con este generador, usamos un patrón estable y legible:
+        <nombre_router>_<nombre_función>
+      por ejemplo: "gastos_listar_gastos" o "ingresos_crear_ingreso".
+    """
+    # route.name es el nombre de la función de Python que maneja la ruta.
+    # route.tags suele contener el "módulo" o categoría (por ejemplo ["gastos"]).
+    tag_prefix = route.tags[0] if route.tags else "default"
+    return f"{tag_prefix}_{route.name}"
+
+
+# ---------------------------------------------------------------------------
+# 2) Crear la app FastAPI
+# ---------------------------------------------------------------------------
+app = FastAPI(
+    title="GapptoMobile v3 API",
+    version="0.1.0",
+    description="Backend v3 de GapptoMobile (estructura limpia, misma BD).",
+    generate_unique_id_function=custom_generate_unique_id,
+)
+
+
+# ---------------------------------------------------------------------------
+# 3) Configuración de CORS
+# ---------------------------------------------------------------------------
+# En desarrollo permitimos todo (*) para no tener problemas con el frontend.
+# Más adelante podemos restringir a la URL real de la app móvil / web.
+origins = [
+    "*",  # ⚠️ Permite cualquier origen. En producción, mejor restringir.
+]
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=origins,        # Quién puede hacer peticiones
+    allow_credentials=True,
+    allow_methods=["*"],          # Qué métodos HTTP se permiten
+    allow_headers=["*"],          # Qué cabeceras se permiten
+)
+
+
+# ---------------------------------------------------------------------------
+# 4) Evento de arranque (startup)
+# ---------------------------------------------------------------------------
+@app.on_event("startup")
+def on_startup() -> None:
+    """
+    Código que se ejecuta cuando arranca la aplicación.
+
+    Aquí podemos:
+    - Comprobar que la conexión a la base de datos funciona.
+    - (Opcional) crear tablas si estamos en desarrollo.
+      En producción, preferiremos manejar la estructura con Alembic.
+    """
+    # Opción 1 (recomendada): solo comprobar conexión.
+    try:
+        with engine.connect() as conn:
+            conn.execute(sa_text("SELECT 1"))
+    except SQLAlchemyError as e:
+        # En un entorno real, aquí usaríamos logging en lugar de print.
+        print(f"[startup] Error al comprobar la BD: {e}")
+
+    # Opción 2 (solo para desarrollo):
+    # --------------------------------
+    # Si quisieras crear todas las tablas definidas en Base.metadata
+    # descomenta esta línea, pero OJO: en una BD ya en producción
+    # lo normal es usar migraciones (Alembic), no create_all().
+    #
+    # Base.metadata.create_all(bind=engine)
+
+
+# ---------------------------------------------------------------------------
+# 5) Endpoints básicos
+# ---------------------------------------------------------------------------
+@app.get("/", tags=["core"])
+def root() -> dict:
+    """
+    Endpoint raíz de la API.
+
+    Útil como prueba rápida de que el servidor está respondiendo.
+    """
+    return {"message": "GapptoMobile v3 backend is running"}
+
+
+@app.get("/health", tags=["core"])
+def health_simple() -> dict:
+    """
+    Healthcheck simple.
+
+    No comprueba la base de datos, solo responde "ok".
+    Útil para un test muy rápido de que el servidor está levantado.
+    """
+    return {"status": "ok"}
+
+
+@app.get("/api/health", tags=["core"])
+def health_api(db: Session = Depends(get_db)) -> dict:
+    """
+    Healthcheck completo de la API.
+
+    - Abre una sesión de base de datos con get_db.
+    - Ejecuta un SELECT 1.
+    - Devuelve información sobre si la conexión ha ido bien.
+
+    Si hay algún problema de conexión con la BD, devuelve status = "error"
+    y un mensaje con el detalle del error.
+    """
+    try:
+        # Usamos la sesión "db" que nos inyecta FastAPI mediante Depends(get_db)
+        db.execute(sa_text("SELECT 1"))
+        return {"status": "ok", "db": "reachable"}
+    except SQLAlchemyError as e:
+        return {"status": "error", "db": "unreachable", "detail": str(e)}
+
+
+# ---------------------------------------------------------------------------
+# 6) Inclusión de routers de negocio (pendiente de migrar)
+# ---------------------------------------------------------------------------
+# Aquí es donde, poco a poco, iremos añadiendo los routers que vengan de v2:
+#
+# from backend.app.api.v1 import gastos_router, ingresos_router, ...
+#
+# app.include_router(gastos_router.router, prefix="/api/gastos", tags=["gastos"])
+# app.include_router(ingresos_router.router, prefix="/api/ingresos", tags=["ingresos"])
+#
+# De momento lo dejamos comentado hasta que migremos el primer módulo.
+
+from backend.app.api.v1 import (
+    gastos_router,
+    ingresos_router,
+    gastos_cotidianos_router,
+    cuentas_router,
+    proveedores_router,
+    tipos_router,
+    ramas_router,
+    patrimonio_router,
+    prestamos_router,
+    users_router,
+    auth_router,
+)
+
+# ---------------------------------------------------------------------------
+# Routers de negocio (v1)
+# ---------------------------------------------------------------------------
+
+
+app.include_router(gastos_router.router, prefix="/api/v1")
+app.include_router(ingresos_router.router, prefix="/api/v1")
+app.include_router(gastos_cotidianos_router.router, prefix="/api/v1")
+app.include_router(cuentas_router.router, prefix="/api/v1")
+app.include_router(proveedores_router.router, prefix="/api/v1")
+app.include_router(tipos_router.router, prefix="/api/v1")
+app.include_router(ramas_router.router, prefix="/api/v1")
+app.include_router(patrimonio_router.router, prefix="/api/v1")
+app.include_router(prestamos_router.router, prefix="/api/v1")
+app.include_router(users_router.router, prefix="/api/v1")
+app.include_router(auth_router.router, prefix="/api/v1")
