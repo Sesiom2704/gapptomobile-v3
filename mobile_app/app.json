@@ -1,0 +1,27 @@
+{
+  "expo": {
+    "extra": {
+      "EXPO_PUBLIC_API_URL": "https://gapptomobile-api-staging.onrender.com",
+      "eas": {
+        "projectId": "bb4c48e3-397b-498c-97d9-16c8f5ddf747"
+      }
+    },
+    "owner": "sesiom27",
+    "ios": {
+      "bundleIdentifier": "com.sesiom2704.gapptomobilev3",
+      "supportsTablet": false,
+      "infoPlist": {
+        "ITSAppUsesNonExemptEncryption": false
+      }
+    },
+    "runtimeVersion": {
+      "policy": "appVersion"
+    },
+    "updates": {
+      "url": "https://u.expo.dev/bb4c48e3-397b-498c-97d9-16c8f5ddf747"
+    },
+    "android": {
+      "package": "com.sesiom2704.gapptomobilev3"
+    }
+  }
+}
