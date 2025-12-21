@@ -23,6 +23,7 @@ Thumbs.db
 .env
 .env.*
 
-# Google service account
+# Local secrets / credentials
+backend/app/creds/
 backend/app/creds/*.json
 **/*credentials*.json
