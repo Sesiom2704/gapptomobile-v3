@@ -163,18 +163,24 @@ def list_routes():
 
 
 # ---------------------------------------------------------------------------
-# 6) Inclusión de routers de negocio (pendiente de migrar)
+# 6) Routers de negocio (v1) - MAPEADOS POR MÓDULO
 # ---------------------------------------------------------------------------
-# Aquí es donde, poco a poco, iremos añadiendo los routers que vengan de v2:
+# Objetivo:
+# - Evitar colisiones tipo /api/v1/pendientes (¿pendientes de qué?)
+# - Alinear el backend con el contrato real del móvil:
+#     /api/v1/gastos/...
+#     /api/v1/ingresos/...
+#     /api/v1/gastos-cotidianos/...
+#     /api/v1/movimientos-cuenta/...
+#     /api/v1/ubicaciones/...
 #
-# from backend.app.api.v1 import gastos_router, ingresos_router, ...
-#
-# app.include_router(gastos_router.router, prefix="/api/gastos", tags=["gastos"])
-# app.include_router(ingresos_router.router, prefix="/api/ingresos", tags=["ingresos"])
-#
-# De momento lo dejamos comentado hasta que migremos el primer módulo.
+# Regla:
+# - Routers "de dominio" van namespaced: /api/v1/<modulo>
+# - auth_router ya trae prefix="/auth" dentro del router -> solo se le aplica /api/v1
+# ---------------------------------------------------------------------------
 
 from backend.app.api.v1 import (
+    auth_router,
     gastos_router,
     ingresos_router,
     gastos_cotidianos_router,
@@ -185,24 +191,25 @@ from backend.app.api.v1 import (
     patrimonio_router,
     prestamos_router,
     users_router,
-    auth_router,
 )
 
-# ---------------------------------------------------------------------------
-# Routers de negocio (v1)
-# ---------------------------------------------------------------------------
+API_V1 = "/api/v1"
 
+# Auth (router tiene prefix="/auth")
+app.include_router(auth_router.router, prefix=API_V1)
 
-app.include_router(auth_router.router,              prefix="/api/v1",                   tags=["auth"])
+# Dominio (routers SIN prefix interno -> se les aplica aquí)
+app.include_router(gastos_router.router, prefix=f"{API_V1}/gastos")
+app.include_router(ingresos_router.router, prefix=f"{API_V1}/ingresos")
+app.include_router(gastos_cotidianos_router.router, prefix=f"{API_V1}/gastos-cotidianos")
 
-app.include_router(ingresos_router.router,          prefix="/api/v1/ingresos",          tags=["ingresos"])
-app.include_router(gastos_router.router,            prefix="/api/v1/gastos",            tags=["gastos"])
-app.include_router(gastos_cotidianos_router.router, prefix="/api/v1/gastos-cotidianos", tags=["gastos_cotidianos"])
+app.include_router(cuentas_router.router, prefix=f"{API_V1}/cuentas")
+app.include_router(proveedores_router.router, prefix=f"{API_V1}/proveedores")
 
-app.include_router(cuentas_router.router,           prefix="/api/v1", tags=["cuentas"])
-app.include_router(proveedores_router.router,       prefix="/api/v1", tags=["proveedores"])
-app.include_router(tipos_router.router,             prefix="/api/v1", tags=["tipos"])
-app.include_router(ramas_router.router,             prefix="/api/v1", tags=["ramas"])
-app.include_router(patrimonio_router.router,        prefix="/api/v1", tags=["patrimonio"])
-app.include_router(prestamos_router.router,         prefix="/api/v1", tags=["prestamos"])
-app.include_router(users_router.router,             prefix="/api/v1", tags=["users"])
+app.include_router(tipos_router.router, prefix=f"{API_V1}/tipos")
+app.include_router(ramas_router.router, prefix=f"{API_V1}/ramas")
+
+app.include_router(patrimonio_router.router, prefix=f"{API_V1}/patrimonios")
+app.include_router(prestamos_router.router, prefix=f"{API_V1}/prestamos")
+
+app.include_router(users_router.router, prefix=f"{API_V1}/users")
