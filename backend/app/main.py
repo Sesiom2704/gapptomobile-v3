@@ -193,14 +193,16 @@ from backend.app.api.v1 import (
 # ---------------------------------------------------------------------------
 
 
-app.include_router(gastos_router.router, prefix="/api/v1")
-app.include_router(ingresos_router.router, prefix="/api/v1")
-app.include_router(gastos_cotidianos_router.router, prefix="/api/v1")
-app.include_router(cuentas_router.router, prefix="/api/v1")
-app.include_router(proveedores_router.router, prefix="/api/v1")
-app.include_router(tipos_router.router, prefix="/api/v1")
-app.include_router(ramas_router.router, prefix="/api/v1")
-app.include_router(patrimonio_router.router, prefix="/api/v1")
-app.include_router(prestamos_router.router, prefix="/api/v1")
-app.include_router(users_router.router, prefix="/api/v1")
-app.include_router(auth_router.router, prefix="/api/v1")
+app.include_router(auth_router.router,              prefix="/api/v1",                   tags=["auth"])
+
+app.include_router(ingresos_router.router,          prefix="/api/v1/ingresos",          tags=["ingresos"])
+app.include_router(gastos_router.router,            prefix="/api/v1/gastos",            tags=["gastos"])
+app.include_router(gastos_cotidianos_router.router, prefix="/api/v1/gastos-cotidianos", tags=["gastos_cotidianos"])
+
+app.include_router(cuentas_router.router,           prefix="/api/v1", tags=["cuentas"])
+app.include_router(proveedores_router.router,       prefix="/api/v1", tags=["proveedores"])
+app.include_router(tipos_router.router,             prefix="/api/v1", tags=["tipos"])
+app.include_router(ramas_router.router,             prefix="/api/v1", tags=["ramas"])
+app.include_router(patrimonio_router.router,        prefix="/api/v1", tags=["patrimonio"])
+app.include_router(prestamos_router.router,         prefix="/api/v1", tags=["prestamos"])
+app.include_router(users_router.router,             prefix="/api/v1", tags=["users"])
