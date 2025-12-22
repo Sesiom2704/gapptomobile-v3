@@ -1,76 +1,108 @@
 # backend/app/db/session.py
-
 """
-Módulo responsable de la conexión a la base de datos y de la creación
-de sesiones (Session) que usará el resto de la aplicación.
+Gestión de la conexión a la base de datos (SQLAlchemy).
 
-💡 Idea clave:
-- "engine" = objeto global que representa la conexión (o pool de conexiones)
-  hacia la base de datos (Neon, Supabase, etc.).
-- "SessionLocal" = fábrica de sesiones. Cada petición de FastAPI abrirá
-  una sesión, trabajará con ella y luego la cerrará.
-
-Este módulo NO conoce credenciales directamente. La URL de conexión se
-lee desde la configuración central (settings.DATABASE_URL), que a su vez
-toma el valor de las variables de entorno definidas en el archivo .env.
+Puntos clave:
+- Construimos engine desde settings.resolve_database_url()
+- connect_args fuerza parámetros críticos en el driver psycopg:
+  - prepare_threshold=0 (INT): evita problemas con prepared statements y poolers
+  - options: search_path
+  - connect_timeout, sslmode
+- NullPool opcional: recomendado cuando pasas por pooler (p.ej. Supabase pooler/PgBouncer)
 """
 
-from sqlalchemy import create_engine
+from __future__ import annotations
+
+from urllib.parse import urlparse
+
+from sqlalchemy import create_engine, event, text
 from sqlalchemy.orm import sessionmaker
+from sqlalchemy.pool import NullPool
 
-from backend.app.core.config import settings  # importamos la config central
+from backend.app.core.config import settings
 
 
-# Creamos el "engine" de SQLAlchemy.
-# ---------------------------------------------------------------------------
-# - settings.DATABASE_URL viene de:
-#   - backend/app/core/config.py -> Settings.DATABASE_URL
-#   - que a su vez se carga desde el archivo .env o variables del sistema.
-#
-# - future=True activa el comportamiento más moderno de SQLAlchemy (2.0 style).
-# - pool_pre_ping=True hace que SQLAlchemy compruebe las conexiones antes
-#   de usarlas, evitando errores si la conexión se queda "colgada".
-engine = create_engine(
-    settings.DATABASE_URL,
-    future=True,
+def _should_use_nullpool(db_url: str) -> bool:
+    """
+    Decide si usar NullPool.
+
+    Cuándo conviene:
+    - Si DB_USE_NULLPOOL está activado.
+    - Si detectamos host/puerto típicos de poolers (ej: supabase pooler 6543).
+    """
+    if str(settings.DB_USE_NULLPOOL).lower() in ("1", "true", "yes"):
+        return True
+
+    try:
+        p = urlparse(db_url)
+        host = (p.hostname or "").lower()
+        port = p.port or 0
+        # Heurística útil: supabase pooler o puertos típicos de poolers
+        if "pooler.supabase.com" in host or port == 6543:
+            return True
+    except Exception:
+        pass
+
+    return False
+
+
+# 1) Resolver URL final de BD (Neon por defecto si así configuras DB_DEFAULT)
+DATABASE_URL = settings.resolve_database_url()
+
+# 2) connect_args “finos” (muy parecido a tu V2)
+#    Importante: prepare_threshold DEBE ser int, no string.
+connect_args = {
+    "connect_timeout": 10,
+    "sslmode": "require",
+    # Asegura el esquema, incluso si la URL ya trae options.
+    # (No hace daño; el server usará el último SET si se repite.)
+    "options": "-c search_path=public",
+    # Clave para evitar el TypeError y problemas de prepared statements:
+    "prepare_threshold": 0,
+}
+
+engine_kwargs = dict(
     pool_pre_ping=True,
+    future=True,
+    connect_args=connect_args,
 )
 
+# 3) Pooling: NullPool cuando procede
+if _should_use_nullpool(DATABASE_URL):
+    engine_kwargs["poolclass"] = NullPool
 
-# Creamos la factoría de sesiones.
-# ---------------------------------------------------------------------------
-# - autocommit=False: nosotros controlamos explícitamente cuándo hacer commit.
-# - autoflush=False: evitamos que SQLAlchemy haga flush automático en momentos
-#   inesperados; solemos llamar a commit() cuando queramos persistir cambios.
-SessionLocal = sessionmaker(
-    autocommit=False,
-    autoflush=False,
-    bind=engine,
-)
+engine = create_engine(DATABASE_URL, **engine_kwargs)
+
+
+# 4) Mitigación para poolers (PgBouncer): limpiar prepared statements al conectar
+@event.listens_for(engine, "connect")
+def _pgbouncer_cleanup(dbapi_connection, connection_record):
+    """
+    Algunos poolers no llevan bien prepared statements persistentes.
+    DEALLOCATE ALL suele ser un “parche” efectivo para evitar errores raros.
+    """
+    cur = dbapi_connection.cursor()
+    try:
+        cur.execute("DEALLOCATE ALL;")
+    except Exception:
+        pass
+    finally:
+        cur.close()
+
+
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine, future=True)
 
 
 def get_db():
     """
-    Dependencia de FastAPI para obtener una sesión de base de datos.
-
-    Uso típico en un endpoint:
-    --------------------------------------------------------
-    from fastapi import Depends
-    from sqlalchemy.orm import Session
-    from backend.app.db.session import get_db
-
-    @router.get("/gastos")
-    def listar_gastos(db: Session = Depends(get_db)):
-        return db.query(Gasto).all()
-    --------------------------------------------------------
-
-    FastAPI se encarga de:
-    - Llamar a get_db(), obtener una Session.
-    - Entregarla al endpoint.
-    - Ejecutar el "finally" cuando termina la petición y cerrar la sesión.
+    Dependencia FastAPI:
+    - abre sesión
+    - fuerza search_path a public
+    - cierra sesión al finalizar
     """
     db = SessionLocal()
     try:
+        db.execute(text("SET search_path TO public;"))
         yield db
     finally:
         db.close()
