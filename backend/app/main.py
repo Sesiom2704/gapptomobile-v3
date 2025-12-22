@@ -191,6 +191,7 @@ from backend.app.api.v1 import (
     patrimonio_router,
     prestamos_router,
     users_router,
+    debug_router
 )
 
 API_V1 = "/api/v1"
@@ -211,3 +212,6 @@ app.include_router(ramas_router.router,        prefix=API_V1)
 app.include_router(patrimonio_router.router,   prefix=API_V1)
 app.include_router(prestamos_router.router,    prefix=API_V1)
 app.include_router(users_router.router,        prefix=API_V1)
+
+app.include_router(debug_router)
+
