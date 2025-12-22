@@ -27,10 +27,9 @@ export default ({ config }) => {
     },
     extra: {
       ...(config.extra || {}),
-      eas: {
-        projectId: "bb4c48e3-397b-498c-97d9-16c8f5ddf747",
-      },
-      API_URL: apiUrl,
+    eas: { projectId: "bb4c48e3-397b-498c-97d9-16c8f5ddf747" },
+    EXPO_PUBLIC_API_URL: process.env.EXPO_PUBLIC_API_URL || "https://gapptomobile-api-v3-staging.onrender.com",
+    API_URL: process.env.EXPO_PUBLIC_API_URL || "https://gapptomobile-api-v3-staging.onrender.com",
     },
   };
 };

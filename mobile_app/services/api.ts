@@ -18,11 +18,15 @@ const extra: any = (Constants.expoConfig as any)?.extra ?? {};
 
 // Admitimos múltiples nombres por compatibilidad con V2 / transición
 const RAW_API_URL =
-  extra.API_URL ||
   extra.EXPO_PUBLIC_API_URL ||
   process.env.EXPO_PUBLIC_API_URL ||
   (extra.eas && (extra.eas.API_URL || extra.eas.apiUrl))
   "";
+  
+if (extra.API_URL && extra.API_URL !== extra.EXPO_PUBLIC_API_URL) {
+  console.warn("[CONFIG] extra.API_URL está presente pero se ignora por seguridad:", extra.API_URL);
+}
+
 
 // Normalizamos: quitamos trailing slashes (evita // en URLs finales)
 const API_URL = String(RAW_API_URL).replace(/\/+$/, "");
