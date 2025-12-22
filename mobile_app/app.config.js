@@ -28,6 +28,10 @@ export default ({ config }) => ({
     eas: {
       projectId: "bb4c48e3-397b-498c-97d9-16c8f5ddf747"
     },
-    EXPO_PUBLIC_API_URL: process.env.EXPO_PUBLIC_API_URL
+      // Preferimos env var en build/update, pero dejamos fallback para no crashear
+  API_URL:
+    process.env.EXPO_PUBLIC_API_URL ||
+    "https://gapptomobile-api-v3-staging.onrender.com"
+
   }
 });

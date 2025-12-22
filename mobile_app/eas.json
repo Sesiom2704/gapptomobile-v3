@@ -17,7 +17,7 @@
       "channel": "staging",
       "distribution": "internal",
       "env": {
-        "EXPO_PUBLIC_API_URL": "https://gapptomobile-api-staging.onrender.com"
+        "EXPO_PUBLIC_API_URL": "https://gapptomobile-api-v3-staging.onrender.com/"
       },
       "ios": { "simulator": false }
     },
@@ -25,7 +25,7 @@
       "channel": "production",
       "autoIncrement": true,
       "env": {
-        "EXPO_PUBLIC_API_URL": "https://TU-API-PROD"
+        "EXPO_PUBLIC_API_URL": "https://gapptomobile-api-v3-staging.onrender.com/"
       }
     }
   },
