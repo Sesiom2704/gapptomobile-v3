@@ -4,11 +4,19 @@ import Constants from "expo-constants";
 
 export type DBKey = "supabase" | "neon";
 
-// ------------------------------
-// Config base (API URL)
-// ------------------------------
+/**
+ * --------------------------------------------
+ * Config base (API URL)
+ * --------------------------------------------
+ * La URL debe venir del runtime config de Expo:
+ * - app.json / app.config.js -> expo.extra.EXPO_PUBLIC_API_URL
+ * - o variables EAS/CI -> process.env.EXPO_PUBLIC_API_URL
+ *
+ * Nota: en Expo Go y en builds, Constants.expoConfig.extra es el punto más fiable.
+ */
 const extra: any = (Constants.expoConfig as any)?.extra ?? {};
 
+// Admitimos múltiples nombres por compatibilidad con V2 / transición
 const RAW_API_URL =
   extra.EXPO_PUBLIC_API_URL ||
   extra.API_URL ||
@@ -17,47 +25,77 @@ const RAW_API_URL =
   process.env.EXPO_PUBLIC_API_URL ||
   "";
 
+// Normalizamos: quitamos trailing slashes (evita // en URLs finales)
 const API_URL = String(RAW_API_URL).replace(/\/+$/, "");
 
 if (!API_URL) {
-  // No rompo la app en runtime por si estás en fase de transición,
-  // pero esto debería quedar resuelto por app.json/app.config.js y eas env.
+  // No rompemos la app en runtime (modo transición),
+  // pero esto debería resolverse en app.json/app.config.js y/o EAS env.
   console.warn(
-    "[CONFIG] EXPO_PUBLIC_API_URL no está configurada. Revisa app.json/app.config.js y eas.json (env)."
+    "[CONFIG] EXPO_PUBLIC_API_URL no está configurada. Revisa app.json/app.config.js y variables de entorno EAS."
   );
 }
 
-// ------------------------------
-// Estado: DB selector (X-DB)
-// ------------------------------
-let currentDbKey: DBKey = "supabase";
+/**
+ * --------------------------------------------
+ * Estado: DB selector (X-DB)
+ * --------------------------------------------
+ * Queremos Neon como predeterminado para V3.
+ * Importante:
+ * - En tu implementación anterior, el header X-DB sólo se añadía cuando alguien llamaba a setDbKey().
+ * - Eso provocaba que muchas requests iniciales salieran SIN X-DB, y el backend podía caer en otra BD / default.
+ *
+ * Solución:
+ * - Inicializamos el header "X-DB" en el axios.create() para que esté desde el primer request.
+ */
+let currentDbKey: DBKey = "neon";
 
-// ------------------------------
-// Axios instances
-// ------------------------------
+/**
+ * --------------------------------------------
+ * Axios instances
+ * --------------------------------------------
+ * api: llamadas "rápidas"
+ * apiSlow: llamadas con más timeout (cold start Render free, login, primeras cargas)
+ */
 export const api = axios.create({
   baseURL: API_URL,
   timeout: 15000,
-  headers: { Accept: "application/json" },
+  headers: {
+    Accept: "application/json",
+    // ✅ X-DB desde el arranque (Neon por defecto)
+    "X-DB": currentDbKey,
+  },
 });
 
 export const apiSlow = axios.create({
   baseURL: API_URL,
   timeout: 60000, // Render free: cold start puede ser alto
-  headers: { Accept: "application/json" },
+  headers: {
+    Accept: "application/json",
+    // ✅ X-DB desde el arranque (Neon por defecto)
+    "X-DB": currentDbKey,
+  },
 });
 
-// ------------------------------
-// Helpers
-// ------------------------------
+/**
+ * --------------------------------------------
+ * Helpers
+ * --------------------------------------------
+ */
+
+/** Cambia la BD activa (header X-DB) para siguientes requests. */
 export const setDbKey = (key: DBKey) => {
   currentDbKey = key;
+
+  // Mantenemos coherencia entre instancias
   api.defaults.headers.common["X-DB"] = key;
   apiSlow.defaults.headers.common["X-DB"] = key;
 };
 
+/** Devuelve la BD activa actual (memoria). */
 export const getDbKey = (): DBKey => currentDbKey;
 
+/** Set / unset del token Bearer para ambas instancias. */
 export const setAuthToken = (token?: string | null) => {
   if (token) {
     api.defaults.headers.common.Authorization = `Bearer ${token}`;
@@ -68,19 +106,30 @@ export const setAuthToken = (token?: string | null) => {
   }
 };
 
-// ------------------------------
-// Unauthorized handler (401)
-// ------------------------------
+/**
+ * --------------------------------------------
+ * Unauthorized handler (401)
+ * --------------------------------------------
+ * Se usa desde AuthProvider para forzar logout si el backend responde 401.
+ */
 let onUnauthorizedHandler: (() => void) | null = null;
 
 export const setOnUnauthorizedHandler = (fn: (() => void) | null) => {
   onUnauthorizedHandler = fn;
 };
 
-// ------------------------------
-// Logging (diagnóstico de /api, timeouts, etc.)
-// ------------------------------
-type ReqConfig = InternalAxiosRequestConfig & { __t0?: number; __name?: string; __retried?: boolean };
+/**
+ * --------------------------------------------
+ * Logging (diagnóstico de /api, timeouts, etc.)
+ * --------------------------------------------
+ * - Nos ayuda a detectar 404 por prefijos mal montados (/api vs /api/v1)
+ * - Nos ayuda a ver latencias (cold start)
+ */
+type ReqConfig = InternalAxiosRequestConfig & {
+  __t0?: number;
+  __name?: string;
+  __retried?: boolean;
+};
 
 const logRequest = (name: string) => (config: ReqConfig) => {
   config.__t0 = Date.now();
@@ -90,18 +139,24 @@ const logRequest = (name: string) => (config: ReqConfig) => {
   const url = String(config.url || "");
   const method = String(config.method || "GET").toUpperCase();
 
-  // URL final “humana”
   const finalUrl = `${base}${url}`;
 
-  console.log(`[HTTP:${name}] -> ${method} ${finalUrl}`);
+  // Añadimos a los logs qué DB estamos usando, útil si alternas Neon/Supabase.
+  const xdb =
+    (config.headers && (config.headers as any)["X-DB"]) ||
+    api.defaults.headers.common["X-DB"] ||
+    currentDbKey;
 
-  // Pista útil: si tu backend es /api/* y estás llamando sin /api (o viceversa)
-  // No es determinista, pero ayuda a detectar el error rápido.
+  console.log(`[HTTP:${name}] -> ${method} ${finalUrl} (X-DB=${String(xdb)})`);
+
+  // Heurística: detectar doble '/api' por mala composición baseURL + url
   if (base && url) {
     const baseEndsWithApi = /\/api$/.test(base);
     const urlStartsWithApi = url.startsWith("/api/");
     if (baseEndsWithApi && urlStartsWithApi) {
-      console.warn(`[HTTP:${name}] Posible doble '/api': baseURL termina en /api y url empieza por /api/.`);
+      console.warn(
+        `[HTTP:${name}] Posible doble '/api': baseURL termina en /api y url empieza por /api/.`
+      );
     }
   }
 
@@ -111,6 +166,7 @@ const logRequest = (name: string) => (config: ReqConfig) => {
 const logResponse = (response: AxiosResponse) => {
   const cfg = response.config as ReqConfig;
   const dt = cfg.__t0 ? Date.now() - cfg.__t0 : undefined;
+
   const base = String(cfg.baseURL || "");
   const url = String(cfg.url || "");
   const method = String(cfg.method || "GET").toUpperCase();
@@ -125,6 +181,7 @@ const logResponse = (response: AxiosResponse) => {
 const logError = async (error: AxiosError) => {
   const cfg = (error.config || {}) as ReqConfig;
   const dt = cfg.__t0 ? Date.now() - cfg.__t0 : undefined;
+
   const base = String(cfg.baseURL || "");
   const url = String(cfg.url || "");
   const method = String(cfg.method || "GET").toUpperCase();
@@ -138,14 +195,14 @@ const logError = async (error: AxiosError) => {
   );
   console.log(`[HTTP:${cfg.__name || "?"}] code=${error.code || "n/a"} message=${error.message}`);
 
-  // Si es 404, suele ser prefijo /api mal.
+  // 404 suele ser prefijo/ruta mal (ej: /api/v1 vs /api)
   if (status === 404) {
     console.warn(
-      `[HTTP:${cfg.__name || "?"}] 404: revisa si tus rutas llevan '/api'. Prueba en navegador: /health y /api/health.`
+      `[HTTP:${cfg.__name || "?"}] 404: revisa si tus rutas llevan '/api' y/o '/api/v1'. Prueba: /health, /api/health, /openapi.json.`
     );
   }
 
-  // Si hay detalle, lo sacamos
+  // Dump defensivo del body de error
   if (data) {
     try {
       console.log(`[HTTP:${cfg.__name || "?"}] response.data=`, data);
@@ -157,7 +214,7 @@ const logError = async (error: AxiosError) => {
   return Promise.reject(error);
 };
 
-// Attach logging
+// Attach logging interceptors
 api.interceptors.request.use(logRequest("fast"));
 api.interceptors.response.use(logResponse, logError);
 
@@ -179,7 +236,13 @@ apiSlow.interceptors.response.use(logResponse, async (error: AxiosError) => {
   return logError(error);
 });
 
-// Global 401 handling
+/**
+ * --------------------------------------------
+ * Global 401 handling
+ * --------------------------------------------
+ * Si cualquier endpoint devuelve 401, invocamos el handler (AuthProvider suele hacer logout).
+ * Nota: mantenemos esto solo en api (fast). Si también quieres en apiSlow, se puede duplicar.
+ */
 api.interceptors.response.use(
   (r) => r,
   (error: AxiosError) => {
