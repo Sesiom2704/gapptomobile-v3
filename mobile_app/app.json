@@ -1,7 +1,7 @@
 {
   "expo": {
     "extra": {
-      "EXPO_PUBLIC_API_URL": "https://gapptomobile-api-staging.onrender.com",
+      "EXPO_PUBLIC_API_URL": "https://gapptomobile-api-v3-staging.onrender.com",
       "eas": {
         "projectId": "bb4c48e3-397b-498c-97d9-16c8f5ddf747"
       }

@@ -151,6 +151,16 @@ def health_api(db: Session = Depends(get_db)) -> dict:
     except SQLAlchemyError as e:
         return {"status": "error", "db": "unreachable", "detail": str(e)}
 
+@app.get("/__routes", tags=["debug"])
+def list_routes():
+    return sorted(
+        [
+            {"path": r.path, "name": r.name, "methods": sorted(list(getattr(r, "methods", []) or []))}
+            for r in app.router.routes
+        ],
+        key=lambda x: x["path"],
+    )
+
 
 # ---------------------------------------------------------------------------
 # 6) Inclusión de routers de negocio (pendiente de migrar)
