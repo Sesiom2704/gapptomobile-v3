@@ -213,5 +213,5 @@ app.include_router(patrimonio_router.router,   prefix=API_V1)
 app.include_router(prestamos_router.router,    prefix=API_V1)
 app.include_router(users_router.router,        prefix=API_V1)
 
-app.include_router(debug_router)
+app.include_router(debug_router.router)
 
