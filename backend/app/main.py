@@ -195,21 +195,19 @@ from backend.app.api.v1 import (
 
 API_V1 = "/api/v1"
 
-# Auth (router tiene prefix="/auth")
+# auth_router ya tiene prefix interno "/auth"
 app.include_router(auth_router.router, prefix=API_V1)
 
-# Dominio (routers SIN prefix interno -> se les aplica aquí)
-app.include_router(gastos_router.router, prefix=f"{API_V1}/gastos")
-app.include_router(ingresos_router.router, prefix=f"{API_V1}/ingresos")
+# Routers planos -> namespace aquí
+app.include_router(gastos_router.router,            prefix=f"{API_V1}/gastos")
+app.include_router(ingresos_router.router,          prefix=f"{API_V1}/ingresos")
 app.include_router(gastos_cotidianos_router.router, prefix=f"{API_V1}/gastos-cotidianos")
 
-app.include_router(cuentas_router.router, prefix=f"{API_V1}/cuentas")
-app.include_router(proveedores_router.router, prefix=f"{API_V1}/proveedores")
-
-app.include_router(tipos_router.router, prefix=f"{API_V1}/tipos")
-app.include_router(ramas_router.router, prefix=f"{API_V1}/ramas")
-
-app.include_router(patrimonio_router.router, prefix=f"{API_V1}/patrimonios")
-app.include_router(prestamos_router.router, prefix=f"{API_V1}/prestamos")
-
-app.include_router(users_router.router, prefix=f"{API_V1}/users")
+# Routers que YA llevan /cuentas, /tipos, /ramas, etc. dentro -> solo /api/v1
+app.include_router(cuentas_router.router,      prefix=API_V1)
+app.include_router(proveedores_router.router,  prefix=API_V1)
+app.include_router(tipos_router.router,        prefix=API_V1)
+app.include_router(ramas_router.router,        prefix=API_V1)
+app.include_router(patrimonio_router.router,   prefix=API_V1)
+app.include_router(prestamos_router.router,    prefix=API_V1)
+app.include_router(users_router.router,        prefix=API_V1)
