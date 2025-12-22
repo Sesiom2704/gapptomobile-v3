@@ -200,9 +200,9 @@ API_V1 = "/api/v1"
 app.include_router(auth_router.router, prefix=API_V1)
 
 # Routers planos -> namespace aquí
-app.include_router(gastos_router.router,            prefix=f"{API_V1}/gastos")
-app.include_router(ingresos_router.router,          prefix=f"{API_V1}/ingresos")
-app.include_router(gastos_cotidianos_router.router, prefix=f"{API_V1}/gastos-cotidianos")
+app.include_router(gastos_router.router,            prefix=API_V1)
+app.include_router(ingresos_router.router,          prefix=API_V1)
+app.include_router(gastos_cotidianos_router.router, prefix=API_V1)
 
 # Routers que YA llevan /cuentas, /tipos, /ramas, etc. dentro -> solo /api/v1
 app.include_router(cuentas_router.router,      prefix=API_V1)

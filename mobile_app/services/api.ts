@@ -16,13 +16,19 @@ export type DBKey = "supabase" | "neon";
  */
 const extra: any = (Constants.expoConfig as any)?.extra ?? {};
 
+console.log("[CONFIG] runtimeVersion=", (Constants.expoConfig as any)?.runtimeVersion);
+console.log("[CONFIG] updates.url=", (Constants.expoConfig as any)?.updates?.url);
+console.log("[CONFIG] releaseChannel/channel=", (Constants.expoConfig as any)?.releaseChannel || (Constants.expoConfig as any)?.updates?.requestHeaders);
+console.log("[CONFIG] BUILD_TAG=2025-12-22T-GPT-FIX-01");
+
+
 // Admitimos múltiples nombres por compatibilidad con V2 / transición
 const RAW_API_URL =
   extra.EXPO_PUBLIC_API_URL ||
   process.env.EXPO_PUBLIC_API_URL ||
   (extra.eas && (extra.eas.API_URL || extra.eas.apiUrl))
   "";
-  
+
 if (extra.API_URL && extra.API_URL !== extra.EXPO_PUBLIC_API_URL) {
   console.warn("[CONFIG] extra.API_URL está presente pero se ignora por seguridad:", extra.API_URL);
 }
