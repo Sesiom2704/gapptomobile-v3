@@ -42,8 +42,8 @@ if (!API_URL) {
  * --------------------------------------------
  * Queremos Neon como predeterminado para V3.
  * Importante:
- * - En tu implementación anterior, el header X-DB sólo se añadía cuando alguien llamaba a setDbKey().
- * - Eso provocaba que muchas requests iniciales salieran SIN X-DB, y el backend podía caer en otra BD / default.
+ * - Si el header X-DB sólo se añade cuando alguien llama a setDbKey(),
+ *   las primeras requests pueden salir SIN X-DB.
  *
  * Solución:
  * - Inicializamos el header "X-DB" en el axios.create() para que esté desde el primer request.
@@ -95,7 +95,12 @@ export const setDbKey = (key: DBKey) => {
 /** Devuelve la BD activa actual (memoria). */
 export const getDbKey = (): DBKey => currentDbKey;
 
-/** Set / unset del token Bearer para ambas instancias. */
+/**
+ * Set / unset del token Bearer para ambas instancias.
+ * Nota:
+ * - Esto modifica el default header de axios para futuras requests.
+ * - Si alguna llamada usa axios "directo" en vez de `api`, esa llamada NO llevará token.
+ */
 export const setAuthToken = (token?: string | null) => {
   if (token) {
     api.defaults.headers.common.Authorization = `Bearer ${token}`;
@@ -122,13 +127,24 @@ export const setOnUnauthorizedHandler = (fn: (() => void) | null) => {
  * --------------------------------------------
  * Logging (diagnóstico de /api, timeouts, etc.)
  * --------------------------------------------
- * - Nos ayuda a detectar 404 por prefijos mal montados (/api vs /api/v1)
- * - Nos ayuda a ver latencias (cold start)
+ * - Detecta 404 por prefijos mal montados (/api vs /api/v1)
+ * - Mide latencias (cold start)
+ * - Muestra si se está enviando Authorization (SIN exponer el token completo)
  */
 type ReqConfig = InternalAxiosRequestConfig & {
   __t0?: number;
   __name?: string;
   __retried?: boolean;
+};
+
+const maskAuth = (auth: unknown): string => {
+  // No imprimimos el token. Solo:
+  // - si existe o no
+  // - prefijo y longitud (útil para confirmar que es "Bearer <jwt>")
+  if (typeof auth !== "string" || !auth) return "<none>";
+  const trimmed = auth.trim();
+  const head = trimmed.slice(0, 18); // normalmente "Bearer eyJhbGci..."
+  return `${head}... (len=${trimmed.length})`;
 };
 
 const logRequest = (name: string) => (config: ReqConfig) => {
@@ -138,25 +154,28 @@ const logRequest = (name: string) => (config: ReqConfig) => {
   const base = String(config.baseURL || "");
   const url = String(config.url || "");
   const method = String(config.method || "GET").toUpperCase();
-
   const finalUrl = `${base}${url}`;
 
-  // Añadimos a los logs qué DB estamos usando, útil si alternas Neon/Supabase.
+  // DB activa (cabecera X-DB)
   const xdb =
     (config.headers && (config.headers as any)["X-DB"]) ||
     api.defaults.headers.common["X-DB"] ||
     currentDbKey;
 
-  console.log(`[HTTP:${name}] -> ${method} ${finalUrl} (X-DB=${String(xdb)})`);
+  // Authorization: confirmamos si viaja o no (sin mostrar el token)
+  const auth =
+    (config.headers && ((config.headers as any).Authorization || (config.headers as any).authorization)) ||
+    api.defaults.headers.common.Authorization ||
+    apiSlow.defaults.headers.common.Authorization;
+
+  console.log(`[HTTP:${name}] -> ${method} ${finalUrl} (X-DB=${String(xdb)}) Authorization=${maskAuth(auth)}`);
 
   // Heurística: detectar doble '/api' por mala composición baseURL + url
   if (base && url) {
     const baseEndsWithApi = /\/api$/.test(base);
     const urlStartsWithApi = url.startsWith("/api/");
     if (baseEndsWithApi && urlStartsWithApi) {
-      console.warn(
-        `[HTTP:${name}] Posible doble '/api': baseURL termina en /api y url empieza por /api/.`
-      );
+      console.warn(`[HTTP:${name}] Posible doble '/api': baseURL termina en /api y url empieza por /api/.`);
     }
   }
 
@@ -241,7 +260,9 @@ apiSlow.interceptors.response.use(logResponse, async (error: AxiosError) => {
  * Global 401 handling
  * --------------------------------------------
  * Si cualquier endpoint devuelve 401, invocamos el handler (AuthProvider suele hacer logout).
- * Nota: mantenemos esto solo en api (fast). Si también quieres en apiSlow, se puede duplicar.
+ * Nota:
+ * - Mantengo esto en api (fast) como tenías.
+ * - Si quieres comportamiento idéntico en apiSlow, se puede duplicar.
  */
 api.interceptors.response.use(
   (r) => r,
