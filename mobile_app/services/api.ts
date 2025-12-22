@@ -18,15 +18,19 @@ const extra: any = (Constants.expoConfig as any)?.extra ?? {};
 
 // Admitimos múltiples nombres por compatibilidad con V2 / transición
 const RAW_API_URL =
-  extra.EXPO_PUBLIC_API_URL ||
   extra.API_URL ||
-  extra.apiUrl ||
-  (extra.eas && (extra.eas.API_URL || extra.eas.apiUrl)) ||
+  extra.EXPO_PUBLIC_API_URL ||
   process.env.EXPO_PUBLIC_API_URL ||
+  (extra.eas && (extra.eas.API_URL || extra.eas.apiUrl))
   "";
 
 // Normalizamos: quitamos trailing slashes (evita // en URLs finales)
 const API_URL = String(RAW_API_URL).replace(/\/+$/, "");
+
+console.log("[CONFIG] RAW_API_URL=", RAW_API_URL);
+console.log("[CONFIG] API_URL=", API_URL);
+console.log("[CONFIG] Constants.expoConfig.extra=", (Constants.expoConfig as any)?.extra);
+
 
 if (!API_URL) {
   // No rompemos la app en runtime (modo transición),
