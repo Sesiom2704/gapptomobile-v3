@@ -332,6 +332,67 @@ def get_gasto_cotidiano(
         )
     return obj
 
+# --------------------------
+# LISTAR (GET collection)
+# --------------------------
+@router.get("/", response_model=List[GastoCotidianoSchema])
+def list_gastos_cotidianos(
+    month: Optional[int] = Query(None, ge=1, le=12),
+    year: Optional[int] = Query(None, ge=2000, le=2100),
+    pagado: Optional[bool] = Query(None),
+    tipo_id: Optional[str] = Query(None),
+    q: Optional[str] = Query(None, description="Búsqueda libre (evento/observaciones)"),
+    limit: int = Query(1000, ge=1, le=5000),
+    offset: int = Query(0, ge=0),
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(require_user),
+):
+    """
+    Lista gastos cotidianos del usuario autenticado.
+
+    Filtros soportados:
+    - month/year: filtra por fecha
+    - pagado
+    - tipo_id (canon/legacy equivalentes)
+    - q: búsqueda en evento/observaciones
+    - limit/offset
+    """
+
+    qry = db.query(models.GastoCotidiano).filter(
+        models.GastoCotidiano.user_id == current_user.id
+    )
+
+    # Filtro por mes/año (fecha)
+    if year is not None:
+        qry = qry.filter(extract("year", models.GastoCotidiano.fecha) == year)
+    if month is not None:
+        qry = qry.filter(extract("month", models.GastoCotidiano.fecha) == month)
+
+    # pagado
+    if pagado is not None:
+        qry = qry.filter(models.GastoCotidiano.pagado.is_(pagado))
+
+    # tipo_id con equivalentes canon/legacy
+    if tipo_id:
+        tipo_id = normalize_upper(tipo_id)
+        eq = _tipo_equivalents(tipo_id)
+        qry = qry.filter(models.GastoCotidiano.tipo_id.in_(list(eq)))
+
+    # búsqueda libre
+    if q:
+        qq = f"%{q.strip().upper()}%"
+        qry = qry.filter(
+            or_(
+                func.upper(func.coalesce(models.GastoCotidiano.evento, "")).like(qq),
+                func.upper(func.coalesce(models.GastoCotidiano.observaciones, "")).like(qq),
+            )
+        )
+
+    # Orden + paginación
+    qry = qry.order_by(models.GastoCotidiano.fecha.desc(), models.GastoCotidiano.id.desc())
+    qry = qry.offset(offset).limit(limit)
+
+    return qry.all()
 
 # --------------------------
 # SUGERIR CUENTA
