@@ -1,7 +1,11 @@
 # backend/app/api/v1/proveedores_router.py
 
+from typing import List, Optional
+
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session
+
+from backend.app.api.v1.auth_router import require_user
 
 from backend.app.db.session import get_db
 from backend.app.db import models
@@ -20,6 +24,31 @@ router = APIRouter(
     tags=["proveedores"],
 )
 
+@router.get(
+    "/",
+    response_model=List[ProveedorRead],
+    summary="Listar proveedores",
+)
+def list_proveedores(
+    rama_id: Optional[str] = Query(None, description="Filtrar por rama_id"),
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(require_user),
+):
+    """
+    Lista proveedores del usuario autenticado.
+
+    - Multiusuario: solo devuelve proveedores con user_id == current_user.id
+    - Filtro opcional por rama_id
+    """
+    qry = db.query(models.Proveedor).filter(models.Proveedor.user_id == current_user.id)
+
+    if rama_id:
+        qry = qry.filter(models.Proveedor.rama_id == rama_id)
+
+    # Orden estable por nombre
+    qry = qry.order_by(models.Proveedor.nombre.asc(), models.Proveedor.id.asc())
+
+    return qry.all()
 
 @router.post(
     "/",
@@ -30,7 +59,9 @@ router = APIRouter(
 def create_proveedor(
     prov_in: ProveedorCreate,
     db: Session = Depends(get_db),
+    current_user: models.User = Depends(require_user),
 ):
+
     """
     Crea un nuevo proveedor.
 
@@ -48,12 +79,16 @@ def create_proveedor(
     pais_up = normalize_upper(prov_in.pais)
     comunidad_up = normalize_upper(prov_in.comunidad)
 
-    # Unicidad por nombre
+    # Unicidad por nombre PERO dentro del usuario (multiusuario)
     exists = (
         db.query(models.Proveedor)
-        .filter(models.Proveedor.nombre == nombre_up)
+        .filter(
+            models.Proveedor.user_id == current_user.id,
+            models.Proveedor.nombre == nombre_up,
+        )
         .first()
     )
+
     if exists:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -74,6 +109,7 @@ def create_proveedor(
 
     obj = models.Proveedor(
         id=new_id,
+        user_id=current_user.id,  # ✅ multiusuario
         nombre=nombre_up,
         rama_id=prov_in.rama_id,
         localidad=localidad_up,
@@ -95,12 +131,13 @@ def update_proveedor(
     prov_id: str,
     prov_in: ProveedorUpdate,
     db: Session = Depends(get_db),
+    current_user: models.User = Depends(require_user),
 ):
     """
     Actualiza los datos de un proveedor existente.
     """
     obj = db.get(models.Proveedor, prov_id)
-    if not obj:
+    if not obj or obj.user_id != current_user.id:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Proveedor no encontrado",

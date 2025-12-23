@@ -68,10 +68,30 @@ export type ProveedorUpdateRequest = Partial<ProveedorCreateRequest>;
 export async function listProveedores(options?: {
   ramaId?: string;
 }): Promise<Proveedor[]> {
-  const resp = await api.get<Proveedor[]>('/api/v1/proveedores/', {
-    params: options?.ramaId ? { rama_id: options.ramaId } : undefined,
-  });
-  return resp.data ?? [];
+  /**
+   * Importante:
+   * - En el backend, el LIST (GET) suele estar en '/api/v1/proveedores' (sin slash final)
+   * - Mientras que CREATE (POST) puede estar en '/api/v1/proveedores/' (con slash final)
+   * Si llamamos al GET con '/', y en esa URL existe un POST, FastAPI responde 405 (Method Not Allowed).
+   */
+  const urlList = '/api/v1/proveedores'; // ✅ SIN slash final
+
+  try {
+    const resp = await api.get<Proveedor[]>(urlList, {
+      params: options?.ramaId ? { rama_id: options.ramaId } : undefined,
+    });
+    return resp.data ?? [];
+  } catch (err) {
+    // Fallback: si por cualquier motivo el backend estuviera al revés en algún entorno
+    if (axios.isAxiosError(err) && err.response?.status === 405) {
+      const urlAlt = '/api/v1/proveedores/'; // fallback legacy
+      const resp = await api.get<Proveedor[]>(urlAlt, {
+        params: options?.ramaId ? { rama_id: options.ramaId } : undefined,
+      });
+      return resp.data ?? [];
+    }
+    throw err;
+  }
 }
 
 /**
