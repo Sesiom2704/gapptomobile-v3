@@ -199,7 +199,15 @@ from backend.app.api.v1 import (
     patrimonio_router,
     prestamos_router,
     users_router,
-    debug_router
+    debug_router,
+    day_to_day_analysis_router,
+    balance_router,
+    extraordinarios_router,
+    monthly_summary_router,
+    movimientos_cuenta_router,
+    ramas_gasto_router,
+    tipos_gasto_router,
+    ubicaciones_router,
 )
 
 API_V1 = "/api/v1"
@@ -220,6 +228,14 @@ app.include_router(ramas_router.router,        prefix=API_V1)
 app.include_router(patrimonio_router.router,   prefix=API_V1)
 app.include_router(prestamos_router.router,    prefix=API_V1)
 app.include_router(users_router.router,        prefix=API_V1)
+app.include_router(day_to_day_analysis_router.router, prefix=API_V1)
+app.include_router(balance_router.router, prefix=API_V1)
+app.include_router(extraordinarios_router.router, prefix=API_V1)
+app.include_router(monthly_summary_router.router, prefix=API_V1)
+app.include_router(movimientos_cuenta_router.router, prefix=API_V1)
+app.include_router(ramas_gasto_router.router, prefix=API_V1)
+app.include_router(tipos_gasto_router.router, prefix=API_V1)
+app.include_router(ubicaciones_router.router, prefix=API_V1)
 
 app.include_router(debug_router.router)
 
