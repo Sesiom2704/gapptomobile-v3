@@ -57,6 +57,7 @@ class TipoSegmentoGasto(Base):
     nombre  = Column(String, nullable=False)
 
     tipos_gasto = relationship("TipoGasto", back_populates="segmento_rel")
+    gastos = relationship("Gasto", back_populates="segmento")
 
 
 class TipoRamasProveedores(Base):
@@ -67,7 +68,6 @@ class TipoRamasProveedores(Base):
     nombre  = Column(String, nullable=False)
 
     proveedores = relationship("Proveedor", back_populates="rama_rel")
-
 
 class TipoGasto(Base):
     __tablename__ = "tipo_gasto"
@@ -199,10 +199,56 @@ class RendimientoPatrimonio(Base):
     # Snapshot de participación para ese año
     participacion_pct    = Column(Numeric(5, 2), nullable=False, server_default=text("100"))
 
-    create_on            = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
-    modified_on          = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
+    createon            = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    modifiedon          = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
 
     patrimonio = relationship("Patrimonio", back_populates="rendimientos")
+
+class Pais(Base):
+    __tablename__ = "paises"
+
+    id         = Column(Integer, primary_key=True, index=True)
+    nombre     = Column(String, nullable=False, unique=True)
+    codigo_iso = Column(String, nullable=True)
+
+    # Lista de regiones asociadas a este país
+    regiones = relationship("Region", back_populates="pais")
+
+
+class Region(Base):
+    __tablename__ = "regiones"
+
+    id      = Column(Integer, primary_key=True, index=True)
+    nombre  = Column(String, nullable=False)
+    pais_id = Column(Integer, ForeignKey("paises.id"), nullable=False)
+
+    # Relación inversa con Pais.regiones
+    pais = relationship("Pais", back_populates="regiones")
+
+    # Lista de localidades dentro de esta región
+    localidades = relationship("Localidad", back_populates="region")
+
+    __table_args__ = (
+        UniqueConstraint("nombre", "pais_id"),
+    )
+
+
+class Localidad(Base):
+    __tablename__ = "localidades"
+
+    id        = Column(Integer, primary_key=True, index=True)
+    nombre    = Column(String, nullable=False, index=True)
+    region_id = Column(Integer, ForeignKey("regiones.id"), nullable=False)
+
+    # Relación inversa con Region.localidades
+    region = relationship("Region", back_populates="localidades")
+
+    # Proveedores asociados a esta localidad
+    proveedores = relationship("Proveedor", back_populates="localidad_rel")
+
+    __table_args__ = (
+        UniqueConstraint("nombre", "region_id"),
+    )
 
 
 class Proveedor(Base):
@@ -213,17 +259,24 @@ class Proveedor(Base):
     nombre   = Column(String, nullable=False)
     rama_id  = Column(String, ForeignKey("tipo_ramas_proveedores.id"))
 
-    # NUEVO: ubicación
-    localidad = Column(String, nullable=True, index=True)
+    # Campos texto para mantener compatibilidad con v2.0
+    localidad_id = Column(Integer, ForeignKey("localidades.id"), nullable=True, index=True)
+    localidad   = Column(String, nullable=True, index=True)
     pais      = Column(String, nullable=True, index=True)
+    comunidad = Column(String, nullable=True, index=True)
 
-    # NUEVO: comunidad autónoma
-    comunidad = Column(String, nullable=True, index=True)  # ← NUEVO CAMPO
+    # Multiusuario
+    user_id      = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
 
-    rama_rel           = relationship("TipoRamasProveedores", back_populates="proveedores")
-    gastos             = relationship("Gasto", back_populates="proveedor_rel")
-    gastos_cotidianos  = relationship("GastoCotidiano", back_populates="proveedor_rel")
-    cuentas_bancarias  = relationship("CuentaBancaria", back_populates="banco_rel")
+
+    rama_rel          = relationship("TipoRamasProveedores", back_populates="proveedores")
+    gastos            = relationship("Gasto", back_populates="proveedor_rel")
+    gastos_cotidianos = relationship("GastoCotidiano", back_populates="proveedor_rel")
+    cuentas_bancarias = relationship("CuentaBancaria", back_populates="banco_rel")
+    user              = relationship("User", back_populates="proveedores")
+
+    # Relación con Localidad (normalizada)
+    localidad_rel = relationship("Localidad", back_populates="proveedores")
 
 class CuentaBancaria(Base):
     __tablename__ = "cuentas_bancarias"
@@ -234,19 +287,88 @@ class CuentaBancaria(Base):
     referencia = Column(String)
     anagrama   = Column(String)
     liquidez   = Column(Float, nullable=False, server_default=text("0"))
+    liquidez_inicial   = Column(Float, nullable=False, server_default=text("0"))
     # 👇 Nueva columna: propietario de la cuenta
     user_id    = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    Activo =    Column("activo", Boolean, default=True)
 
     banco_rel = relationship("Proveedor", back_populates="cuentas_bancarias")
     gastos    = relationship("Gasto", back_populates="cuenta_rel")
     ingresos  = relationship("Ingreso", back_populates="cuenta")
-    gastos_cotidianos = relationship(
-        "GastoCotidiano",
-        back_populates="cuenta",
-        cascade="all, delete-orphan",
-    )
+    gastos_cotidianos = relationship("GastoCotidiano",back_populates="cuenta", cascade="all, delete-orphan")
+
     # 👇 Relación inversa hacia el usuario
     user      = relationship("User", back_populates="cuentas_bancarias")
+    movimientos_origen = relationship(
+        "MovimientoCuenta",
+        foreign_keys="MovimientoCuenta.cuenta_origen_id",
+        back_populates="cuenta_origen",
+        cascade="all, delete-orphan",
+    )
+    movimientos_destino = relationship(
+        "MovimientoCuenta",
+        foreign_keys="MovimientoCuenta.cuenta_destino_id",
+        back_populates="cuenta_destino",
+        cascade="all, delete-orphan",
+    )
+    
+
+class MovimientoCuenta(Base):
+    __tablename__ = "movimientos_cuenta"
+
+    id = Column(String, primary_key=True, index=True)
+    fecha = Column(Date, nullable=False)
+
+    cuenta_origen_id = Column(
+        String,
+        ForeignKey("cuentas_bancarias.id", onupdate="CASCADE", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    cuenta_destino_id = Column(
+        String,
+        ForeignKey("cuentas_bancarias.id", onupdate="CASCADE", ondelete="RESTRICT"),
+        nullable=False,
+    )
+
+    importe = Column(Numeric(12, 2), nullable=False)
+    comentarios = Column(String, nullable=True)
+
+    user_id = Column(
+        Integer,
+        ForeignKey("users.id", onupdate="CASCADE", ondelete="SET NULL"),
+        nullable=True,
+    )
+
+    createdon = Column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=False,
+    )
+
+    modifiedon = Column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+
+    saldo_origen_antes = Column(Numeric(12, 2), nullable=True)
+    saldo_origen_despues = Column(Numeric(12, 2), nullable=True)
+    saldo_destino_antes = Column(Numeric(12, 2), nullable=True)
+    saldo_destino_despues = Column(Numeric(12, 2), nullable=True)
+
+    # Relaciones
+    cuenta_origen = relationship(
+        "CuentaBancaria",
+        foreign_keys=[cuenta_origen_id],
+        back_populates="movimientos_origen",
+    )
+    cuenta_destino = relationship(
+        "CuentaBancaria",
+        foreign_keys=[cuenta_destino_id],
+        back_populates="movimientos_destino",
+    )
+    user = relationship("User", back_populates="movimientos_cuenta")
 
 class Ingreso(Base):
     __tablename__ = "ingresos"
@@ -270,13 +392,13 @@ class Ingreso(Base):
         nullable=True,
         index=True,
     )
-    # 👇 Nuevo: dueño del ingreso
+
     user_id                = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
 
-    # Nuevos/ajustados
     kpi               = Column(Boolean, nullable=False, server_default=sa.text("true"))
     ingresos_cobrados = Column(Integer, nullable=False, server_default=sa.text("0"))
     inactivatedon     = Column(DateTime, nullable=True)
+    ultimo_ingreso_on = Column(DateTime, nullable=True)
 
     tipo_rel     = relationship("TipoIngreso", back_populates="ingresos")
     cuenta       = relationship("CuentaBancaria", back_populates="ingresos", lazy="joined")
@@ -296,10 +418,10 @@ class Gasto(Base):
     proveedor_id           = Column(String, ForeignKey("proveedores.id"), index=True)
     tipo_id                = Column(String, ForeignKey("tipo_gasto.id"), index=True)
     segmento_id            = Column(String, ForeignKey("tipo_segmentos_gasto.id"), nullable=True, index=True)
-    rama                   = Column(String)  # histórico texto libre
+    rama                   = Column(String) 
     referencia_vivienda_id = Column(String, ForeignKey("patrimonio.id"), index=True)
     cuenta_id              = Column(String, ForeignKey("cuentas_bancarias.id"), index=True)
-    # 👇 Nuevo: dueño del gasto
+
     user_id                = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
 
     importe                = Column(Float)
@@ -320,14 +442,20 @@ class Gasto(Base):
 
     # NUEVO
     inactivatedon          = Column(DateTime, nullable=True)
+    ultimo_pago_on         = Column(DateTime, nullable=True)
 
     proveedor_rel  = relationship("Proveedor", back_populates="gastos")
     tipo_rel       = relationship("TipoGasto", back_populates="gastos")
     vivienda_rel   = relationship("Patrimonio", back_populates="gastos")
     cuenta_rel     = relationship("CuentaBancaria", back_populates="gastos")
     subgastos      = relationship("Gasto", backref="parent", remote_side=[id])
-    # 👇 Relación inversa al usuario
+    segmento       = relationship("TipoSegmentoGasto", back_populates="gastos")
     user           = relationship("User", back_populates="gastos")
+
+    @property
+    def user_nombre(self) -> str | None:
+        # Ajusta "nombre" al campo real de tu modelo User
+        return self.user.full_name if self.user else None
 
 class GastoCotidiano(Base):
     __tablename__ = "gastos_cotidianos"
@@ -406,6 +534,8 @@ class User(Base):
     cuentas_bancarias = relationship("CuentaBancaria", back_populates="user")
     patrimonios       = relationship("Patrimonio", back_populates="user")
     prestamos         = relationship("Prestamo", back_populates="user")
+    proveedores       = relationship("Proveedor", back_populates="user")
+    movimientos_cuenta = relationship("MovimientoCuenta", back_populates="user")
 
 # =============================================
 # 5. CIERRES MENSUALES (cabecera + detalle)
