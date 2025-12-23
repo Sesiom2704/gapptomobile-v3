@@ -42,7 +42,7 @@ const AuthContext = createContext<AuthContextType | undefined>(undefined);
  */
 const maskToken = (t: string | null | undefined) => {
   if (!t) return "<none>";
-  const head = t.slice(0, 12); // ej: "eyJhbGciOi..."
+  const head = t.slice(0, 200); // ej: "eyJhbGciOi..."
   return `${head}... (len=${t.length})`;
 };
 

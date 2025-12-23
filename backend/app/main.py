@@ -161,6 +161,14 @@ def list_routes():
         key=lambda x: x["path"],
     )
 
+from fastapi import Request
+
+@app.middleware("http")
+async def log_auth_header(request: Request, call_next):
+    if request.url.path.startswith("/api/v1/gastos-cotidianos"):
+        auth = request.headers.get("authorization")
+        print(f"[DEBUG] {request.method} {request.url.path} authorization={auth!r}")
+    return await call_next(request)
 
 # ---------------------------------------------------------------------------
 # 6) Routers de negocio (v1) - MAPEADOS POR MÓDULO
