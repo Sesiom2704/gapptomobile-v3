@@ -117,11 +117,18 @@ export const getDbKey = (): DBKey => currentDbKey;
  */
 export const setAuthToken = (token?: string | null) => {
   if (token) {
-    api.defaults.headers.common.Authorization = `Bearer ${token}`;
-    apiSlow.defaults.headers.common.Authorization = `Bearer ${token}`;
+    const v = `bearer ${token}`;
+
+    api.defaults.headers.common["Authorization"] = v;
+    api.defaults.headers.common["authorization"] = v;
+
+    apiSlow.defaults.headers.common["Authorization"] = v;
+    apiSlow.defaults.headers.common["authorization"] = v;
   } else {
-    delete api.defaults.headers.common.Authorization;
-    delete apiSlow.defaults.headers.common.Authorization;
+    delete api.defaults.headers.common["Authorization"];
+    delete api.defaults.headers.common["authorization"];
+    delete apiSlow.defaults.headers.common["Authorization"];
+    delete apiSlow.defaults.headers.common["authorization"];
   }
 };
 
@@ -177,10 +184,11 @@ const logRequest = (name: string) => (config: ReqConfig) => {
     currentDbKey;
 
   // Authorization: confirmamos si viaja o no (sin mostrar el token)
-  const auth =
-    (config.headers && ((config.headers as any).Authorization || (config.headers as any).authorization)) ||
-    api.defaults.headers.common.Authorization ||
-    apiSlow.defaults.headers.common.Authorization;
+const headersAny = (config.headers || {}) as any;
+const auth =
+  headersAny.Authorization ??
+  headersAny.authorization ??
+  "<missing>";
 
   console.log(`[HTTP:${name}] -> ${method} ${finalUrl} (X-DB=${String(xdb)}) Authorization=${maskAuth(auth)}`);
 
