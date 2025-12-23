@@ -7,7 +7,7 @@ from typing import Optional, List, Tuple
 
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.orm import Session
-from sqlalchemy import func
+from sqlalchemy import func, cast, Integer  # ✅ PATCH: cast/Integer para evitar SMALLINT overflow
 
 from backend.app.schemas.monthly_summary import (
     MonthlySummaryResponse,
@@ -87,6 +87,26 @@ def get_monthly_summary(
     anio = ini.year
     mes = ini.month
     mes_label = ini.strftime("%B %Y").capitalize()
+
+    # -------------------------------------------------------------------------
+    # ✅ PATCH (CRÍTICO):
+    # Ventana 12 meses SIN overflow y con cálculo correcto.
+    #
+    # Problema detectado en Render:
+    # - Se estaba usando (anio * 100 + mes) con casts implícitos a SMALLINT
+    # - SMALLINT no soporta 202512 (máx 32767) => "smallint out of range"
+    # - Además, (anio*100+mes) - 120 NO representa "12 meses atrás" de forma correcta
+    #
+    # Solución:
+    # - Construimos un "period_ym" como INTEGER: anio::int*100 + mes::int
+    # - current_ym = anio*100 + mes (ej 202512)
+    # - lower_ym   = (anio-1)*100 + mes (ej 202412)
+    # - Filtramos: period_ym <= current_ym AND period_ym > lower_ym
+    #   => incluye exactamente los 12 meses: 202501..202512
+    # -------------------------------------------------------------------------
+    current_ym = int(anio) * 100 + int(mes)
+    lower_ym = (int(anio) - 1) * 100 + int(mes)
+    period_ym = cast(CierreMensual.anio, Integer) * 100 + cast(CierreMensual.mes, Integer)
 
     # -------------------------------------------------------------------------
     # 1) INGRESOS (REAL + PRESUPUESTO)
@@ -253,6 +273,7 @@ def get_monthly_summary(
 
     ahorro_mes = ingresos_mes - gastos_mes
 
+    # ✅ PATCH: 12m media SIN SMALLINT y con rango 12m correcto
     cierres_12m_q = (
         db.query(
             func.coalesce(func.avg(CierreMensual.ingresos_reales), 0.0),
@@ -260,8 +281,8 @@ def get_monthly_summary(
         )
         .filter(
             CierreMensual.user_id == current_user.id,
-            CierreMensual.anio * 100 + CierreMensual.mes <= anio * 100 + mes,
-            CierreMensual.anio * 100 + CierreMensual.mes > (anio * 100 + mes) - 120,
+            period_ym <= current_ym,
+            period_ym > lower_ym,
         )
     )
     ingresos_media_12m, gastos_media_12m = cierres_12m_q.first() or (0.0, 0.0)
@@ -357,6 +378,7 @@ def get_monthly_summary(
     # 7) Run rate 12 meses
     # -------------------------------------------------------------------------
 
+    # ✅ PATCH: mismo arreglo que en KPIs (evitar SMALLINT overflow y rango 12m correcto)
     cierres_det_q = (
         db.query(
             func.coalesce(func.avg(CierreMensual.ingresos_reales), 0.0),
@@ -366,8 +388,8 @@ def get_monthly_summary(
         )
         .filter(
             CierreMensual.user_id == current_user.id,
-            CierreMensual.anio * 100 + CierreMensual.mes <= anio * 100 + mes,
-            CierreMensual.anio * 100 + CierreMensual.mes > (anio * 100 + mes) - 120,
+            period_ym <= current_ym,
+            period_ym > lower_ym,
         )
     )
 
