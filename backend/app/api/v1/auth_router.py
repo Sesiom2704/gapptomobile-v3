@@ -180,7 +180,7 @@ def require_user(
 
     Si falla, lanza 401.
     """
-    if not creds or creds.scheme.lower() != "Bearer":
+    if not creds or (creds.scheme or "").lower() != "bearer":
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Falta Bearer token",
