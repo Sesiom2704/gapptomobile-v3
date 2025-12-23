@@ -272,6 +272,7 @@ export const GastosListScreen: React.FC<{ navigation: any; route: any }> = ({
         const [tipos, provs] = await Promise.all([fetchTiposGasto(), fetchProveedores()]);
         setTiposGasto(tipos);
         setProveedores(provs);
+        console.log('[Proveedores] count=', provs?.length, 'sample=', provs?.[0]);
       } catch (err) {
         console.error('Error al cargar tipos/proveedores', err);
       }
@@ -287,13 +288,27 @@ export const GastosListScreen: React.FC<{ navigation: any; route: any }> = ({
     return map;
   }, [tiposGasto]);
 
-  const mapaProveedoresPorId = useMemo(() => {
+    const mapaProveedoresPorId = useMemo(() => {
+    /**
+     * Mapa robusto proveedor_id -> nombre.
+     *
+     * Motivo:
+     * - En algunos históricos, proveedor_id puede venir como number.
+     * - En otros, puede venir con variaciones de casing/espacios.
+     * - Si el Map se llena con string “normalizada” pero se consulta con otro tipo,
+     *   nunca habrá match y la UI cae en "Sin proveedor".
+     */
     const map = new Map<string, string>();
+
     proveedores.forEach((p) => {
-      map.set(p.id, p.nombre);
+      const key = String(p.id).trim().toUpperCase();
+      const value = (p.nombre ?? '').trim();
+      if (key) map.set(key, value);
     });
+
     return map;
   }, [proveedores]);
+
 
   // Segmentos disponibles (para filtro por segmento, solo dinámicos)
   const segmentosDisponibles = useMemo(() => {
@@ -317,6 +332,7 @@ export const GastosListScreen: React.FC<{ navigation: any; route: any }> = ({
     try {
       const data = await fetchGastosCotidianos({ pagado: true });
       setGastosCotidianos(data);
+      console.log('[Cotidianos] count=', data?.length, 'sample=', data?.[0]);
       setErrorCotidianos(null);
     } catch (err: any) {
       console.error('Error al cargar gastos cotidianos', err);
@@ -1501,11 +1517,19 @@ export const GastosListScreen: React.FC<{ navigation: any; route: any }> = ({
             const titulo = (() => {
               const nombreApi = (g as any).proveedor_nombre as string | undefined;
               if (nombreApi && nombreApi.trim() !== '') return nombreApi;
-              if (g.proveedor_id) {
-                const nombre = mapaProveedoresPorId.get(g.proveedor_id);
-                if (nombre) return nombre;
+              if (g.proveedor_id != null) {
+                const key = String(g.proveedor_id).trim().toUpperCase();
+                const nombre = mapaProveedoresPorId.get(key);
+                if (nombre && nombre.trim() !== '') return nombre;
               }
+              // Fallback UX: si no hay proveedor, mostramos algo útil
+              // (evento u observaciones) antes de "Sin proveedor"
+              const evento = (g as any).evento as string | undefined;
+              if (evento && evento.trim() !== '') return evento.trim();
+              const obs = (g.observaciones ?? '').trim();
+              if (obs !== '') return obs;
               return 'Sin proveedor';
+
             })();
 
             const categoria = getTipoCotidianoNombre(g);
