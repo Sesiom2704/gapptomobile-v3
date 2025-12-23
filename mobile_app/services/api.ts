@@ -1,5 +1,9 @@
 // mobile_app/services/api.ts
-import axios, { AxiosError, AxiosResponse, InternalAxiosRequestConfig } from "axios";
+import axios, {
+  AxiosError,
+  AxiosResponse,
+  InternalAxiosRequestConfig,
+} from "axios";
 import Constants from "expo-constants";
 
 export type DBKey = "supabase" | "neon";
@@ -18,21 +22,26 @@ const extra: any = (Constants.expoConfig as any)?.extra ?? {};
 
 console.log("[CONFIG] runtimeVersion=", (Constants.expoConfig as any)?.runtimeVersion);
 console.log("[CONFIG] updates.url=", (Constants.expoConfig as any)?.updates?.url);
-console.log("[CONFIG] releaseChannel/channel=", (Constants.expoConfig as any)?.releaseChannel || (Constants.expoConfig as any)?.updates?.requestHeaders);
+console.log(
+  "[CONFIG] releaseChannel/channel=",
+  (Constants.expoConfig as any)?.releaseChannel ||
+    (Constants.expoConfig as any)?.updates?.requestHeaders
+);
 console.log("[CONFIG] BUILD_TAG=2025-12-22T-GPT-FIX-01");
 
-
-// Admitimos múltiples nombres por compatibilidad con V2 / transición
+// Admitimos múltiples nombres por compatibilidad / transición
 const RAW_API_URL =
   extra.EXPO_PUBLIC_API_URL ||
   process.env.EXPO_PUBLIC_API_URL ||
-  (extra.eas && (extra.eas.API_URL || extra.eas.apiUrl))
+  (extra.eas && (extra.eas.API_URL || extra.eas.apiUrl)) ||
   "";
 
 if (extra.API_URL && extra.API_URL !== extra.EXPO_PUBLIC_API_URL) {
-  console.warn("[CONFIG] extra.API_URL está presente pero se ignora por seguridad:", extra.API_URL);
+  console.warn(
+    "[CONFIG] extra.API_URL está presente pero se ignora por seguridad:",
+    extra.API_URL
+  );
 }
-
 
 // Normalizamos: quitamos trailing slashes (evita // en URLs finales)
 const API_URL = String(RAW_API_URL).replace(/\/+$/, "");
@@ -41,10 +50,7 @@ console.log("[CONFIG] RAW_API_URL=", RAW_API_URL);
 console.log("[CONFIG] API_URL=", API_URL);
 console.log("[CONFIG] Constants.expoConfig.extra=", (Constants.expoConfig as any)?.extra);
 
-
 if (!API_URL) {
-  // No rompemos la app en runtime (modo transición),
-  // pero esto debería resolverse en app.json/app.config.js y/o EAS env.
   console.warn(
     "[CONFIG] EXPO_PUBLIC_API_URL no está configurada. Revisa app.json/app.config.js y variables de entorno EAS."
   );
@@ -54,39 +60,28 @@ if (!API_URL) {
  * --------------------------------------------
  * Estado: DB selector (X-DB)
  * --------------------------------------------
- * Queremos Neon como predeterminado para V3.
- * Importante:
- * - Si el header X-DB sólo se añade cuando alguien llama a setDbKey(),
- *   las primeras requests pueden salir SIN X-DB.
- *
- * Solución:
- * - Inicializamos el header "X-DB" en el axios.create() para que esté desde el primer request.
  */
 let currentDbKey: DBKey = "neon";
 
 /**
  * --------------------------------------------
- * Axios instances+
+ * Axios instances
  * --------------------------------------------
- * api: llamadas "rápidas"
- * apiSlow: llamadas con más timeout (cold start Render free, login, primeras cargas)
  */
 export const api = axios.create({
   baseURL: API_URL,
   timeout: 15000,
   headers: {
     Accept: "application/json",
-    // ✅ X-DB desde el arranque (Neon por defecto)
     "X-DB": currentDbKey,
   },
 });
 
 export const apiSlow = axios.create({
   baseURL: API_URL,
-  timeout: 60000, // Render free: cold start puede ser alto
+  timeout: 60000,
   headers: {
     Accept: "application/json",
-    // ✅ X-DB desde el arranque (Neon por defecto)
     "X-DB": currentDbKey,
   },
 });
@@ -96,39 +91,44 @@ export const apiSlow = axios.create({
  * Helpers
  * --------------------------------------------
  */
-
-/** Cambia la BD activa (header X-DB) para siguientes requests. */
 export const setDbKey = (key: DBKey) => {
   currentDbKey = key;
-
-  // Mantenemos coherencia entre instancias
   api.defaults.headers.common["X-DB"] = key;
   apiSlow.defaults.headers.common["X-DB"] = key;
 };
 
-/** Devuelve la BD activa actual (memoria). */
 export const getDbKey = (): DBKey => currentDbKey;
 
 /**
+ * Normaliza tokens:
+ * - quita prefijos "bearer " o "Bearer " si te lo pasan ya prefijado
+ * - evita casos tipo "Bearer Bearer <jwt>"
+ */
+const normalizeJwt = (token: string): string => {
+  return token
+    .trim()
+    .replace(/^bearer\s+/i, "")     // quita "bearer " (case-insensitive)
+    .replace(/^Bearer\s+/i, "");    // por si viene "Bearer " (doble prefijo)
+};
+
+/**
  * Set / unset del token Bearer para ambas instancias.
- * Nota:
- * - Esto modifica el default header de axios para futuras requests.
- * - Si alguna llamada usa axios "directo" en vez de `api`, esa llamada NO llevará token.
  */
 export const setAuthToken = (token?: string | null) => {
   if (token) {
-    const v = `bearer ${token}`;
-
+    const jwt = normalizeJwt(token);
+    const v = `Bearer ${jwt}`; // B mayúscula SIEMPRE
     api.defaults.headers.common["Authorization"] = v;
-    api.defaults.headers.common["authorization"] = v;
-
     apiSlow.defaults.headers.common["Authorization"] = v;
-    apiSlow.defaults.headers.common["authorization"] = v;
+
+    // limpieza defensiva
+    delete (api.defaults.headers.common as any)["authorization"];
+    delete (apiSlow.defaults.headers.common as any)["authorization"];
   } else {
     delete api.defaults.headers.common["Authorization"];
-    delete api.defaults.headers.common["authorization"];
     delete apiSlow.defaults.headers.common["Authorization"];
-    delete apiSlow.defaults.headers.common["authorization"];
+    delete (api.defaults.headers.common as any)["authorization"];
+    delete (apiSlow.defaults.headers.common as any)["authorization"];
   }
 };
 
@@ -136,7 +136,6 @@ export const setAuthToken = (token?: string | null) => {
  * --------------------------------------------
  * Unauthorized handler (401)
  * --------------------------------------------
- * Se usa desde AuthProvider para forzar logout si el backend responde 401.
  */
 let onUnauthorizedHandler: (() => void) | null = null;
 
@@ -146,11 +145,8 @@ export const setOnUnauthorizedHandler = (fn: (() => void) | null) => {
 
 /**
  * --------------------------------------------
- * Logging (diagnóstico de /api, timeouts, etc.)
+ * Logging (diagnóstico)
  * --------------------------------------------
- * - Detecta 404 por prefijos mal montados (/api vs /api/v1)
- * - Mide latencias (cold start)
- * - Muestra si se está enviando Authorization (SIN exponer el token completo)
  */
 type ReqConfig = InternalAxiosRequestConfig & {
   __t0?: number;
@@ -159,13 +155,34 @@ type ReqConfig = InternalAxiosRequestConfig & {
 };
 
 const maskAuth = (auth: unknown): string => {
-  // No imprimimos el token. Solo:
-  // - si existe o no
-  // - prefijo y longitud (útil para confirmar que es "Bearer <jwt>")
   if (typeof auth !== "string" || !auth) return "<none>";
   const trimmed = auth.trim();
-  const head = trimmed.slice(0, 18); // normalmente "Bearer eyJhbGci..."
+  const head = trimmed.slice(0, 18); // "Bearer eyJhbGci..."
   return `${head}... (len=${trimmed.length})`;
+};
+
+/**
+ * Fuerza en cada request:
+ * - Authorization -> "Bearer <jwt>" (corrige "bearer <jwt>")
+ * - elimina "authorization" en minúscula si aparece
+ */
+const normalizeAuthorizationHeader = (config: ReqConfig, defaultsAuth?: any) => {
+  const headersAny = (config.headers || {}) as any;
+
+  const raw =
+    headersAny.Authorization ??
+    headersAny.authorization ??
+    defaultsAuth ??
+    "";
+
+  if (typeof raw === "string" && raw.trim()) {
+    const fixed = raw.trim().replace(/^bearer\s+/i, "Bearer ");
+    headersAny.Authorization = fixed;
+    delete headersAny.authorization;
+    config.headers = headersAny;
+  }
+
+  return config;
 };
 
 const logRequest = (name: string) => (config: ReqConfig) => {
@@ -177,27 +194,27 @@ const logRequest = (name: string) => (config: ReqConfig) => {
   const method = String(config.method || "GET").toUpperCase();
   const finalUrl = `${base}${url}`;
 
-  // DB activa (cabecera X-DB)
   const xdb =
-    (config.headers && (config.headers as any)["X-DB"]) ||
+    ((config.headers as any)?.["X-DB"]) ||
     api.defaults.headers.common["X-DB"] ||
     currentDbKey;
 
-  // Authorization: confirmamos si viaja o no (sin mostrar el token)
-const headersAny = (config.headers || {}) as any;
-const auth =
-  headersAny.Authorization ??
-  headersAny.authorization ??
-  "<missing>";
+  const headersAny = (config.headers || {}) as any;
+  const auth = headersAny.Authorization ?? headersAny.authorization ?? "<missing>";
 
-  console.log(`[HTTP:${name}] -> ${method} ${finalUrl} (X-DB=${String(xdb)}) Authorization=${maskAuth(auth)}`);
+  console.log(
+    `[HTTP:${name}] -> ${method} ${finalUrl} (X-DB=${String(
+      xdb
+    )}) Authorization=${maskAuth(auth)}`
+  );
 
-  // Heurística: detectar doble '/api' por mala composición baseURL + url
   if (base && url) {
     const baseEndsWithApi = /\/api$/.test(base);
     const urlStartsWithApi = url.startsWith("/api/");
     if (baseEndsWithApi && urlStartsWithApi) {
-      console.warn(`[HTTP:${name}] Posible doble '/api': baseURL termina en /api y url empieza por /api/.`);
+      console.warn(
+        `[HTTP:${name}] Posible doble '/api': baseURL termina en /api y url empieza por /api/.`
+      );
     }
   }
 
@@ -214,7 +231,9 @@ const logResponse = (response: AxiosResponse) => {
   const finalUrl = `${base}${url}`;
 
   console.log(
-    `[HTTP:${cfg.__name || "?"}] <- ${response.status} ${method} ${finalUrl}${dt != null ? ` (${dt}ms)` : ""}`
+    `[HTTP:${cfg.__name || "?"}] <- ${response.status} ${method} ${finalUrl}${
+      dt != null ? ` (${dt}ms)` : ""
+    }`
   );
   return response;
 };
@@ -232,18 +251,20 @@ const logError = async (error: AxiosError) => {
   const data: any = error.response?.data;
 
   console.log(
-    `[HTTP:${cfg.__name || "?"}] !! ${status || "NO_STATUS"} ${method} ${finalUrl}${dt != null ? ` (${dt}ms)` : ""}`
+    `[HTTP:${cfg.__name || "?"}] !! ${status || "NO_STATUS"} ${method} ${finalUrl}${
+      dt != null ? ` (${dt}ms)` : ""
+    }`
   );
-  console.log(`[HTTP:${cfg.__name || "?"}] code=${error.code || "n/a"} message=${error.message}`);
+  console.log(
+    `[HTTP:${cfg.__name || "?"}] code=${error.code || "n/a"} message=${error.message}`
+  );
 
-  // 404 suele ser prefijo/ruta mal (ej: /api/v1 vs /api)
   if (status === 404) {
     console.warn(
       `[HTTP:${cfg.__name || "?"}] 404: revisa si tus rutas llevan '/api' y/o '/api/v1'. Prueba: /health, /api/health, /openapi.json.`
     );
   }
 
-  // Dump defensivo del body de error
   if (data) {
     try {
       console.log(`[HTTP:${cfg.__name || "?"}] response.data=`, data);
@@ -255,41 +276,56 @@ const logError = async (error: AxiosError) => {
   return Promise.reject(error);
 };
 
-// Attach logging interceptors
+/**
+ * --------------------------------------------
+ * Interceptors
+ * --------------------------------------------
+ * Importante: primero normalizamos Authorization; luego logRequest.
+ */
+
+// FAST
+api.interceptors.request.use((config: ReqConfig) =>
+  normalizeAuthorizationHeader(config, api.defaults.headers.common["Authorization"])
+);
 api.interceptors.request.use(logRequest("fast"));
 api.interceptors.response.use(logResponse, logError);
 
+// SLOW
+apiSlow.interceptors.request.use((config: ReqConfig) =>
+  normalizeAuthorizationHeader(config, apiSlow.defaults.headers.common["Authorization"])
+);
 apiSlow.interceptors.request.use(logRequest("slow"));
-apiSlow.interceptors.response.use(logResponse, async (error: AxiosError) => {
-  const cfg = (error.config || {}) as ReqConfig;
+apiSlow.interceptors.response.use(
+  logResponse,
+  async (error: AxiosError) => {
+    const cfg = (error.config || {}) as ReqConfig;
 
-  const isTimeout =
-    error.code === "ECONNABORTED" ||
-    (typeof error.message === "string" && error.message.toLowerCase().includes("timeout"));
+    const isTimeout =
+      error.code === "ECONNABORTED" ||
+      (typeof error.message === "string" &&
+        error.message.toLowerCase().includes("timeout"));
 
-  // Retry suave por timeout (útil en cold start)
-  if (isTimeout && !cfg.__retried) {
-    cfg.__retried = true;
-    await new Promise((r) => setTimeout(r, 1200));
-    return apiSlow.request(cfg);
+    if (isTimeout && !cfg.__retried) {
+      cfg.__retried = true;
+      await new Promise((r) => setTimeout(r, 1200));
+      return apiSlow.request(cfg);
+    }
+
+    return logError(error);
   }
-
-  return logError(error);
-});
+);
 
 /**
  * --------------------------------------------
  * Global 401 handling
  * --------------------------------------------
- * Si cualquier endpoint devuelve 401, invocamos el handler (AuthProvider suele hacer logout).
- * Nota:
- * - Mantengo esto en api (fast) como tenías.
- * - Si quieres comportamiento idéntico en apiSlow, se puede duplicar.
  */
 api.interceptors.response.use(
   (r) => r,
   (error: AxiosError) => {
-    if (error.response?.status === 401 && onUnauthorizedHandler) onUnauthorizedHandler();
+    if (error.response?.status === 401 && onUnauthorizedHandler) {
+      onUnauthorizedHandler();
+    }
     return Promise.reject(error);
   }
 );

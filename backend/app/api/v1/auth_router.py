@@ -123,7 +123,7 @@ def login(data: LoginIn, db: Session = Depends(get_db)):
     3. Verifica que la contraseña sea correcta.
     4. Devuelve:
         - access_token (JWT)
-        - token_type ("bearer")
+        - token_type ("Bearer")
         - expires_in (en segundos)
         - datos básicos del usuario (id, email, full_name, role)
     """
@@ -153,7 +153,7 @@ def login(data: LoginIn, db: Session = Depends(get_db)):
     token = create_access_token(str(user.id))
     return {
         "access_token": token,
-        "token_type": "bearer",
+        "token_type": "Bearer",
         "expires_in": ACCESS_TOKEN_EXPIRE_MINUTES * 60,
         "user": {
             "id": user.id,
@@ -180,10 +180,10 @@ def require_user(
 
     Si falla, lanza 401.
     """
-    if not creds or creds.scheme.lower() != "bearer":
+    if not creds or creds.scheme.lower() != "Bearer":
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Falta bearer token",
+            detail="Falta Bearer token",
         )
 
     try:
