@@ -25,7 +25,7 @@ router = APIRouter(
 )
 
 @router.get(
-    "/",
+    "",
     response_model=List[ProveedorRead],
     summary="Listar proveedores",
 )
@@ -51,7 +51,7 @@ def list_proveedores(
     return qry.all()
 
 @router.post(
-    "/",
+    "",
     response_model=ProveedorRead,
     status_code=status.HTTP_201_CREATED,
     summary="Crear proveedor",
@@ -123,7 +123,7 @@ def create_proveedor(
     return obj
 
 @router.put(
-    "/{prov_id}",
+    "{prov_id}",
     response_model=ProveedorRead,
     summary="Actualizar proveedor",
 )
