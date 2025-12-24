@@ -32,6 +32,7 @@ from fastapi import (
 )
 from sqlalchemy.orm import Session
 from sqlalchemy import func, text
+from sqlalchemy.orm import joinedload
 
 from backend.app.db.session import get_db
 from backend.app.db import models
@@ -754,6 +755,28 @@ def listar_gastos_aportables(
         q = q.filter(models.Gasto.activo == activo)
     q = q.order_by(models.Gasto.nombre.asc())
     return q.offset(offset).limit(limit).all()
+
+@router.get("/", response_model=List[GastoSchema])
+def list_todos(
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(require_user),
+):
+    """
+    Lista TODOS los gastos (gestionables) del usuario autenticado.
+    """
+    return (
+        db.query(models.Gasto)
+        .options(
+            joinedload(models.Gasto.proveedor_rel),
+            joinedload(models.Gasto.tipo_rel),
+            joinedload(models.Gasto.segmento),
+            joinedload(models.Gasto.cuenta_rel),
+            joinedload(models.Gasto.user),
+        )
+        .filter(models.Gasto.user_id == current_user.id)
+        .order_by(models.Gasto.fecha.asc())
+        .all()
+    )
 
 
 @router.get(

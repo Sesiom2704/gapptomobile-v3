@@ -102,7 +102,7 @@ export async function createProveedor(
   payload: ProveedorCreateRequest
 ): Promise<Proveedor> {
   try {
-    const resp = await api.post<Proveedor>('/api/v1/proveedores/', payload);
+    const resp = await api.post<Proveedor>('/api/v1/proveedores', payload);
     return resp.data;
   } catch (err) {
     if (axios.isAxiosError(err)) {
@@ -130,7 +130,7 @@ export async function updateProveedor(
   payload: ProveedorUpdateRequest
 ): Promise<Proveedor> {
   try {
-    const resp = await api.put<Proveedor>(`/api/v1/proveedores/${id}/`, payload);
+    const resp = await api.put<Proveedor>(`/api/v1/proveedores${id}/`, payload);
     return resp.data;
   } catch (err) {
     if (axios.isAxiosError(err)) {
@@ -155,7 +155,7 @@ export async function updateProveedor(
  */
 export async function deleteProveedor(id: string): Promise<void> {
   try {
-    await api.delete(`/api/v1/proveedores/${id}/`);
+    await api.delete(`/api/v1/proveedores${id}/`);
   } catch (err) {
     if (axios.isAxiosError(err)) {
       console.error(

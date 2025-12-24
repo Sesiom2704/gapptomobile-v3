@@ -151,6 +151,13 @@ class GastoRead(BaseModel):
     segmento_id: Optional[str] = None
     cuenta_id: Optional[str] = None
 
+    # ✅ Campos “resueltos” para UI
+    proveedor_nombre: Optional[str] = None
+    tipo_nombre: Optional[str] = None
+    segmento_nombre: Optional[str] = None
+    cuenta_anagrama: Optional[str] = None
+    user_nombre: Optional[str] = None
+
     importe: Optional[float] = None
     importe_cuota: Optional[float] = None
     cuotas: Optional[int] = None

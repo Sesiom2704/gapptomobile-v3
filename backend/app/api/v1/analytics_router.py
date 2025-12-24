@@ -1,34 +1,37 @@
+# backend/app/api/v1/analytics_router.py
 """
-backend/app/api/v1/analytics_router.py
+API v1 - ANALYTICS (KPIs, resúmenes y breakdowns por patrimonio)
 
-API v1 - ANALYTICS (v3) para Patrimonios (Propiedades)
+Objetivo:
+- Exponer endpoints para el front mobile (GapptoMobile v3) en:
+    /api/v1/analytics/patrimonios/{patrimonio_id}/resumen
+    /api/v1/analytics/patrimonios/{patrimonio_id}/gastos_breakdown
+    /api/v1/analytics/patrimonios/{patrimonio_id}/ingresos_breakdown
+    /api/v1/analytics/patrimonios/{patrimonio_id}/kpis
 
-Este router aporta endpoints consumidos por:
-- PropiedadesRankingScreen.tsx
-  GET /api/v1/analytics/patrimonios/{id}/kpis?annualize=true&basis=total
+Problema corregido:
+- En la primera versión se sumaba “unitario” (1 cuota) en lugar de calcular meses/ocurrencias:
+    * Préstamos, comunidad, etc. -> se debe multiplicar por ocurrencias del año.
+    * Alquiler -> se deben contar meses (ingresos_cobrados o meses nominales por fechas).
+- Este router aplica lógica similar a v2 (rendimiento_patrimonio.py) para meses inclusivos y recortes por inactivación.
 
-- PropiedadDetalleScreen.tsx
-  GET /api/v1/analytics/patrimonios/{id}/kpis?year=YYYY&basis=total&annualize=true
-  GET /api/v1/analytics/patrimonios/{id}/resumen?year=YYYY
-  GET /api/v1/analytics/patrimonios/{id}/gastos_breakdown?year=YYYY
-  GET /api/v1/analytics/patrimonios/{id}/ingresos_breakdown?year=YYYY
-
-- PropiedadKpisScreen.tsx
-  GET /api/v1/analytics/patrimonios/{id}/kpis?year=YYYY&basis=...&annualize=true&only_kpi_expenses=false
-
-Notas importantes:
-- Este router está diseñado para ser "robusto" ante cambios de modelo:
-  usa getattr(...) y checks para no romper si algún campo no existe.
-- Si tu modelo/BD difiere (nombres de tabla/campos), ajusta SOLO las funciones
-  _query_ingresos() y _query_gastos() y (si aplica) _get_compra_row().
+Criterios:
+- Multi-tenant: todo filtrado por user_id (require_user).
+- “only_kpi_expenses”: en gastos, filtra por Gasto.kpi == True (según tu modelo).
+- “basis”: base de valor para cap_rate / rendimiento_bruto:
+    - total   -> PatrimonioCompra.total_inversion (fallback: max(valor_compra, valor_referencia))
+    - compra  -> valor_compra
+    - referencia -> valor_referencia
+    - max -> max(valor_compra, valor_referencia, total_inversion)
+- “annualize”: si year es el actual, extrapola a 12 meses usando meses_contados.
 """
 
 from __future__ import annotations
 
+from typing import Dict, List, Optional, Tuple
 from datetime import date, datetime
-from typing import Any, Dict, List, Literal, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
@@ -37,19 +40,14 @@ from backend.app.db import models
 from backend.app.api.v1.auth_router import require_user
 
 
-router = APIRouter(
-    prefix="/analytics",
-    tags=["analytics"],
-)
-
-Basis = Literal["total", "compra", "referencia", "max"]
+router = APIRouter(prefix="/analytics", tags=["analytics"])
 
 
-# ============================================================================
-# Pydantic Schemas (respuesta) - adaptados a lo que espera el front
-# ============================================================================
+# =========================================================
+# Pydantic DTOs (respuesta)
+# =========================================================
 
-class ResumenYTDOut(BaseModel):
+class ResumenOut(BaseModel):
     year: int
     ingresos_ytd: float
     gastos_ytd: float
@@ -62,7 +60,7 @@ class BreakdownRowOut(BaseModel):
     tipo: str
     periodicidad: str
     cuota: Optional[float] = None
-    meses: int = 0
+    meses: int
     total: float
 
 
@@ -74,541 +72,608 @@ class BreakdownOut(BaseModel):
 
 
 class KpisOut(BaseModel):
-    # Metadatos
     year: int
     meses_contados: int
 
-    # €/m2 y ratios
-    precio_m2: Optional[float] = None
-    referencia_m2: Optional[float] = None
-    renta_m2_anual: Optional[float] = None
-    inversion_m2: Optional[float] = None
-    rentab_m2_total_pct: Optional[float] = None
+    # Base / agregados
+    basis_used: str
+    valor_base: float
 
-    # KPIs core (los que pintas en Ranking/Detalle)
+    ingresos_anuales: float
+    gastos_operativos_anuales: float
+    noi: float
+
     cap_rate_pct: Optional[float] = None
     rendimiento_bruto_pct: Optional[float] = None
-    noi: Optional[float] = None
 
-    # Otros (compat con tu pantalla)
+    # Extras coherentes con tu pantalla KPIs (si quieres mostrar más)
+    cashflow_anual: float
+    cashflow_mensual: float
+
     dscr: Optional[float] = None
     ocupacion_pct: Optional[float] = None
 
-    # Extras que tu PropiedadKpisScreen usa
-    basis_used: Optional[Basis] = None
-    valor_base: Optional[float] = None
-    ingresos_anuales: Optional[float] = None
-    gastos_operativos_anuales: Optional[float] = None
-    cashflow_anual: Optional[float] = None
-    cashflow_mensual: Optional[float] = None
-    payback_anios: Optional[float] = None
-    deuda_anual: Optional[float] = None
-
-    # Texto info por KPI (para modales)
+    # Mapa de ayudas para el front (PropiedadKpisScreen)
     info: Dict[str, str] = Field(default_factory=dict)
 
 
-# ============================================================================
-# Helpers generales
-# ============================================================================
+# =========================================================
+# Helpers genéricos de fechas y meses
+# =========================================================
 
-def _as_float(x: Any) -> Optional[float]:
-    if x is None:
+def _as_date(d: Optional[date | datetime]) -> Optional[date]:
+    if d is None:
         return None
-    try:
-        v = float(x)
-        if v != v:  # NaN
-            return None
-        return v
-    except Exception:
-        return None
+    if isinstance(d, datetime):
+        return d.date()
+    return d
 
 
-def _safe_date(x: Any) -> Optional[date]:
+def _months_inclusive_between(start: date, end: date) -> int:
     """
-    Convierte a date de forma robusta:
-    - date/datetime => date
-    - string 'YYYY-MM-DD' => date
-    - si no parsea => None
+    Meses inclusivos por calendario entre start y end.
+    Ej:
+      2025-01-01 a 2025-01-31 -> 1
+      2025-01-15 a 2025-03-01 -> 3 (enero, febrero, marzo)
     """
-    if x is None:
-        return None
-    if isinstance(x, date) and not isinstance(x, datetime):
-        return x
-    if isinstance(x, datetime):
-        return x.date()
-    if isinstance(x, str):
-        try:
-            return date.fromisoformat(x[:10])
-        except Exception:
-            return None
-    return None
+    if start > end:
+        return 0
+    return (end.year - start.year) * 12 + (end.month - start.month) + 1
 
 
-def _months_counted_in_year(dates: List[date], year: int) -> int:
+def _year_window(year: int) -> Tuple[date, date]:
+    return date(year, 1, 1), date(year, 12, 31)
+
+
+def _meses_contados_para_year(year: int) -> int:
     """
-    Meses contados:
-    - Si hay fechas: número de meses únicos con datos (1..12)
-    - Si no: hasta mes actual si year == actual; sino 12 (conservador)
+    Para YTD/annualize:
+    - Si year == año actual -> mes actual (1..12)
+    - Si no -> 12
     """
-    filtered = [d for d in dates if d and d.year == year]
-    if filtered:
-        return len({(d.year, d.month) for d in filtered})
     today = date.today()
-    if year == today.year:
-        return max(1, today.month)
-    return 12
+    return today.month if today.year == year else 12
 
 
-def _annualize(value_ytd: float, meses_contados: int, annualize: bool) -> float:
+# =========================================================
+# Helpers periodicidad -> ocurrencias
+# =========================================================
+
+def _norm_periodicidad(p: Optional[str]) -> str:
+    return (p or "").strip().upper()
+
+
+def _step_months_from_periodicidad(p: str) -> Optional[int]:
     """
-    Si annualize=True:
-      anual = ytd * (12 / meses_contados)
-    Si annualize=False:
-      anual = ytd (sin escalar)
+    Devuelve cuántos meses por ocurrencia (step):
+      MENSUAL -> 1
+      BIMESTRAL -> 2
+      TRIMESTRAL -> 3
+      CUATRIMESTRAL -> 4
+      SEMESTRAL -> 6
+      ANUAL -> 12
+      PAGO ÚNICO -> None (especial)
     """
-    if not annualize:
-        return float(value_ytd)
-    m = max(1, int(meses_contados))
-    return float(value_ytd) * (12.0 / float(m))
+    pu = _norm_periodicidad(p)
+
+    # pago único
+    if "PAGO" in pu and ("UNICO" in pu or "ÚNICO" in pu):
+        return None
+
+    if "MENSUAL" in pu:
+        return 1
+    if "BIMEST" in pu:
+        return 2
+    if "TRIMEST" in pu:
+        return 3
+    if "CUATRIM" in pu:
+        return 4
+    if "SEMEST" in pu:
+        return 6
+    if "ANUAL" in pu or "AÑO" in pu:
+        return 12
+
+    # fallback: si no sabemos, asumimos mensual (mejor que 1 unitario)
+    return 1
 
 
-# ============================================================================
-# Acceso a datos (AJUSTA AQUÍ si tus modelos se llaman distinto)
-# ============================================================================
-
-def _assert_patrimonio_owner(db: Session, patrimonio_id: str, user_id: str) -> models.Patrimonio:
-    patr = db.get(models.Patrimonio, patrimonio_id)
-    if not patr or getattr(patr, "user_id", None) != user_id:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Patrimonio no encontrado",
-        )
-    return patr
-
-
-def _get_compra_row(db: Session, patrimonio_id: str) -> Optional[Any]:
+def _occurrences_in_range(start: date, end: date, periodicidad: str) -> int:
     """
-    Recupera fila de compra si existe.
+    Calcula ocurrencias entre start-end, recortadas por año, según periodicidad.
+    - PAGO ÚNICO -> 1 si cae dentro del rango.
+    - Mensual -> meses inclusivos
+    - Trimestral/sem... -> ceil(meses_inclusivos / step)
 
-    En tu patrimonio_router usas:
-      row = db.get(models.PatrimonioCompra, patrimonio_id)  # PK = patrimonio_id
-
-    Lo replicamos aquí.
+    Nota: sin “día exacto” de cargo, se aproxima por calendario (como v2).
     """
+    step = _step_months_from_periodicidad(periodicidad)
+    meses = _months_inclusive_between(start, end)
+    if meses <= 0:
+        return 0
+
+    # Pago único: 1 si existe en rango
+    if step is None:
+        return 1
+
+    # ceil(meses / step)
+    return (meses + step - 1) // step
+
+
+# =========================================================
+# Helpers: Ingresos (meses ocupación / cobros)
+# =========================================================
+
+def _ingreso_start(ing: models.Ingreso) -> Optional[date]:
+    """
+    Priorizamos fecha_inicio si existe.
+    Si no, usamos createon como fallback.
+    """
+    if getattr(ing, "fecha_inicio", None) is not None:
+        return _as_date(ing.fecha_inicio)
+    return _as_date(getattr(ing, "createon", None))
+
+
+def _ingreso_inactivated_on(ing: models.Ingreso) -> Optional[date]:
+    return _as_date(getattr(ing, "inactivatedon", None))
+
+
+def _calc_meses_ingreso_en_year(ing: models.Ingreso, year: int) -> int:
+    """
+    Lógica inspirada en v2:
+    - Si activo: tramo hasta 31/12 (recortado por inicio), con opción de cap por ingresos_cobrados.
+    - Si inactivo: tramo hasta inactivatedon (si está en el año).
+    - Cap total a 12.
+    """
+    jan1, dec31 = _year_window(year)
+    start_any = _ingreso_start(ing)
+    if start_any is None:
+        return 0
+
+    # recorte al año
+    start = start_any if start_any.year >= year else jan1
+    if start < jan1:
+        start = jan1
+    if start > dec31:
+        return 0
+
+    activo = bool(getattr(ing, "activo", True))
+    inact = _ingreso_inactivated_on(ing)
+
+    cobrados = getattr(ing, "ingresos_cobrados", None)
     try:
-        return db.get(models.PatrimonioCompra, patrimonio_id)
+        cobrados_int = int(cobrados) if cobrados is not None else None
     except Exception:
-        return None
+        cobrados_int = None
 
-
-def _query_ingresos(db: Session, patrimonio_id: str, year: int) -> List[Any]:
-    """
-    Recupera ingresos asociados a un patrimonio.
-
-    Según tu front, Ingreso tiene:
-      referencia_vivienda_id, importe, fecha_inicio o createon, periodicidad, activo, kpi, cobrado, etc.
-
-    Ajusta el nombre del modelo si tu SQLAlchemy model se llama distinto.
-    """
-    if not hasattr(models, "Ingreso"):
-        return []
-
-    Ingreso = models.Ingreso  # type: ignore
-
-    q = db.query(Ingreso)
-
-    # vínculo a patrimonio: referencia_vivienda_id
-    if hasattr(Ingreso, "referencia_vivienda_id"):
-        q = q.filter(getattr(Ingreso, "referencia_vivienda_id") == patrimonio_id)
-    elif hasattr(Ingreso, "patrimonio_id"):
-        q = q.filter(getattr(Ingreso, "patrimonio_id") == patrimonio_id)
+    if activo:
+        end = dec31
+        meses_nominal = _months_inclusive_between(start, end)
+        if cobrados_int is not None and cobrados_int >= 0:
+            meses = min(meses_nominal, cobrados_int)
+        else:
+            meses = meses_nominal
     else:
-        return []
+        # si inactivó antes del año, no cuenta
+        if inact is not None and inact < jan1:
+            return 0
+        end = inact if (inact is not None and inact <= dec31) else dec31
+        meses = _months_inclusive_between(start, end)
 
-    # activo
-    if hasattr(Ingreso, "activo"):
-        q = q.filter(getattr(Ingreso, "activo") != False)  # noqa: E712
-
-    rows = q.all()
-
-    # filtrar por año en python para robustez (por si el campo fecha no existe en DB)
-    out: List[Any] = []
-    for r in rows:
-        d = _safe_date(getattr(r, "fecha_inicio", None)) or _safe_date(getattr(r, "createon", None))
-        if d and d.year == year:
-            out.append(r)
-    return out
+    return max(0, min(12, meses))
 
 
-def _query_gastos(db: Session, patrimonio_id: str, year: int) -> List[Any]:
+# =========================================================
+# Helpers: Gastos (ocurrencias en el año)
+# =========================================================
+
+def _gasto_start(g: models.Gasto) -> Optional[date]:
     """
-    Recupera gastos asociados a un patrimonio.
-
-    Ajusta el nombre del modelo si tu SQLAlchemy model se llama distinto.
+    En tu modelo Gasto hay `fecha` (Date). La usaremos como inicio.
+    Si no viene (caso raro), fallback a createon.
     """
-    if not hasattr(models, "Gasto"):
-        return []
+    if getattr(g, "fecha", None) is not None:
+        return _as_date(g.fecha)
+    return _as_date(getattr(g, "createon", None))
 
-    Gasto = models.Gasto  # type: ignore
-    q = db.query(Gasto)
 
-    if hasattr(Gasto, "referencia_vivienda_id"):
-        q = q.filter(getattr(Gasto, "referencia_vivienda_id") == patrimonio_id)
-    elif hasattr(Gasto, "patrimonio_id"):
-        q = q.filter(getattr(Gasto, "patrimonio_id") == patrimonio_id)
+def _gasto_inactivated_on(g: models.Gasto) -> Optional[date]:
+    return _as_date(getattr(g, "inactivatedon", None))
+
+
+def _calc_ocurrencias_gasto_en_year(g: models.Gasto, year: int) -> int:
+    """
+    - Si activo: ocurrencias desde fecha hasta 31/12 (recortado al año).
+    - Si inactivo: hasta inactivatedon si cae dentro del año.
+    - Para gastos puntuales (PAGO ÚNICO), 1 si cae dentro del año.
+    """
+    jan1, dec31 = _year_window(year)
+    start_any = _gasto_start(g)
+    if start_any is None:
+        return 0
+
+    start = start_any if start_any.year >= year else jan1
+    if start < jan1:
+        start = jan1
+    if start > dec31:
+        return 0
+
+    activo = bool(getattr(g, "activo", True))
+    inact = _gasto_inactivated_on(g)
+
+    if activo:
+        end = dec31
     else:
-        return []
+        if inact is not None and inact < jan1:
+            return 0
+        end = inact if (inact is not None and inact <= dec31) else dec31
 
-    if hasattr(Gasto, "activo"):
-        q = q.filter(getattr(Gasto, "activo") != False)  # noqa: E712
-
-    rows = q.all()
-
-    out: List[Any] = []
-    for r in rows:
-        d = _safe_date(getattr(r, "fecha", None)) or _safe_date(getattr(r, "fecha_inicio", None)) or _safe_date(getattr(r, "createon", None))
-        if d and d.year == year:
-            out.append(r)
-    return out
+    return _occurrences_in_range(start, end, getattr(g, "periodicidad", "") or "")
 
 
-# ============================================================================
-# Cálculos (YTD, breakdown, KPI)
-# ============================================================================
-
-def _sum_importe(rows: List[Any]) -> float:
-    total = 0.0
-    for r in rows:
-        total += float(_as_float(getattr(r, "importe", None)) or 0.0)
-    return total
-
-
-def _dates_from_rows(rows: List[Any]) -> List[date]:
-    dates: List[date] = []
-    for r in rows:
-        d = (
-            _safe_date(getattr(r, "fecha_inicio", None))
-            or _safe_date(getattr(r, "fecha", None))
-            or _safe_date(getattr(r, "createon", None))
-        )
-        if d:
-            dates.append(d)
-    return dates
-
-
-def _group_breakdown(rows: List[Any]) -> List[BreakdownRowOut]:
+def _gasto_cuota_base(g: models.Gasto) -> float:
     """
-    Agrupa por (tipo, periodicidad). Si tu modelo tiene:
-      - tipo_nombre o tipo_id
-      - periodicidad
-    El front espera:
-      tipo (texto), periodicidad (texto), cuota, meses, total
+    Regla práctica:
+    - Si existe importe_cuota -> usarlo (préstamos/cuotas).
+    - Si no, usar importe.
     """
-    buckets: Dict[str, Dict[str, Any]] = {}
+    ic = getattr(g, "importe_cuota", None)
+    imp = getattr(g, "importe", None)
 
-    for r in rows:
-        tipo = (
-            (getattr(r, "tipo_nombre", None) or "").strip()
-            or (getattr(r, "tipo_id", None) or "").strip()
-            or (getattr(r, "tipo", None) or "").strip()
-            or "Sin tipo"
-        )
-        periodicidad = (getattr(r, "periodicidad", None) or "").strip() or "—"
-        key = f"{tipo}||{periodicidad}"
-
-        imp = float(_as_float(getattr(r, "importe", None)) or 0.0)
-
-        if key not in buckets:
-            buckets[key] = {
-                "tipo": tipo,
-                "periodicidad": periodicidad,
-                "count": 0,
-                "total": 0.0,
-            }
-
-        buckets[key]["count"] += 1
-        buckets[key]["total"] += imp
-
-    out: List[BreakdownRowOut] = []
-    for b in buckets.values():
-        meses = int(b["count"])
-        total = float(b["total"])
-        cuota = (total / meses) if meses > 0 else None
-
-        out.append(
-            BreakdownRowOut(
-                tipo=str(b["tipo"]),
-                periodicidad=str(b["periodicidad"]),
-                cuota=float(cuota) if cuota is not None else None,
-                meses=meses,
-                total=total,
-            )
-        )
-
-    # Orden: mayor total primero
-    out.sort(key=lambda x: x.total, reverse=True)
-    return out
+    if ic is not None:
+        try:
+            return float(ic)
+        except Exception:
+            pass
+    try:
+        return float(imp or 0.0)
+    except Exception:
+        return 0.0
 
 
-def _compute_base_value(
-    compra_row: Optional[Any],
-    basis: Basis,
-) -> Optional[float]:
-    """
-    Valor base para ratios:
-    - total: total_inversion si existe; si no, valor_compra
-    - compra: valor_compra
-    - referencia: valor_referencia si existe; si no, valor_compra
-    - max: max(total_inversion, valor_compra, valor_referencia)
-    """
-    if compra_row is None:
-        return None
-
-    valor_compra = _as_float(getattr(compra_row, "valor_compra", None))
-    valor_ref = _as_float(getattr(compra_row, "valor_referencia", None))
-    total_inv = _as_float(getattr(compra_row, "total_inversion", None))
-
-    if basis == "compra":
-        return valor_compra
-    if basis == "referencia":
-        return valor_ref or valor_compra
-    if basis == "total":
-        return total_inv or valor_compra
-    # max
-    candidates = [v for v in [total_inv, valor_compra, valor_ref] if v is not None and v > 0]
-    return max(candidates) if candidates else None
+def _ingreso_cuota_base(ing: models.Ingreso) -> float:
+    try:
+        return float(getattr(ing, "importe", 0.0) or 0.0)
+    except Exception:
+        return 0.0
 
 
-def _kpi_info_texts() -> Dict[str, str]:
-    """
-    Textos informativos para tu PropiedadKpisScreen (kpi._info[key]).
-    Si quieres, puedes ampliar este mapping con más claves.
-    """
-    return {
-        "valor_base": "Valor base usado como denominador (total inversión / compra / referencia / max).",
-        "ingresos_anuales": "Ingresos anuales estimados. Si 'annualize' está activo, se escala desde YTD.",
-        "gastos_operativos_anuales": "Gastos operativos anuales estimados. Si 'annualize' está activo, se escala desde YTD.",
-        "noi": "NOI (Net Operating Income) = Ingresos anuales − Gastos operativos anuales.",
-        "cap_rate_pct": "Cap rate = (NOI / Valor base) × 100.",
-        "rendimiento_bruto_pct": "Rendimiento bruto = (Ingresos anuales / Valor base) × 100.",
-        "ocupacion_pct": "Ocupación = (Meses con ingresos / Meses contados) × 100 (aprox.).",
-        "dscr": "DSCR = NOI / Deuda anual (si existe deuda).",
-        "payback_anios": "Payback = Valor base / Cash-flow anual (aprox.).",
-    }
+# =========================================================
+# Helpers: valor base para KPIs
+# =========================================================
 
-
-# ============================================================================
-# Endpoints
-# ============================================================================
-
-@router.get(
-    "/patrimonios/{patrimonio_id}/resumen",
-    response_model=ResumenYTDOut,
-    summary="Resumen YTD de una propiedad (ingresos, gastos, cashflow, promedio mensual)",
-)
-def resumen_patrimonio(
-    patrimonio_id: str,
-    year: int = Query(default_factory=lambda: date.today().year),
-    db: Session = Depends(get_db),
-    current_user: models.User = Depends(require_user),
-) -> ResumenYTDOut:
-    _assert_patrimonio_owner(db, patrimonio_id, current_user.id)
-
-    ingresos = _query_ingresos(db, patrimonio_id, year)
-    gastos = _query_gastos(db, patrimonio_id, year)
-
-    ingresos_ytd = _sum_importe(ingresos)
-    gastos_ytd = _sum_importe(gastos)
-    cashflow_ytd = ingresos_ytd - gastos_ytd
-
-    dates = _dates_from_rows(ingresos) + _dates_from_rows(gastos)
-    meses_contados = _months_counted_in_year(dates, year)
-
-    promedio_mensual = cashflow_ytd / float(max(1, meses_contados))
-
-    return ResumenYTDOut(
-        year=year,
-        ingresos_ytd=float(ingresos_ytd),
-        gastos_ytd=float(gastos_ytd),
-        cashflow_ytd=float(cashflow_ytd),
-        promedio_mensual=float(promedio_mensual),
-        meses_contados=int(meses_contados),
+def _get_compra(db: Session, patrimonio_id: str) -> Optional[models.PatrimonioCompra]:
+    return (
+        db.query(models.PatrimonioCompra)
+        .filter(models.PatrimonioCompra.patrimonio_id == patrimonio_id)
+        .first()
     )
 
 
-@router.get(
-    "/patrimonios/{patrimonio_id}/gastos_breakdown",
-    response_model=BreakdownOut,
-    summary="Breakdown de gastos YTD por tipo/periodicidad",
-)
-def gastos_breakdown(
-    patrimonio_id: str,
-    year: int = Query(default_factory=lambda: date.today().year),
-    db: Session = Depends(get_db),
-    current_user: models.User = Depends(require_user),
-) -> BreakdownOut:
-    _assert_patrimonio_owner(db, patrimonio_id, current_user.id)
+def _valor_base_from_compra(compra: Optional[models.PatrimonioCompra], basis: str) -> float:
+    """
+    basis: total | compra | referencia | max
+    """
+    if compra is None:
+        return 0.0
 
-    gastos = _query_gastos(db, patrimonio_id, year)
-    rows = _group_breakdown(gastos)
-    total_ytd = _sum_importe(gastos)
+    vc = float(getattr(compra, "valor_compra", 0.0) or 0.0)
+    vr = float(getattr(compra, "valor_referencia", 0.0) or 0.0)
+    ti = float(getattr(compra, "total_inversion", 0.0) or 0.0)
 
-    dates = _dates_from_rows(gastos)
-    meses_contados = _months_counted_in_year(dates, year)
+    b = (basis or "total").lower()
 
-    return BreakdownOut(
-        year=year,
-        meses_contados=int(meses_contados),
-        rows=rows,
-        total_ytd=float(total_ytd),
-    )
+    if b == "compra":
+        return vc
+    if b == "referencia":
+        return vr
+    if b == "max":
+        return max(vc, vr, ti)
+    # total (default): si hay total_inversion, usarlo; si no, max(vc, vr)
+    return ti if ti > 0 else max(vc, vr)
 
 
-@router.get(
-    "/patrimonios/{patrimonio_id}/ingresos_breakdown",
-    response_model=BreakdownOut,
-    summary="Breakdown de ingresos YTD por tipo/periodicidad",
-)
+# =========================================================
+# ENDPOINTS
+# =========================================================
+
+@router.get("/patrimonios/{patrimonio_id}/ingresos_breakdown", response_model=BreakdownOut)
 def ingresos_breakdown(
     patrimonio_id: str,
-    year: int = Query(default_factory=lambda: date.today().year),
+    year: int = Query(...),
     db: Session = Depends(get_db),
     current_user: models.User = Depends(require_user),
-) -> BreakdownOut:
-    _assert_patrimonio_owner(db, patrimonio_id, current_user.id)
+):
+    """
+    Breakdown de ingresos por patrimonio.
+    - Se filtra por user_id + referencia_vivienda_id
+    - Se calcula meses/ocurrencias correctamente:
+        * Para ingresos típicos tipo alquiler: meses = _calc_meses_ingreso_en_year (usa ingresos_cobrados)
+        * Total = importe * meses (para mensual)
+      Nota: si periodicidad no es mensual, usamos ocurrencias por periodicidad.
+    """
+    # Verificar que el patrimonio pertenece al usuario
+    patr = db.get(models.Patrimonio, patrimonio_id)
+    if not patr or patr.user_id != current_user.id:
+        raise HTTPException(status_code=404, detail="Patrimonio no encontrado")
 
-    ingresos = _query_ingresos(db, patrimonio_id, year)
-    rows = _group_breakdown(ingresos)
-    total_ytd = _sum_importe(ingresos)
+    meses_contados = _meses_contados_para_year(year)
+    jan1, dec31 = _year_window(year)
 
-    dates = _dates_from_rows(ingresos)
-    meses_contados = _months_counted_in_year(dates, year)
+    q = (
+        db.query(models.Ingreso)
+        .filter(
+            models.Ingreso.user_id == current_user.id,
+            models.Ingreso.referencia_vivienda_id == patrimonio_id,
+            models.Ingreso.kpi == True,  # ingresos KPI por defecto en tu modelo
+        )
+    )
+    rows = q.all()
+
+    out_rows: List[BreakdownRowOut] = []
+    total_ytd = 0.0
+
+    for ing in rows:
+        per = getattr(ing, "periodicidad", "") or ""
+        per_u = _norm_periodicidad(per)
+
+        cuota = _ingreso_cuota_base(ing)
+
+        # Si mensual (o desconocido), usamos meses estilo v2 (ingresos_cobrados / fechas)
+        if _step_months_from_periodicidad(per_u) == 1:
+            meses = _calc_meses_ingreso_en_year(ing, year)
+        else:
+            # Otras periodicidades: ocurrencias en rango (recortado por fechas)
+            start = _ingreso_start(ing)
+            if start is None:
+                meses = 0
+            else:
+                start_r = start if start.year >= year else jan1
+                if start_r < jan1:
+                    start_r = jan1
+                end_r = dec31
+                if not bool(getattr(ing, "activo", True)):
+                    inact = _ingreso_inactivated_on(ing)
+                    if inact and inact < jan1:
+                        meses = 0
+                    else:
+                        end_r = inact if (inact and inact <= dec31) else dec31
+                occ = _occurrences_in_range(start_r, end_r, per_u)
+                meses = occ  # aquí "meses" representa "ocurrencias" (campo del front)
+
+        total = float(cuota) * float(meses)
+
+        tipo = (getattr(ing, "concepto", None) or "Ingreso").strip() if getattr(ing, "concepto", None) else "Ingreso"
+
+        out_rows.append(
+            BreakdownRowOut(
+                tipo=tipo,
+                periodicidad=per_u or "—",
+                cuota=cuota,
+                meses=int(meses),
+                total=float(round(total, 2)),
+            )
+        )
+        total_ytd += total
 
     return BreakdownOut(
         year=year,
-        meses_contados=int(meses_contados),
-        rows=rows,
-        total_ytd=float(total_ytd),
+        meses_contados=meses_contados,
+        rows=out_rows,
+        total_ytd=float(round(total_ytd, 2)),
     )
 
 
-@router.get(
-    "/patrimonios/{patrimonio_id}/kpis",
-    response_model=KpisOut,
-    summary="KPIs de una propiedad (cap rate, rendimiento bruto, noi, etc.)",
-)
-def kpis_patrimonio(
+@router.get("/patrimonios/{patrimonio_id}/gastos_breakdown", response_model=BreakdownOut)
+def gastos_breakdown(
     patrimonio_id: str,
-    year: int = Query(default_factory=lambda: date.today().year),
-    basis: Basis = Query("total", description="total|compra|referencia|max"),
-    annualize: bool = Query(True, description="Si true, escala YTD a anual con meses_contados"),
-    only_kpi_expenses: bool = Query(False, description="Si true, filtra gastos donde kpi=True (si existe campo)"),
+    year: int = Query(...),
+    only_kpi: bool = Query(False, alias="only_kpi_expenses"),
     db: Session = Depends(get_db),
     current_user: models.User = Depends(require_user),
-) -> KpisOut:
-    patr = _assert_patrimonio_owner(db, patrimonio_id, current_user.id)
+):
+    """
+    Breakdown de gastos por patrimonio.
+    - Filtra por user_id + referencia_vivienda_id
+    - Si only_kpi_expenses=True => solo Gasto.kpi == True
+    - Calcula ocurrencias según periodicidad + recortes por inactivatedon
+    - Total = cuota_base * ocurrencias
+    """
+    patr = db.get(models.Patrimonio, patrimonio_id)
+    if not patr or patr.user_id != current_user.id:
+        raise HTTPException(status_code=404, detail="Patrimonio no encontrado")
 
-    # Datos base: ingresos/gastos del año
-    ingresos_rows = _query_ingresos(db, patrimonio_id, year)
-    gastos_rows = _query_gastos(db, patrimonio_id, year)
+    meses_contados = _meses_contados_para_year(year)
 
-    # Filtro opcional: solo gastos KPI (si el modelo tiene el campo)
-    if only_kpi_expenses and gastos_rows:
-        filtered = []
-        for g in gastos_rows:
-            if hasattr(g, "kpi"):
-                if bool(getattr(g, "kpi", False)):
-                    filtered.append(g)
-            else:
-                # Si no existe campo kpi, no filtramos (robusto)
-                filtered.append(g)
-        gastos_rows = filtered
+    q = (
+        db.query(models.Gasto)
+        .filter(
+            models.Gasto.user_id == current_user.id,
+            models.Gasto.referencia_vivienda_id == patrimonio_id,
+        )
+    )
+    if only_kpi:
+        q = q.filter(models.Gasto.kpi == True)
 
-    ingresos_ytd = _sum_importe(ingresos_rows)
-    gastos_ytd = _sum_importe(gastos_rows)
+    rows = q.all()
 
-    # Meses contados: por datos reales (si no hay, fallback)
-    dates = _dates_from_rows(ingresos_rows) + _dates_from_rows(gastos_rows)
-    meses_contados = _months_counted_in_year(dates, year)
+    out_rows: List[BreakdownRowOut] = []
+    total_ytd = 0.0
 
-    # Escalado anual
-    ingresos_anuales = _annualize(ingresos_ytd, meses_contados, annualize)
-    gastos_anuales = _annualize(gastos_ytd, meses_contados, annualize)
+    for g in rows:
+        per = getattr(g, "periodicidad", "") or ""
+        per_u = _norm_periodicidad(per)
+
+        cuota = _gasto_cuota_base(g)
+        occ = _calc_ocurrencias_gasto_en_year(g, year)
+
+        total = float(cuota) * float(occ)
+
+        # tipo visible: usamos "nombre" si existe, si no "rama" o "Gasto"
+        tipo = (getattr(g, "nombre", None) or getattr(g, "rama", None) or "Gasto").strip()
+
+        out_rows.append(
+            BreakdownRowOut(
+                tipo=tipo,
+                periodicidad=per_u or "—",
+                cuota=cuota,
+                meses=int(occ),
+                total=float(round(total, 2)),
+            )
+        )
+        total_ytd += total
+
+    return BreakdownOut(
+        year=year,
+        meses_contados=meses_contados,
+        rows=out_rows,
+        total_ytd=float(round(total_ytd, 2)),
+    )
+
+
+@router.get("/patrimonios/{patrimonio_id}/resumen", response_model=ResumenOut)
+def resumen_patrimonio(
+    patrimonio_id: str,
+    year: int = Query(...),
+    only_kpi_expenses: bool = Query(False),
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(require_user),
+):
+    """
+    Resumen YTD:
+    - ingresos_ytd: suma de ingresos_breakdown.total_ytd
+    - gastos_ytd: suma de gastos_breakdown.total_ytd (opcional only_kpi_expenses)
+    - cashflow_ytd = ingresos_ytd - gastos_ytd
+    - promedio_mensual = cashflow_ytd / meses_contados (si meses_contados > 0)
+    """
+    patr = db.get(models.Patrimonio, patrimonio_id)
+    if not patr or patr.user_id != current_user.id:
+        raise HTTPException(status_code=404, detail="Patrimonio no encontrado")
+
+    meses_contados = _meses_contados_para_year(year)
+
+    ing = ingresos_breakdown(patrimonio_id, year, db, current_user)
+    gas = gastos_breakdown(patrimonio_id, year, only_kpi_expenses, db, current_user)
+
+    ingresos_ytd = float(ing.total_ytd or 0.0)
+    gastos_ytd = float(gas.total_ytd or 0.0)
+
+    cashflow = ingresos_ytd - gastos_ytd
+    promedio = cashflow / meses_contados if meses_contados > 0 else cashflow
+
+    return ResumenOut(
+        year=year,
+        ingresos_ytd=float(round(ingresos_ytd, 2)),
+        gastos_ytd=float(round(gastos_ytd, 2)),
+        cashflow_ytd=float(round(cashflow, 2)),
+        promedio_mensual=float(round(promedio, 2)),
+        meses_contados=int(meses_contados),
+    )
+
+
+@router.get("/patrimonios/{patrimonio_id}/kpis", response_model=KpisOut)
+def kpis_patrimonio(
+    patrimonio_id: str,
+    year: int = Query(...),
+    basis: str = Query("total"),
+    annualize: bool = Query(True),
+    only_kpi_expenses: bool = Query(False),
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(require_user),
+):
+    """
+    KPIs de patrimonio.
+
+    Inputs:
+    - year
+    - basis: total|compra|referencia|max
+    - annualize:
+        * si year == actual: extrapola a 12 meses usando meses_contados
+        * si year != actual: ya se considera anual (12)
+    - only_kpi_expenses: si True, gastos operativos usa solo Gasto.kpi == True
+
+    Output principal:
+    - ingresos_anuales, gastos_operativos_anuales, noi
+    - cap_rate_pct, rendimiento_bruto_pct
+    - cashflow_anual, cashflow_mensual
+    - ocupacion_pct: aproximación desde meses de ingresos (max 12)
+    """
+    patr = db.get(models.Patrimonio, patrimonio_id)
+    if not patr or patr.user_id != current_user.id:
+        raise HTTPException(status_code=404, detail="Patrimonio no encontrado")
+
+    meses_contados = _meses_contados_para_year(year)
+
+    # Totales YTD calculados correctamente (con meses/ocurrencias)
+    ing_bd = ingresos_breakdown(patrimonio_id, year, db, current_user)
+    gas_bd = gastos_breakdown(patrimonio_id, year, only_kpi_expenses, db, current_user)
+
+    ingresos_ytd = float(ing_bd.total_ytd or 0.0)
+    gastos_ytd = float(gas_bd.total_ytd or 0.0)
+
+    # Annualize
+    factor = 1.0
+    if annualize:
+        if meses_contados > 0:
+            factor = 12.0 / float(meses_contados)
+        else:
+            factor = 1.0
+
+    ingresos_anuales = ingresos_ytd * factor
+    gastos_anuales = gastos_ytd * factor
     noi = ingresos_anuales - gastos_anuales
 
-    # Compra / base value para ratios
-    compra_row = _get_compra_row(db, patrimonio_id)
-    valor_base = _compute_base_value(compra_row, basis)
+    # Ocupación: estimación a partir de “meses” máximos observados en breakdown de ingresos
+    # - En mensual, meses representa meses de cobro; en otras periodicidades, es ocurrencias.
+    #   Para ocupación, nos interesa el máximo de meses (cap 12) de ingresos mensuales.
+    max_meses = 0
+    for r in ing_bd.rows:
+        # Si es mensual (step=1) usamos el campo meses como meses reales.
+        if _step_months_from_periodicidad(r.periodicidad) == 1:
+            max_meses = max(max_meses, int(r.meses or 0))
+    max_meses = min(12, max_meses)
+    ocupacion_pct = (float(max_meses) / 12.0) * 100.0 if max_meses > 0 else 0.0
 
-    cap_rate_pct: Optional[float] = None
-    rend_bruto_pct: Optional[float] = None
+    # Valor base
+    compra = _get_compra(db, patrimonio_id)
+    valor_base = _valor_base_from_compra(compra, basis)
+    basis_used = (basis or "total").lower()
 
-    if valor_base and valor_base > 0:
-        cap_rate_pct = (noi / valor_base) * 100.0
-        rend_bruto_pct = (ingresos_anuales / valor_base) * 100.0
+    cap_rate = (noi / valor_base) * 100.0 if valor_base > 0 else None
+    rend_bruto = (ingresos_anuales / valor_base) * 100.0 if valor_base > 0 else None
 
-    # Ocupación (aprox): meses con ingresos / meses contados
-    meses_con_ingreso = len({(d.year, d.month) for d in _dates_from_rows(ingresos_rows) if d.year == year})
-    ocupacion_pct: Optional[float] = None
-    if meses_contados > 0:
-        ocupacion_pct = (float(meses_con_ingreso) / float(meses_contados)) * 100.0
-
-    # €/m2 y métricas por m2
-    sup_util = _as_float(getattr(patr, "superficie_m2", None))  # tu front llama "Útil (m²)"
-    valor_compra = _as_float(getattr(compra_row, "valor_compra", None)) if compra_row else None
-    valor_ref = _as_float(getattr(compra_row, "valor_referencia", None)) if compra_row else None
-    total_inv = _as_float(getattr(compra_row, "total_inversion", None)) if compra_row else None
-
-    precio_m2 = (valor_compra / sup_util) if (valor_compra and sup_util and sup_util > 0) else None
-    referencia_m2 = (valor_ref / sup_util) if (valor_ref and sup_util and sup_util > 0) else None
-    inversion_m2 = (total_inv / sup_util) if (total_inv and sup_util and sup_util > 0) else None
-    renta_m2_anual = (ingresos_anuales / sup_util) if (sup_util and sup_util > 0) else None
-
-    rentab_m2_total_pct: Optional[float] = None
-    if renta_m2_anual is not None and inversion_m2 is not None and inversion_m2 > 0:
-        rentab_m2_total_pct = (renta_m2_anual / inversion_m2) * 100.0
-
-    # Cashflow: por ahora aproximamos cashflow = NOI (hasta integrar deuda/hipoteca)
-    cashflow_anual = noi
+    cashflow_anual = noi  # en este modelo simple: NOI = cashflow operativo (sin financiación separada)
     cashflow_mensual = cashflow_anual / 12.0
 
-    # Payback: valor_base / cashflow_anual (si cashflow positivo)
-    payback_anios: Optional[float] = None
-    if valor_base and cashflow_anual and cashflow_anual > 0:
-        payback_anios = valor_base / cashflow_anual
-
-    # Deuda/DSCR: placeholder robusto (si tu backend tiene préstamos, aquí lo integrarías)
-    deuda_anual = None
-    dscr = None
-
-    info = _kpi_info_texts()
+    info: Dict[str, str] = {
+        "valor_base": "Base usada para ratios: total_inversion (default) o compra/referencia según 'basis'.",
+        "ingresos_anuales": "Suma anualizada de ingresos (importe * meses/ocurrencias).",
+        "gastos_operativos_anuales": "Suma anualizada de gastos operativos (cuota_base * ocurrencias).",
+        "noi": "NOI = ingresos anuales − gastos operativos anuales.",
+        "cap_rate_pct": "Cap rate = (NOI / valor_base) × 100.",
+        "rendimiento_bruto_pct": "Rend. bruto = (ingresos anuales / valor_base) × 100.",
+        "ocupacion_pct": "Ocupación aproximada = meses cobrados / 12 × 100 (basado en ingresos mensuales).",
+        "meses_contados": "Si el año es el actual, meses_contados = mes actual. Si no, 12.",
+    }
 
     return KpisOut(
         year=year,
         meses_contados=int(meses_contados),
 
-        precio_m2=float(precio_m2) if precio_m2 is not None else None,
-        referencia_m2=float(referencia_m2) if referencia_m2 is not None else None,
-        renta_m2_anual=float(renta_m2_anual) if renta_m2_anual is not None else None,
-        inversion_m2=float(inversion_m2) if inversion_m2 is not None else None,
-        rentab_m2_total_pct=float(rentab_m2_total_pct) if rentab_m2_total_pct is not None else None,
+        basis_used=basis_used,
+        valor_base=float(round(valor_base, 2)),
 
-        cap_rate_pct=float(cap_rate_pct) if cap_rate_pct is not None else None,
-        rendimiento_bruto_pct=float(rend_bruto_pct) if rend_bruto_pct is not None else None,
-        noi=float(noi) if noi is not None else None,
+        ingresos_anuales=float(round(ingresos_anuales, 2)),
+        gastos_operativos_anuales=float(round(gastos_anuales, 2)),
+        noi=float(round(noi, 2)),
 
-        dscr=dscr,
-        ocupacion_pct=float(ocupacion_pct) if ocupacion_pct is not None else None,
+        cap_rate_pct=(float(round(cap_rate, 2)) if cap_rate is not None else None),
+        rendimiento_bruto_pct=(float(round(rend_bruto, 2)) if rend_bruto is not None else None),
 
-        basis_used=basis,
-        valor_base=float(valor_base) if valor_base is not None else None,
-        ingresos_anuales=float(ingresos_anuales),
-        gastos_operativos_anuales=float(gastos_anuales),
-        cashflow_anual=float(cashflow_anual),
-        cashflow_mensual=float(cashflow_mensual),
-        payback_anios=float(payback_anios) if payback_anios is not None else None,
-        deuda_anual=deuda_anual,
+        cashflow_anual=float(round(cashflow_anual, 2)),
+        cashflow_mensual=float(round(cashflow_mensual, 2)),
+
+        dscr=None,  # aquí no lo calculamos porque no tenemos “deuda anual” aislada en estos modelos
+        ocupacion_pct=float(round(ocupacion_pct, 1)),
 
         info=info,
     )

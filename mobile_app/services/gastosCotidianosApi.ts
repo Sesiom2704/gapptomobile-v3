@@ -267,13 +267,28 @@ function normalizarPayloadGastoCotidiano(payload: CrearGastoCotidianoPayload) {
       throw new Error("Modo V3: 'cantidad' inválida.");
     }
 
+    // ✅ Regla de negocio: importe = importe_total / cantidad
+    const importeParte = importeTotalNum / cantidadEfectiva;
+
+    // ✅ Regla de pagado (quién paga):
+    // 1=Pagado por mí -> pagado=true
+    // 2=Invitado      -> pagado=false
+    // 3=A pachas       -> pagado=true
+    // 4=Entre varios   -> pagado=true
+    const pagadoCalc = tipoPago !== 2;
+
     return {
       ...baseBody,
       tipo_pago: tipoPago,
       importe_total: importeTotalNum,
       cantidad: cantidadEfectiva,
-      // Nota: NO mandamos importe/pagado en V3.
+
+      // ✅ Compatibilidad con backend/schema actual:
+      // Aunque en V3 "conceptualmente" se derive, el backend hoy lo exige y además lo usa para ajustar contenedor/liquidez.
+      importe: importeParte,
+      pagado: pagadoCalc,
     };
+
   }
 
   // -------------------------
@@ -283,11 +298,11 @@ function normalizarPayloadGastoCotidiano(payload: CrearGastoCotidianoPayload) {
   const safeImporte = importeNum ?? 0;
   const importeVal = Number.isNaN(safeImporte) ? 0 : safeImporte;
 
-  return {
-    ...baseBody,
-    importe: importeVal,
-    pagado: !!payload.pagado,
-  };
+    return {
+      ...baseBody,
+      importe: importeVal,
+      pagado: !!payload.pagado,
+    };
 }
 
 // ========================

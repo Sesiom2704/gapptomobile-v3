@@ -19,7 +19,7 @@ import {
 // ========================
 const ENDPOINT_GASTOS_PENDIENTES = '/api/v1/gastos/pendientes';
 const ENDPOINT_GASTOS_ACTIVOS    = '/api/v1/gastos/activos';
-const ENDPOINT_GASTOS_TODOS      = '/api/v1/gastos';
+const ENDPOINT_GASTOS_TODOS      = '/api/v1/gastos/';
 
 // ========================
 // Tipos básicos

@@ -456,6 +456,27 @@ class Gasto(Base):
     def user_nombre(self) -> str | None:
         # Ajusta "nombre" al campo real de tu modelo User
         return self.user.full_name if self.user else None
+    @property
+
+    def proveedor_nombre(self) -> str | None:
+        return self.proveedor_rel.nombre if self.proveedor_rel else None
+
+    @property
+    def tipo_nombre(self) -> str | None:
+        return self.tipo_rel.nombre if self.tipo_rel else None
+
+    @property
+    def segmento_nombre(self) -> str | None:
+        # relación: segmento = relationship("TipoSegmentoGasto", ...)
+        return self.segmento.nombre if self.segmento else None
+
+    @property
+    def cuenta_anagrama(self) -> str | None:
+        # Ajusta el campo si tu CuentaBancaria no se llama "anagrama"
+        if not self.cuenta_rel:
+            return None
+        return getattr(self.cuenta_rel, "anagrama", None) or getattr(self.cuenta_rel, "nombre", None)
+
 
 class GastoCotidiano(Base):
     __tablename__ = "gastos_cotidianos"
@@ -676,6 +697,8 @@ class Prestamo(Base):
     otros_gastos_iniciales = sa.Column(sa.Numeric(14, 2), nullable=False, server_default=sa.text("0"))
 
     rango_pago = sa.Column(sa.String)
+
+    estado = Column(String, nullable=False, default="ACTIVO", index=True)
     activo = sa.Column(sa.Boolean, nullable=False, server_default=sa.text("true"))
 
     cuotas_totales = sa.Column(sa.Integer, nullable=False, server_default=sa.text("0"))
