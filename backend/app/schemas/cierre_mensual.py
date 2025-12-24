@@ -3,17 +3,18 @@ from __future__ import annotations
 from typing import Optional, List
 from uuid import UUID
 from pydantic import BaseModel, Field
+from datetime import datetime
 
 
 class CierreMensualOut(BaseModel):
     id: UUID
     anio: int
     mes: int
-    fecha_cierre: Optional[str] = None
+    fecha_cierre: datetime
     user_id: Optional[int] = None
     criterio: str
     version: int
-    liquidez_total: float
+    liquidez_total: float = 0
 
     ingresos_esperados: float
     ingresos_reales: float

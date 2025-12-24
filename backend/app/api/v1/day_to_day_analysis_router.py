@@ -51,7 +51,7 @@ TIPO_TO_CATEGORY: dict[str, str] = {
     "ROP-TIPOGASTO-S227BB": "ROPA",
 
     # 5. RESTAURACION
-    "RES-TIPOGASTO-26ROES": "RESTURACION",
+    "RES-TIPOGASTO-26ROES": "RESTAURACION",
 
     # 6. OCIO (viajes, actividades, etc.)
     "TRA-TIPOGASTO-RB133Z": "OCIO",              # TRANSPORTE
