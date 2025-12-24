@@ -272,6 +272,7 @@ def _adjust_container_and_liquidez(
     delta: float,
     force_pagado: bool = False,
     user_id: str | None = None,
+    apply_liquidez: bool = True,  # ✅ nuevo: permite NO tocar liquidez (INVITADO)
 ) -> Optional[dict]:
     """
     Aplica un delta al contenedor en GASTOS y a la liquidez de la cuenta asociada
@@ -302,7 +303,7 @@ def _adjust_container_and_liquidez(
     eff_cuenta_id = cuenta_id or _cuenta_of_target_gasto(
         db, tipo_id, user_id=user_id
     )
-    if eff_cuenta_id:
+    if eff_cuenta_id and apply_liquidez:
         adjust_liquidez(db, eff_cuenta_id, delta)
 
     return info
@@ -483,15 +484,15 @@ def create_gasto_cotidiano(
         delta_budget = -importe_val
 
         info = None
-        if delta_budget != 0.0 and tipo_id:
-            info = _adjust_container_and_liquidez(
-                db,
-                tipo_id=tipo_id,
-                cuenta_id=cuenta_id,
-                delta=delta_budget,
-                force_pagado=is_electricidad,
-                user_id=current_user.id,
-            )
+        info = _adjust_container_and_liquidez(
+            db,
+            tipo_id=tipo_id,
+            cuenta_id=cuenta_id,
+            delta=delta_budget,
+            force_pagado=is_electricidad,
+            user_id=current_user.id,
+            apply_liquidez=bool(payload.get("pagado")),  # ✅ si INVITADO -> False -> no toca liquidez
+        )
 
         db.commit()
         db.refresh(db_obj)

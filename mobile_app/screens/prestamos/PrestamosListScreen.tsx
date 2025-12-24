@@ -30,6 +30,7 @@ import {
   RefreshControl,
   ActivityIndicator,
   StyleSheet,
+  Alert
 } from 'react-native';
 import Ionicons from '@expo/vector-icons/Ionicons';
 import { useNavigation } from '@react-navigation/native';
@@ -107,7 +108,7 @@ export default function PrestamosListScreen() {
     navigation.navigate('PatrimonyTab', { screen: 'PatrimonyHomeScreen' });
   }, [navigation]);
 
-  const load = useCallback(
+    const load = useCallback(
     async (showSpinner: boolean) => {
       try {
         if (showSpinner) setLoading(true);
@@ -120,9 +121,26 @@ export default function PrestamosListScreen() {
         if (filtro === 'INACTIVOS') params.estado = 'INACTIVO';
         if (filtro === 'VENCEN_MES') params.vencen = 'MES';
 
+        console.log('[PrestamosList] params =>', params);
+
         const data = await prestamosApi.list(params);
+
+        console.log('[PrestamosList] response length =>', Array.isArray(data) ? data.length : 'not-array', data);
+
         setItems(Array.isArray(data) ? data : []);
-      } catch {
+      } catch (e: any) {
+        console.log('[PrestamosList] ERROR =>', e?.message);
+        console.log('[PrestamosList] status =>', e?.response?.status);
+        console.log('[PrestamosList] data =>', e?.response?.data);
+
+        // Importante: así no se queda “silencioso”
+        Alert.alert(
+          'Error',
+          `No se pudo cargar préstamos.\nStatus: ${String(e?.response?.status ?? '—')}\n${String(
+            e?.response?.data?.detail ?? e?.message ?? ''
+          )}`
+        );
+
         setItems([]);
       } finally {
         if (showSpinner) setLoading(false);
@@ -130,6 +148,7 @@ export default function PrestamosListScreen() {
     },
     [q, filtro]
   );
+
 
   useEffect(() => {
     void load(true);

@@ -51,6 +51,8 @@ router = APIRouter(prefix="/prestamos", tags=["prestamos"])
 # =======================================================
 # Endpoints principales de préstamo
 # =======================================================
+import logging
+logger = logging.getLogger(__name__)
 
 @router.get("", response_model=list[PrestamoOut])
 def listar_prestamos(
@@ -68,29 +70,35 @@ def listar_prestamos(
       - estado: ACTIVO / CANCELADO / INACTIVO
       - vencen=MES: vencen el mes actual
     """
-    stmt = select(models.Prestamo).filter(
-        models.Prestamo.user_id == current_user.id
-    )
+    try:
+        stmt = select(models.Prestamo).filter(models.Prestamo.user_id == current_user.id)
 
-    if q:
-        like = f"%{q.upper()}%"
-        stmt = stmt.filter(func.upper(models.Prestamo.nombre).like(like))
+        if q:
+            like = f"%{q.upper()}%"
+            stmt = stmt.filter(func.upper(models.Prestamo.nombre).like(like))
 
-    if estado:
-        stmt = stmt.filter(models.Prestamo.estado == estado)
+        if estado:
+            stmt = stmt.filter(models.Prestamo.estado == estado)
 
-    if (vencen or "").upper() == "MES":
-        today = date.today()
-        y, m = today.year, today.month
-        stmt = stmt.filter(
-            func.extract("year", models.Prestamo.fecha_vencimiento) == y,
-            func.extract("month", models.Prestamo.fecha_vencimiento) == m,
-        )
+        if (vencen or "").upper() == "MES":
+            today = date.today()
+            y, m = today.year, today.month
+            stmt = stmt.filter(
+                func.extract("year", models.Prestamo.fecha_vencimiento) == y,
+                func.extract("month", models.Prestamo.fecha_vencimiento) == m,
+            )
 
-    stmt = stmt.order_by(models.Prestamo.createon.desc())
-    rows = db.execute(stmt).scalars().all()
-    return rows
+        stmt = stmt.order_by(models.Prestamo.createon.desc())
+        rows = db.execute(stmt).scalars().all()
 
+        # Log útil (sin datos sensibles)
+        logger.info("[prestamos] listar user_id=%s count=%s", current_user.id, len(rows))
+
+        return rows
+
+    except Exception as e:
+        logger.exception("[prestamos] listar FAILED user_id=%s q=%s estado=%s vencen=%s", current_user.id, q, estado, vencen)
+        raise HTTPException(status_code=500, detail="Error interno listando préstamos")
 
 @router.get("/{prestamo_id}", response_model=PrestamoOut)
 def obtener_prestamo(

@@ -208,6 +208,7 @@ from backend.app.api.v1 import (
     ramas_gasto_router,
     tipos_gasto_router,
     ubicaciones_router,
+    analytics_router,
 )
 
 API_V1 = "/api/v1"
@@ -236,6 +237,8 @@ app.include_router(movimientos_cuenta_router.router, prefix=API_V1)
 app.include_router(ramas_gasto_router.router, prefix=API_V1)
 app.include_router(tipos_gasto_router.router, prefix=API_V1)
 app.include_router(ubicaciones_router.router, prefix=API_V1)
+app.include_router(analytics_router.router, prefix=API_V1)  # ✅ /api/v1 + /analytics interno
+
 
 app.include_router(debug_router.router)
 
