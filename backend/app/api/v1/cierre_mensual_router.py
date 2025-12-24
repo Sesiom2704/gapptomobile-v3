@@ -11,7 +11,7 @@ from sqlalchemy import desc
 from backend.app.db.session import get_db
 from backend.app.db import models
 
-from schemas.cierre_mensual import (
+from backend.app.schemas.cierre_mensual import (
     CierreMensualOut,
     CierreMensualDetalleOut,
     CierreMensualPatchIn,
