@@ -175,6 +175,8 @@ class PatrimonioCompraOut(PatrimonioCompraIn):
     - activo: si existe la columna en la BD.
     """
     patrimonio_id: str
+    valor_mercado: Optional[float]
+    valor_mercado: Optional[float]
     impuestos_eur: Optional[float] = None
     total_inversion: Optional[float] = None
     created_at: Optional[datetime] = None
