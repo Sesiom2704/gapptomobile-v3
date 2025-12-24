@@ -84,7 +84,7 @@ const CierreDetalleScreen: React.FC = () => {
     );
 
     const inferredDev =
-      sum.dev !== 0 ? sum.dev : (sum.esp !== 0 || sum.real !== 0 ? sum.esp - sum.real : 0);
+      sum.dev !== 0 ? sum.dev : (sum.esp !== 0 || sum.real !== 0 ? (sum.real - sum.esp) : 0);
 
     return {
       esperado: sum.esp,
@@ -256,7 +256,7 @@ const CierreDetalleScreen: React.FC = () => {
                 const real = safeNumber(d.real);
                 const desviacion = Number.isFinite(Number(d.desviacion))
                   ? safeNumber(d.desviacion)
-                  : (esperado - real);
+                  : (real - esperado);
 
                 const tituloBase = (d.tipo_detalle || 'Detalle').toUpperCase();
                 const seg = d.segmento_id ? ` · ${d.segmento_id}` : '';

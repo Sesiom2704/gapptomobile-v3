@@ -2,30 +2,13 @@
  * Archivo: mobile_app/screens/patrimonio/PropiedadesRankingScreen.tsx
  *
  * Responsabilidad:
- *   - Listado de propiedades activas ordenadas por KPI (Bruto / Cap Rate / NOI).
+ *   - Listado de propiedades (activas e inactivas) ordenadas por KPI (Bruto / Cap Rate / NOI).
  *   - Visualización tipo “ranking” con tarjeta unificada (PropertyRankingCard).
  *   - Acciones contextuales por propiedad mediante ActionSheet (ver detalle, editar, activar/inactivar, eliminar).
  *
- * Maneja:
- *   - Data fetching: listado de patrimonios + enriquecimiento por KPIs y valor de mercado.
- *   - Estado UI: loading/refreshing/error, métrica activa, selección de item para ActionSheet.
- *   - UX: confirmaciones (Alert) para eliminar y pull-to-refresh.
- *
- * Dependencias clave:
- *   - components/ui: FilterRow, Chip
- *   - components/cards: PropertyRankingCard
- *   - components/modals: ActionSheet
- *   - services: patrimonioApi, api
- *   - screens/styles: screenStyles
- *   - theme: colors/spacing (tokens)
- *
- * Reutilización:
- *   - Candidato a externalizar: MEDIO
- *
- * Notas:
- *   - Evitar hardcodes: usar tokens del theme y estilos comunes (screenStyles).
- *   - Los botones de métrica (Bruto/Cap Rate/NOI) usan el mismo patrón visual que
- *     “Pendientes/Todos/Cotidianos”: FilterRow + Chip (fullWidth + centerText).
+ * Mejora aplicada:
+ *   - Ya NO se filtra por propiedades activas: se muestran todas.
+ *   - Las propiedades inactivas se renderizan con estilo “desactivado” (opacidad + overlay).
  */
 
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
@@ -36,10 +19,11 @@ import {
   ActivityIndicator,
   RefreshControl,
   Alert,
+  StyleSheet,
 } from 'react-native';
 
 import Header from '../../components/layout/Header';
-import { colors,spacing } from '../../theme';
+import { colors, spacing } from '../../theme';
 import { EuroformatEuro, formatFechaCorta } from '../../utils/format';
 
 import patrimonioApi, { PatrimonioRow } from '../../services/patrimonioApi';
@@ -106,10 +90,19 @@ function getDireccion(p: PatrimonioRow): string {
 
 async function fetchKpis(patrimonioId: string): Promise<Kpis | null> {
   try {
+    const year = new Date().getFullYear();
+
     const resp = await api.get<Kpis>(
       `/api/v1/analytics/patrimonios/${encodeURIComponent(patrimonioId)}/kpis`,
-      { params: { annualize: true, basis: 'total' } }
+      {
+        params: {
+          year,
+          annualize: true,
+          basis: 'total',
+        },
+      }
     );
+
     return resp.data ?? null;
   } catch {
     return null;
@@ -157,14 +150,13 @@ export const PropiedadesRankingScreen: React.FC<Props> = ({ navigation }) => {
     setLoading(true);
 
     try {
-      const props = await patrimonioApi.listPatrimonios({ activos: true });
+      // ✅ CAMBIO: ya NO filtramos por activas.
+      // Esto trae activas + inactivas para que el ranking sea completo.
+      const props = await patrimonioApi.listPatrimonios();
 
       const enriched: RowVM[] = await Promise.all(
         (props ?? []).map(async (p) => {
-          const [kpis, vm] = await Promise.all([
-            fetchKpis(p.id),
-            fetchValorMercado(p.id),
-          ]);
+          const [kpis, vm] = await Promise.all([fetchKpis(p.id), fetchValorMercado(p.id)]);
           return { ...p, __kpis: kpis, __valor_mercado: vm };
         })
       );
@@ -356,24 +348,34 @@ export const PropiedadesRankingScreen: React.FC<Props> = ({ navigation }) => {
             metric === 'noi'
               ? fmtEur(p.__kpis?.noi ?? null)
               : metric === 'bruto'
-                ? fmtPct(p.__kpis?.rendimiento_bruto_pct ?? null)
-                : fmtPct(p.__kpis?.cap_rate_pct ?? null);
+              ? fmtPct(p.__kpis?.rendimiento_bruto_pct ?? null)
+              : fmtPct(p.__kpis?.cap_rate_pct ?? null);
+
+          const isInactive = p.activo === false;
 
           return (
-            <PropertyRankingCard
-              key={p.id}
-              title={title}
-              kpiValue={metricValue}
-              rankPosition={idx + 1}
-              participacionValue={participacion == null ? '—' : `${participacion.toFixed(0)}%`}
-              supConstValue={supConst == null ? '—' : `${supConst.toFixed(2)} m²`}
-              adquisicionValue={fechaAdq}
-              supUtilValue={supUtil == null ? '—' : `${supUtil.toFixed(2)} m²`}
-              valorMercadoValue={valorMercado == null ? '—' : EuroformatEuro(valorMercado, 'normal')}
-              direccion={direccion || '—'}
-              onPress={() => navigation.navigate('PropiedadDetalle', { patrimonioId: p.id })}
-              onOptionsPress={() => openOptions(p)}
-            />
+            <View key={p.id} style={[styles.cardWrap, isInactive ? styles.cardWrapInactive : null]}>
+              <PropertyRankingCard
+                title={title}
+                kpiValue={metricValue}
+                rankPosition={idx + 1}
+                participacionValue={participacion == null ? '—' : `${participacion.toFixed(0)}%`}
+                supConstValue={supConst == null ? '—' : `${supConst.toFixed(2)} m²`}
+                adquisicionValue={fechaAdq}
+                supUtilValue={supUtil == null ? '—' : `${supUtil.toFixed(2)} m²`}
+                valorMercadoValue={valorMercado == null ? '—' : EuroformatEuro(valorMercado, 'normal')}
+                direccion={direccion || '—'}
+                onPress={() => navigation.navigate('PropiedadDetalle', { patrimonioId: p.id })}
+                onOptionsPress={() => openOptions(p)}
+              />
+
+              {/* Overlay sutil para dejar claro que está inactiva */}
+              {isInactive ? (
+                <View pointerEvents="none" style={styles.inactiveOverlay}>
+                  <Text style={styles.inactiveBadge}>INACTIVA</Text>
+                </View>
+              ) : null}
+            </View>
           );
         })}
       </ScrollView>
@@ -422,3 +424,33 @@ export const PropiedadesRankingScreen: React.FC<Props> = ({ navigation }) => {
 };
 
 export default PropiedadesRankingScreen;
+
+const styles = StyleSheet.create({
+  // Wrapper para poder aplicar “disabled style” sin tocar PropertyRankingCard
+  cardWrap: {
+    position: 'relative',
+  },
+
+  // Estilo desactivado: baja opacidad y reduce “presencia”
+  cardWrapInactive: {
+    opacity: 0.55,
+  },
+
+  // Overlay no interactivo para etiqueta “INACTIVA”
+  inactiveOverlay: {
+    position: 'absolute',
+    right: 12,
+    top: 10,
+    backgroundColor: 'rgba(0,0,0,0.12)',
+    borderRadius: 999,
+    paddingVertical: 4,
+    paddingHorizontal: 10,
+  },
+
+  inactiveBadge: {
+    fontSize: 10,
+    fontWeight: '900',
+    color: colors.textPrimary,
+    letterSpacing: 0.5,
+  },
+});

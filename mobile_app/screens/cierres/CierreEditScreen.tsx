@@ -240,7 +240,7 @@ function DetalleEditorRow({
 
   const esperado = parseEuroToNumber(espTxt) ?? 0;
   const real = parseEuroToNumber(realTxt) ?? 0;
-  const desviacion = esperado - real;
+  const desviacion = real - esperado;
 
   const titulo = `${(item.tipo_detalle || '').toUpperCase()} · ${item.segmento_id || ''}`.trim();
 
@@ -262,7 +262,7 @@ function DetalleEditorRow({
       real: rea ?? 0,
       // dejamos que backend recalcule desviación/cumplimiento si quieres,
       // pero enviarlo también mejora consistencia inmediata:
-      desviacion: (esp ?? 0) - (rea ?? 0),
+      desviacion: (rea ?? 0) - (esp ?? 0),
     });
   };
 

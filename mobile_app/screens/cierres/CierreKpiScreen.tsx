@@ -557,6 +557,7 @@ const CierreKpiScreen: React.FC = () => {
                         }}
                       />
 
+
                       {trendTip.visible && (
                         <View style={[styles.tooltip, { left: trendTip.x, top: trendTip.y }]}>
                           <Text style={styles.tooltipLabel}>{trendTip.label}</Text>
@@ -609,17 +610,17 @@ const CierreKpiScreen: React.FC = () => {
                         datasets: [
                           {
                             data: segSeries.cot,
-                            color: (opacity = 1) => `rgba(42, 158, 159, ${opacity})`, // primary
+                            color: (opacity = 1) => `rgba(42, 158, 159, ${opacity})`,
                             strokeWidth: 3,
                           },
                           {
                             data: segSeries.viv,
-                            color: (opacity = 1) => `rgba(34, 197, 94, ${opacity})`, // verde
+                            color: (opacity = 1) => `rgba(34, 197, 94, ${opacity})`,
                             strokeWidth: 3,
                           },
                           {
                             data: segSeries.ges,
-                            color: (opacity = 1) => `rgba(245, 158, 11, ${opacity})`, // naranja
+                            color: (opacity = 1) => `rgba(245, 158, 11, ${opacity})`,
                             strokeWidth: 3,
                           },
                         ],
@@ -638,12 +639,10 @@ const CierreKpiScreen: React.FC = () => {
                         const lab = labels[idx] ?? '';
                         const val = Number(dp?.value ?? 0);
 
-                        // dp.dataset?.data apunta al array del dataset, así inferimos el “segmento”
-                        const dsData = dp?.dataset?.data;
+                        const datasetIndex = Number(dp?.datasetIndex ?? 0);
                         let seg: SegTooltip['segmentLabel'] = 'Cotidianos';
-                        if (dsData === segSeries.viv) seg = 'Viviendas';
-                        else if (dsData === segSeries.ges) seg = 'Gestionables';
-                        else seg = 'Cotidianos';
+                        if (datasetIndex === 1) seg = 'Viviendas';
+                        if (datasetIndex === 2) seg = 'Gestionables';
 
                         const tipX = Math.max(8, Math.min(chartWidth - 175, Number(dp?.x ?? 0) - 78));
                         const tipY = Math.max(8, Number(dp?.y ?? 0) - 56);
@@ -658,6 +657,7 @@ const CierreKpiScreen: React.FC = () => {
                         });
                       }}
                     />
+
 
                     {segTip.visible && (
                       <View style={[styles.tooltip, { left: segTip.x, top: segTip.y, width: 165 }]}>

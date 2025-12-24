@@ -13,8 +13,10 @@
 from sqlalchemy import (
     Column, String, Integer, Float, Boolean,
     Date, DateTime, ForeignKey, CheckConstraint, ForeignKeyConstraint,
-    Enum as SAEnum, text, UniqueConstraint, Numeric, Index
+    Enum as SAEnum, text, UniqueConstraint, Numeric, Index, Column, DateTime
 )
+from datetime import datetime
+
 import enum
 from sqlalchemy.sql import func
 from backend.app.db.base import Base
@@ -671,48 +673,78 @@ class CierreMensualDetalle(Base):
 # Préstamo (cabecera)
 # ============================
 class Prestamo(Base):
+    """
+    Tabla: prestamo
+
+    IMPORTANTE:
+    - Este modelo está alineado con el esquema real que has listado por SQL.
+    - Si la BD ya tiene las columnas, NO hace falta migración para “crearlas”,
+      pero sí necesitas este mapeo para que SQLAlchemy/ORM pueda usarlas.
+    """
+
     __tablename__ = "prestamo"
 
-    id = sa.Column(sa.String, primary_key=True)
-    nombre = sa.Column(sa.String, nullable=False)
+    # -----------------------
+    # Identidad / ownership
+    # -----------------------
+    id = Column(String, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
 
-    proveedor_id = sa.Column(sa.String, sa.ForeignKey("proveedores.id"), nullable=False)
-    referencia_vivienda_id = sa.Column(sa.String, sa.ForeignKey("patrimonio.id"))
-    cuenta_id = sa.Column(sa.String, sa.ForeignKey("cuentas_bancarias.id"), nullable=False)
-    # 👇 Nuevo: dueño del préstamo
-    user_id = sa.Column(sa.Integer, sa.ForeignKey("users.id"), nullable=False, index=True)
+    # -----------------------
+    # Datos del préstamo
+    # -----------------------
+    nombre = Column(String, nullable=False)
 
-    fecha_inicio = sa.Column(sa.Date, nullable=False)
-    periodicidad = sa.Column(sa.String, nullable=False)  # ('MENSUAL','TRIMESTRAL','SEMESTRAL','ANUAL')
-    plazo_meses = sa.Column(sa.Integer, nullable=False)
+    proveedor_id = Column(String, nullable=False, index=True)
+    referencia_vivienda_id = Column(String, nullable=True, index=True)
+    cuenta_id = Column(String, nullable=False, index=True)
 
-    importe_principal = sa.Column(sa.Numeric(14, 2), nullable=False)
-    tipo_interes = sa.Column(sa.String, nullable=False)  # ('FIJO','VARIABLE','MIXTO')
-    tin_pct = sa.Column(sa.Numeric(6, 3), nullable=False)
-    tae_pct = sa.Column(sa.Numeric(6, 3))
-    indice = sa.Column(sa.String)
-    diferencial_pct = sa.Column(sa.Numeric(6, 3))
+    fecha_inicio = Column(Date, nullable=False)
+    periodicidad = Column(String, nullable=True)
+    plazo_meses = Column(Integer, nullable=False, default=0)
 
-    comision_apertura = sa.Column(sa.Numeric(14, 2), nullable=False, server_default=sa.text("0"))
-    otros_gastos_iniciales = sa.Column(sa.Numeric(14, 2), nullable=False, server_default=sa.text("0"))
+    importe_principal = Column(Numeric, nullable=False, default=Numeric(12, 2))
 
-    rango_pago = sa.Column(sa.String)
+    tipo_interes = Column(String, nullable=True)
+    tin_pct = Column(Numeric, nullable=True)
+    tae_pct = Column(Numeric, nullable=True)
 
-    estado = Column(String, nullable=False, default="ACTIVO", index=True)
-    activo = sa.Column(sa.Boolean, nullable=False, server_default=sa.text("true"))
+    indice = Column(String, nullable=True)
+    diferencial_pct = Column(Numeric, nullable=True)
 
-    cuotas_totales = sa.Column(sa.Integer, nullable=False, server_default=sa.text("0"))
-    cuotas_pendientes = sa.Column(sa.Integer, nullable=False, server_default=sa.text("0"))
+    comision_apertura = Column(Numeric, nullable=True)
+    otros_gastos_iniciales = Column(Numeric, nullable=True)
 
-    capital_pendiente    = sa.Column(sa.Numeric(14, 2), nullable=False, server_default=sa.text("0"))
-    intereses_pendientes = sa.Column(sa.Numeric(14, 2), nullable=False, server_default=sa.text("0"))
+    # -----------------------
+    # Estado / agregados
+    # -----------------------
+    estado = Column(String, nullable=True, index=True)
+    cuotas_totales = Column(Integer, nullable=True, default=0)
+    cuotas_pagadas = Column(Integer, nullable=True, default=0)
 
-    cuotas = sa.orm.relationship(
-        "PrestamoCuota",
-        back_populates="prestamo",
-        cascade="all, delete-orphan",
-        passive_deletes=True,
-        order_by="PrestamoCuota.num_cuota",
+    fecha_vencimiento = Column(Date, nullable=True)
+    rango_pago = Column(String, nullable=True)
+
+    activo = Column(Boolean, nullable=False, default=True)
+
+    createon = Column(DateTime, nullable=False, default=datetime.utcnow, index=True)
+    modifiedon = Column(DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
+    inactivatedon = Column(DateTime, nullable=True)
+
+    referencia_gasto = Column(String, nullable=True)
+
+    capital_pendiente = Column(Numeric, nullable=True)
+    intereses_pendientes = Column(Numeric, nullable=True)
+
+    # -----------------------
+    # Relaciones (opcional)
+    # -----------------------
+    # Si tienes tabla prestamo_cuota y FK prestamo_id, es útil:
+    cuotas = relationship("PrestamoCuota", back_populates="prestamo", cascade="all, delete-orphan")
+
+    __table_args__ = (
+        Index("ix_prestamo_user_createon", "user_id", "createon"),
+        Index("ix_prestamo_user_estado", "user_id", "estado"),
     )
 
     # 👇 Relación inversa al usuario
@@ -722,36 +754,37 @@ class Prestamo(Base):
 # Detalle de cuotas (plan)
 # ============================
 class PrestamoCuota(Base):
+    """
+    AJUSTA esta clase si ya existe en tu repo.
+    La incluyo por completitud porque la relación cuotas suele existir.
+    """
     __tablename__ = "prestamo_cuota"
 
-    id = sa.Column(sa.String, primary_key=True)
-    prestamo_id = sa.Column(sa.String, sa.ForeignKey("prestamo.id", ondelete="CASCADE"), nullable=False)
-    num_cuota = sa.Column(sa.Integer, nullable=False)
-    fecha_vencimiento = sa.Column(sa.Date, nullable=False)
+    id = Column(String, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
 
-    importe_cuota = sa.Column(sa.Numeric(14, 2), nullable=False)
-    capital = sa.Column(sa.Numeric(14, 2), nullable=False)
-    interes = sa.Column(sa.Numeric(14, 2), nullable=False)
-    seguros = sa.Column(sa.Numeric(14, 2), nullable=False, server_default=sa.text("0"))
-    comisiones = sa.Column(sa.Numeric(14, 2), nullable=False, server_default=sa.text("0"))
+    prestamo_id = Column(String, ForeignKey("prestamo.id"), nullable=False, index=True)
+    num_cuota = Column(Integer, nullable=False)
 
-    saldo_posterior = sa.Column(sa.Numeric(14, 2), nullable=False)
+    fecha_vencimiento = Column(Date, nullable=False)
 
-    pagada = sa.Column(sa.Boolean, nullable=False, server_default=sa.text("false"))
-    fecha_pago = sa.Column(sa.Date)
-    gasto_id = sa.Column(sa.String, sa.ForeignKey("gastos.id"))
+    importe_cuota = Column(Numeric, nullable=False, default=Numeric(12, 2))
+    capital = Column(Numeric, nullable=False, default=Numeric(12, 2))
+    interes = Column(Numeric, nullable=False, default=Numeric(12, 2))
+    seguros = Column(Numeric, nullable=True, default=Numeric(12, 2))
+    comisiones = Column(Numeric, nullable=True, default=Numeric(12, 2))
+    saldo_posterior = Column(Numeric, nullable=True, default=Numeric(12, 2))
 
-    createon = sa.Column(sa.DateTime, server_default=sa.text("now()"), nullable=False)
-    modifiedon = sa.Column(sa.DateTime, server_default=sa.text("now()"), onupdate=sa.text("now()"), nullable=False)
+    pagada = Column(Boolean, nullable=False, default=False)
+    fecha_pago = Column(Date, nullable=True)
+    gasto_id = Column(String, nullable=True)
+
+    createon = Column(DateTime, nullable=False, default=datetime.utcnow)
+    modifiedon = Column(DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    prestamo = relationship("Prestamo", back_populates="cuotas")
 
     __table_args__ = (
-        sa.UniqueConstraint("prestamo_id", "num_cuota", name="uq_prestamo_cuota"),
+        Index("ix_prestamo_cuota_user_prestamo", "user_id", "prestamo_id"),
+        Index("ix_prestamo_cuota_prestamo_num", "prestamo_id", "num_cuota"),
     )
-
-    __table_args__ = (
-        sa.UniqueConstraint("prestamo_id", "num_cuota", name="uq_prestamo_cuota"),
-        sa.Index("ix_prestamo_cuota_prestamo_id_num", "prestamo_id", "num_cuota"),
-    )
-
-    prestamo = sa.orm.relationship("Prestamo", back_populates="cuotas")
-

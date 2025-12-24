@@ -222,7 +222,7 @@ const CierreListScreen: React.FC = () => {
                         <Text style={panelStyles.menuSubtitle}>
                           Resultado:{" "}
                           <Text style={{ fontWeight: '900', color: colors.textPrimary }}>
-                            {EuroformatEuro(resultadoReal, 'normal')}
+                            {EuroformatEuro(resultadoReal, 'signed')}
                           </Text>
                         </Text>
 
