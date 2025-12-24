@@ -6,15 +6,18 @@
  *   - Layout tabulado: etiquetas y valores alineados en columnas consistentes.
  *   - Muestra la posición del ranking encima del icono.
  *
+ * Mejoras:
+ *   - Soporta subtítulo opcional (subtitle) bajo el título principal.
+ *     Útil para estados como "(INACTIVADA)" con tipografía más pequeña,
+ *     sin tener que convertir title en ReactNode.
+ *
  * Diseño:
  *   - Fila 1: Título (izq) + KPI (der) + opciones (...)
+ *   - Fila 1b (opcional): Subtítulo (debajo del título, a la izquierda)
  *   - Fila 2: Participación (izq) | Sup. const. (der)
  *   - Fila 3: Adquisición (izq)   | Sup. útil (der)
  *   - Fila 4: Valor mercado (izq etiqueta) | valor (der, alineado)
  *   - Fila 5: Dirección a ancho completo (debajo del icono también)
- *
- * Reutilización:
- *   - Candidato a externalizar: ALTO
  *
  * Notas:
  *   - Consume tokens del theme; evita hardcodes.
@@ -22,12 +25,28 @@
  */
 
 import React from 'react';
-import { View, Text, StyleSheet, TouchableOpacity } from 'react-native';
+import { View, Text, StyleSheet, TouchableOpacity, ViewStyle } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { colors, spacing, radius } from '../../theme';
 
 type Props = {
+  /** Título principal (referencia o id) */
   title: string;
+
+  /**
+   * Subtítulo opcional (ej: "(INACTIVADA)").
+   * Se renderiza debajo del título, con tipografía más pequeña.
+   */
+  subtitle?: string;
+
+  /**
+   * Si true, aplica un estilo "desactivado" a la tarjeta:
+   * - Opacidad reducida
+   * - Borde/colores más suaves
+   *
+   * Nota: no bloquea onPress (eso se decide desde la screen).
+   */
+  disabledStyle?: boolean;
 
   /** KPI principal (ej: 8,75%) */
   kpiValue: string;
@@ -41,17 +60,30 @@ type Props = {
   adquisicionValue: string; // "30/08/2024"
   supUtilValue: string; // "50,15 m²"
 
-  valorMercadoValue: string; // "95.000 €"
+  /**
+   * Valor mercado (ej: "95.000 €").
+   * (La fecha "a fecha:" la puedes incorporar al string o ampliar la card más adelante)
+   */
+  valorMercadoValue: string;
+
   direccion: string;
 
   onPress?: () => void;
   onOptionsPress?: () => void;
 
   iconName?: React.ComponentProps<typeof Ionicons>['name'];
+
+  /**
+   * Permite inyectar estilos extra desde fuera si hiciera falta
+   * sin tocar el layout interno.
+   */
+  cardStyle?: ViewStyle;
 };
 
 export const PropertyRankingCard: React.FC<Props> = ({
   title,
+  subtitle,
+  disabledStyle = false,
   kpiValue,
   rankPosition,
   participacionValue,
@@ -63,10 +95,11 @@ export const PropertyRankingCard: React.FC<Props> = ({
   onPress,
   onOptionsPress,
   iconName = 'home-outline',
+  cardStyle,
 }) => {
   return (
     <TouchableOpacity
-      style={styles.card}
+      style={[styles.card, disabledStyle ? styles.cardDisabled : null, cardStyle]}
       activeOpacity={0.86}
       onPress={onPress}
       accessibilityRole="button"
@@ -75,7 +108,7 @@ export const PropertyRankingCard: React.FC<Props> = ({
         {/* Columna icono: Posición + Icono */}
         <View style={styles.iconCol}>
           <Text style={styles.rankPosText}>{rankPosition}</Text>
-          <View style={styles.iconCircle}>
+          <View style={[styles.iconCircle, disabledStyle ? styles.iconCircleDisabled : null]}>
             <Ionicons name={iconName} size={26} color={colors.primary} />
           </View>
         </View>
@@ -84,9 +117,18 @@ export const PropertyRankingCard: React.FC<Props> = ({
         <View style={styles.body}>
           {/* Fila 1: Título | KPI | ... */}
           <View style={styles.headerRow}>
-            <Text style={styles.title} numberOfLines={1}>
-              {title}
-            </Text>
+            <View style={styles.titleCol}>
+              <Text style={[styles.title, disabledStyle ? styles.titleDisabled : null]} numberOfLines={1}>
+                {title}
+              </Text>
+
+              {/* Subtítulo opcional: para "(INACTIVADA)" o similar */}
+              {subtitle ? (
+                <Text style={styles.subtitle} numberOfLines={1}>
+                  {subtitle}
+                </Text>
+              ) : null}
+            </View>
 
             <View style={styles.headerRight}>
               <Text style={styles.kpiValue} numberOfLines={1}>
@@ -101,11 +143,7 @@ export const PropertyRankingCard: React.FC<Props> = ({
                   accessibilityRole="button"
                   accessibilityLabel="Opciones"
                 >
-                  <Ionicons
-                    name="ellipsis-horizontal"
-                    size={22}
-                    color={colors.textSecondary}
-                  />
+                  <Ionicons name="ellipsis-horizontal" size={22} color={colors.textSecondary} />
                 </TouchableOpacity>
               ) : null}
             </View>
@@ -195,6 +233,12 @@ const styles = StyleSheet.create({
     marginBottom: spacing.sm,
   },
 
+  // Estilo visual para tarjeta “inactiva” (sin deshabilitar interacciones)
+  cardDisabled: {
+    opacity: 0.7,
+    borderColor: colors.borderColor,
+  },
+
   topRow: {
     flexDirection: 'row',
     alignItems: 'flex-start',
@@ -221,6 +265,9 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
   },
+  iconCircleDisabled: {
+    borderColor: colors.borderColor,
+  },
 
   body: {
     flex: 1,
@@ -233,12 +280,30 @@ const styles = StyleSheet.create({
     justifyContent: 'space-between',
     gap: spacing.sm,
   },
-  title: {
+
+  // Columna para título + subtítulo
+  titleCol: {
     flex: 1,
+    minWidth: 0,
+  },
+
+  title: {
     fontSize: 16,
     fontWeight: '900',
     color: colors.textPrimary,
   },
+  titleDisabled: {
+    color: colors.textSecondary,
+  },
+
+  // Subtítulo más pequeño (ej. "(INACTIVADA)")
+  subtitle: {
+    marginTop: 2,
+    fontSize: 12,
+    fontWeight: '700',
+    color: colors.textSecondary,
+  },
+
   headerRight: {
     flexDirection: 'row',
     alignItems: 'flex-start',

@@ -19,7 +19,7 @@ from backend.app.schemas.cierre_mensual import (
     CierreMensualKpisResponse,
 )
 
-router = APIRouter(prefix="/api/v1/cierre_mensual", tags=["Cierre mensual"])
+router = APIRouter(prefix="/cierre_mensual", tags=["Cierre mensual"])
 
 
 def recompute_cierre_fields(c: models.CierreMensual) -> None:
