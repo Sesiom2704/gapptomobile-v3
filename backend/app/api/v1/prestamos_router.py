@@ -238,7 +238,6 @@ def crear_prestamo(
             cuotas.append(
                 models.PrestamoCuota(
                     id=generate_prestamo_cuota_id(db),
-                    user_id=current_user.id,
                     prestamo_id=p.id,
                     num_cuota=c["num_cuota"],
                     fecha_vencimiento=c["fecha_vencimiento"],

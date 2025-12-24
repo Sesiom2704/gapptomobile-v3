@@ -617,6 +617,11 @@ def get_compra(
         agencia=getattr(row, "agencia", None),
         reforma_adecuamiento=getattr(row, "reforma_adecuamiento", None),
         total_inversion=getattr(row, "total_inversion", None),
+
+        # ✅ AÑADIR ESTO
+        valor_mercado=getattr(row, "valor_mercado", None),
+        valor_mercado_fecha=getattr(row, "valor_mercado_fecha", None),
+
         notas=getattr(row, "notas", None),
         created_at=getattr(row, "created_at", None),
         updated_at=getattr(row, "updated_at", None),

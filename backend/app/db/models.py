@@ -703,7 +703,7 @@ class Prestamo(Base):
     periodicidad = Column(String, nullable=True)
     plazo_meses = Column(Integer, nullable=False, default=0)
 
-    importe_principal = Column(Numeric, nullable=False, default=Numeric(12, 2))
+    importe_principal = Column(Numeric(12, 2), nullable=False, server_default=text("0"))
 
     tipo_interes = Column(String, nullable=True)
     tin_pct = Column(Numeric, nullable=True)
@@ -755,25 +755,31 @@ class Prestamo(Base):
 # ============================
 class PrestamoCuota(Base):
     """
-    AJUSTA esta clase si ya existe en tu repo.
-    La incluyo por completitud porque la relación cuotas suele existir.
+    Tabla: prestamo_cuota
+
+    IMPORTANTE:
+    - Esta tabla NO tiene user_id (según tu SQL).
+    - La autorización se garantiza validando ownership a través del Prestamo:
+        - primero validas p.user_id == current_user.id
+        - luego consultas cuotas por prestamo_id
     """
+
     __tablename__ = "prestamo_cuota"
 
     id = Column(String, primary_key=True, index=True)
-    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
 
     prestamo_id = Column(String, ForeignKey("prestamo.id"), nullable=False, index=True)
     num_cuota = Column(Integer, nullable=False)
 
     fecha_vencimiento = Column(Date, nullable=False)
 
-    importe_cuota = Column(Numeric, nullable=False, default=Numeric(12, 2))
-    capital = Column(Numeric, nullable=False, default=Numeric(12, 2))
-    interes = Column(Numeric, nullable=False, default=Numeric(12, 2))
-    seguros = Column(Numeric, nullable=True, default=Numeric(12, 2))
-    comisiones = Column(Numeric, nullable=True, default=Numeric(12, 2))
-    saldo_posterior = Column(Numeric, nullable=True, default=Numeric(12, 2))
+    # Nota: en SQL es numeric (sin precisión/escala visible). Mantengo Numeric estándar.
+    importe_cuota = Column(Numeric, nullable=False)
+    capital = Column(Numeric, nullable=False)
+    interes = Column(Numeric, nullable=False)
+    seguros = Column(Numeric, nullable=True)
+    comisiones = Column(Numeric, nullable=True)
+    saldo_posterior = Column(Numeric, nullable=True)
 
     pagada = Column(Boolean, nullable=False, default=False)
     fecha_pago = Column(Date, nullable=True)
@@ -782,9 +788,11 @@ class PrestamoCuota(Base):
     createon = Column(DateTime, nullable=False, default=datetime.utcnow)
     modifiedon = Column(DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
 
+    # Relación con cabecera
     prestamo = relationship("Prestamo", back_populates="cuotas")
 
     __table_args__ = (
-        Index("ix_prestamo_cuota_user_prestamo", "user_id", "prestamo_id"),
+        # ✅ Índice útil y consistente con tu tabla:
         Index("ix_prestamo_cuota_prestamo_num", "prestamo_id", "num_cuota"),
     )
+
