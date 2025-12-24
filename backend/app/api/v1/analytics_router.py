@@ -105,7 +105,7 @@ class KpisOut(BaseModel):
     deuda_anual: Optional[float] = None
 
     # Texto info por KPI (para modales)
-    _info: Dict[str, str] = Field(default_factory=dict)
+    info: Dict[str, str] = Field(default_factory=dict)
 
 
 # ============================================================================
@@ -610,5 +610,5 @@ def kpis_patrimonio(
         payback_anios=float(payback_anios) if payback_anios is not None else None,
         deuda_anual=deuda_anual,
 
-        _info=info,
+        info=info,
     )

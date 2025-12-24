@@ -95,7 +95,7 @@ type KpiResponse = {
   deuda_anual: number;
   dscr: number | null;
   ocupacion_pct: number | null;
-  _info: Record<string, string>;
+  info: Record<string, string>;
 };
 
 type Props = {
@@ -170,7 +170,7 @@ export default function PropiedadKpisScreen({ route, navigation }: Props) {
   }, [load]);
 
   const openInfo = (title: string, key: string) => {
-    const txt = kpi?._info?.[key] ?? '—';
+    const txt = kpi?.info?.[key] ?? '—';
     setInfoTitle(title);
     setInfoText(txt);
     setInfoOpen(true);
