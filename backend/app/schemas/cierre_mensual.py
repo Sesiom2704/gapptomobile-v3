@@ -61,7 +61,7 @@ class CierreMensualDetalleOut(BaseModel):
     n_items: int
     incluye_kpi: bool
 
-    fecha_cierre: Optional[str] = None
+    fecha_cierre: datetime
     user_id: Optional[int] = None
     segmento_nombre: Optional[str] = None
 
