@@ -2,10 +2,9 @@
 // -----------------------------------------------------------------------------
 // Objetivo del cambio (simple y sin romper nada):
 // - Mantener tu navegación tal cual.
-// - Asegurar tipos correctos para cierres:
-//   - CierreDetalleScreen recibe { cierreId, cierre? } porque en el listado navegas
-//     pasando cierreId + cierre para pintar cabecera sin llamadas extra.
-// - Mantener CierreKpiScreen dentro de MonthStack.
+// - Conectar tarjeta "Patrimonio" del Home con KPIs reales del HomeDashboard.
+// - Conectar "Ver propiedades" directo al listado:
+//     PatrimonyTab -> PropiedadesStack -> PropiedadesRanking
 // - NO se elimina ninguna funcionalidad existente.
 // -----------------------------------------------------------------------------
 
@@ -67,7 +66,6 @@ import CierreEditScreen from '../screens/cierres/CierreEditScreen';
 import { CuentasBancariasListScreen } from '../screens/cuentas/CuentasBancariasListScreen';
 import { CuentaBancariaFormScreen } from '../screens/cuentas/CuentaBancariaFormScreen';
 import GestionDbScreen from '../screens/bd/gestionDbScreen';
-
 
 // --------------------
 // Tipos de navegación
@@ -207,8 +205,6 @@ export type DayToDayStackParamList = {
         initialSearch?: string;
       }
     | undefined;
-
-  
 };
 
 export type MonthStackParamList = {
@@ -373,10 +369,6 @@ function getMovimientoTipoLabel(m: any): string {
 // --------------------
 // HEADER especial para Home
 // --------------------
-// Cambio: añadimos icono "ojo" junto al settings.
-// Importante: el estado que decide si ocultamos importes vive en HomeScreen,
-// y se pasa aquí por props (hideAmounts / onToggleHide).
-// --------------------
 
 const HomeHeader: React.FC<{
   monthLabel: string;
@@ -385,8 +377,6 @@ const HomeHeader: React.FC<{
   onToggleHide: () => void;
 }> = ({ monthLabel, saldoPrevisto, hideAmounts, onToggleHide }) => {
   const navigation = useNavigation<any>();
-
-  // Cadena fija de máscara (sencillo y visible).
   const masked = '***********';
 
   return (
@@ -398,7 +388,6 @@ const HomeHeader: React.FC<{
             <Text style={styles.headerMonthLarge}>{monthLabel}</Text>
           </View>
 
-          {/* Derecha: Ojo + Settings (antes solo Settings) */}
           <View style={styles.headerRightIcons}>
             <TouchableOpacity
               style={styles.headerIconButton}
@@ -456,17 +445,11 @@ const HomeScreen: React.FC = () => {
 
   const monthLabel = useMemo(() => getMonthLabelES(month, year), [month, year]);
 
-  // ---------------------------------------------------------------------------
-  // NUEVO: estado local para ocultar/mostrar importes EN HOME.
-  // (Sencillo, sin tocar otras pantallas.)
-  // ---------------------------------------------------------------------------
+  // Modo privado (ojo): se aplica a importes del HOME.
   const [hideAmounts, setHideAmounts] = useState(false);
-
-  // Cadena fija para mostrar cuando está activado el "modo privado".
   const masked = '***********';
 
-  // Helper de formateo: si hideAmounts está activo => máscara; si no => EuroformatEuro.
-  // Mantiene el mismo comportamiento de '–' cuando el valor es null/undefined.
+  // Formateo reutilizable: si hideAmounts => máscara, si no => EuroformatEuro
   const fmt = (value: number | null | undefined, mode: any) => {
     if (value == null) return '–';
     return hideAmounts ? masked : EuroformatEuro(value, mode);
@@ -510,8 +493,16 @@ const HomeScreen: React.FC = () => {
     });
   };
 
+  // ---------------------------------------------------------------------------
+  // CAMBIO: "Ver propiedades" -> entra directo al stack de propiedades y
+  // a la pantalla inicial "PropiedadesRanking".
+  // (Esto evita pasar por PatrimonyHomeScreen si lo que quieres es ver el listado.)
+  // ---------------------------------------------------------------------------
   const goVerPropiedades = () => {
-    navigation.navigate('PatrimonyTab', { screen: 'PatrimonyHomeScreen' });
+    navigation.navigate('PatrimonyTab', {
+      screen: 'PropiedadesStack',
+      params: { screen: 'PropiedadesRanking' },
+    });
   };
 
   // -------------------------
@@ -587,9 +578,17 @@ const HomeScreen: React.FC = () => {
   const cotidianosConsumidos = data?.cotidianosReal ?? 0;
   const cotidianosPresupuestados = data?.cotidianosPresupuestado ?? 0;
 
+  // -------------------------
+  // NUEVO: Patrimonio (desde HomeDashboard)
+  // -------------------------
+  const patrimonioCount = data?.patrimonioPropiedadesCount ?? 0;
+  const patrimonioValorMercado = data?.patrimonioValorMercadoTotal ?? null;
+  const patrimonioNoi = data?.patrimonioNoiTotal ?? null;
+  const patrimonioEquity = data?.patrimonioEquityTotal ?? null;
+  const patrimonioRentabBrutaPct = data?.patrimonioRentabilidadBrutaMediaPct ?? null;
+
   return (
     <View style={panelStyles.screen}>
-      {/* Header: ahora recibe el estado del ojo y la acción de toggle */}
       <HomeHeader
         monthLabel={monthLabel}
         saldoPrevisto={data?.saldoPrevistoFinMes ?? null}
@@ -700,7 +699,6 @@ const HomeScreen: React.FC = () => {
           <View style={panelStyles.card}>
             <Text style={panelStyles.cardTitle}>Presupuesto vs real</Text>
 
-            {/* 1) TOTAL GASTO -> BalanceScreen */}
             <TouchableOpacity style={styles.budgetRowPressable} onPress={goBarTotalGasto} activeOpacity={0.85}>
               <View style={styles.budgetRow}>
                 <View style={styles.budgetRowHeader}>
@@ -720,7 +718,6 @@ const HomeScreen: React.FC = () => {
               </View>
             </TouchableOpacity>
 
-            {/* 2) INGRESOS -> IngresosList */}
             <TouchableOpacity style={styles.budgetRowPressable} onPress={goBarIngresos} activeOpacity={0.85}>
               <View style={styles.budgetRow}>
                 <View style={styles.budgetRowHeader}>
@@ -740,7 +737,6 @@ const HomeScreen: React.FC = () => {
               </View>
             </TouchableOpacity>
 
-            {/* 3) GESTIONABLES -> GastosList (pendientes) */}
             <TouchableOpacity style={styles.budgetRowPressable} onPress={goBarGestionables} activeOpacity={0.85}>
               <View style={styles.budgetRow}>
                 <View style={styles.budgetRowHeader}>
@@ -760,7 +756,6 @@ const HomeScreen: React.FC = () => {
               </View>
             </TouchableOpacity>
 
-            {/* 4) COTIDIANOS -> GastosList (cotidiano) */}
             <TouchableOpacity style={styles.budgetRowPressable} onPress={goBarCotidianos} activeOpacity={0.85}>
               <View style={styles.budgetRow}>
                 <View style={styles.budgetRowHeader}>
@@ -780,7 +775,6 @@ const HomeScreen: React.FC = () => {
               </View>
             </TouchableOpacity>
 
-            {/* 5) EXTRAS -> Extraordinarios */}
             <TouchableOpacity
               style={[styles.budgetRowPressable, { marginBottom: 0 }]}
               onPress={goBarExtras}
@@ -814,7 +808,6 @@ const HomeScreen: React.FC = () => {
                   );
                 })()}
 
-                {/* Etiquetas: si está oculto, mostramos máscara también */}
                 <View style={{ flexDirection: 'row', justifyContent: 'space-between', marginTop: 4 }}>
                   <Text style={{ fontSize: 10, color: colors.textSecondary }}>
                     {hideAmounts ? masked : '+2.000 €'}
@@ -851,7 +844,6 @@ const HomeScreen: React.FC = () => {
                     </Text>
                   </View>
 
-                  {/* Importe: si está oculto, máscara; si no, formateo original */}
                   <Text style={amountStyle}>
                     {hideAmounts ? masked : EuroformatEuro(m.importe, isIngreso ? 'plus' : 'minus')}
                   </Text>
@@ -880,20 +872,39 @@ const HomeScreen: React.FC = () => {
             <View style={styles.cardHeaderRow}>
               <View>
                 <Text style={panelStyles.cardTitle}>Resumen de propiedades</Text>
-                <Text style={panelStyles.cardSubtitle}>Pendiente de conexión</Text>
+                <Text style={panelStyles.cardSubtitle}>
+                  {patrimonioCount > 0 ? `${patrimonioCount} activas` : 'Sin propiedades activas'}
+                </Text>
               </View>
-              <Text style={styles.cardChipHighlight}>Equity —</Text>
+
+              <Text style={styles.cardChipHighlight}>
+                Equity {fmt(patrimonioEquity, 'normal')}
+              </Text>
             </View>
 
             <View style={styles.patrimonioTopRow}>
               <View style={styles.patrimonioColLeft}>
-                <Text style={panelStyles.cardValue}>—</Text>
-                <Text style={panelStyles.cardSubtitleSmall}>Valor de mercado estimado</Text>
+                <Text style={panelStyles.cardValue}>{fmt(patrimonioValorMercado, 'normal')}</Text>
+                <Text style={panelStyles.cardSubtitleSmall}>Valor mercado total</Text>
               </View>
+
               <View style={styles.patrimonioColRight}>
-                <Text style={styles.patrimonioRentLabel}>Rentabilidad bruta</Text>
-                <Text style={styles.patrimonioRentValue}>—</Text>
+                <Text style={styles.patrimonioRentLabel}>Rentabilidad bruta media</Text>
+                <Text style={styles.patrimonioRentValue}>
+                  {patrimonioRentabBrutaPct == null
+                    ? '—'
+                    : hideAmounts
+                      ? masked
+                      : `${patrimonioRentabBrutaPct.toFixed(2)} %`}
+                </Text>
               </View>
+            </View>
+
+            {/* Dato relevante extra: NOI total (compacto) */}
+            <View style={{ marginTop: 2, marginBottom: 6 }}>
+              <Text style={{ fontSize: 11, color: colors.textSecondary }}>
+                NOI total: {fmt(patrimonioNoi, 'normal')}
+              </Text>
             </View>
 
             <TouchableOpacity style={panelStyles.cardButton} onPress={goVerPropiedades}>
@@ -941,8 +952,6 @@ function DayToDayStackNavigator() {
       <DayToDayStack.Screen name="GastoCotidianoForm" component={GastoCotidianoFormScreen} />
 
       <DayToDayStack.Screen name="AuxEntityForm" component={AuxEntityFormScreen} />
-
-      {/* NUEVO: LocalidadForm también disponible desde este stack */}
       <DayToDayStack.Screen name="LocalidadForm" component={LocalidadFormScreen} />
 
       <DayToDayStack.Screen name="NuevoIngreso" component={NuevoIngresoScreen} />
@@ -963,7 +972,6 @@ function MonthStackNavigator() {
       <MonthStack.Screen name="MovimientosScreen" component={MovimientosScreen} />
       <MonthStack.Screen name="MovimientosCuentasScreen" component={MovimientosCuentasScreen} />
 
-      {/* Cierres */}
       <MonthStack.Screen name="CierreListScreen" component={CierreListScreen} />
       <MonthStack.Screen name="CierreDetalleScreen" component={CierreDetalleScreen} />
       <MonthStack.Screen name="CierreKpiScreen" component={CierreKpiScreen} />
@@ -976,14 +984,9 @@ function PatrimonyStackNavigator() {
   return (
     <PatrimonyStack.Navigator screenOptions={{ headerShown: false }}>
       <PatrimonyStack.Screen name="PatrimonyHomeScreen" component={PatrimonioScreen} />
-
       <PatrimonyStack.Screen name="PropiedadesStack" component={PropiedadesStack} />
-
       <PatrimonyStack.Screen name="AuxEntityForm" component={AuxEntityFormScreen} />
-
-      {/* NUEVO: LocalidadForm también disponible desde Patrimonio */}
       <PatrimonyStack.Screen name="LocalidadForm" component={LocalidadFormScreen} />
-
       <PatrimonyStack.Screen name="PrestamosStack" component={PrestamosStack} />
     </PatrimonyStack.Navigator>
   );
@@ -1068,7 +1071,6 @@ const styles = StyleSheet.create({
     alignItems: 'center',
   } as any,
 
-  // NUEVO: contenedor para dos iconos (ojo + settings) alineados
   headerRightIcons: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -1248,7 +1250,6 @@ const styles = StyleSheet.create({
     flexWrap: 'nowrap',
   },
 
-  // Nuevos botones altos, icono arriba y texto abajo
   primaryActionTall: {
     flex: 1,
     borderRadius: 18,

@@ -1,4 +1,10 @@
 // mobile_app/hooks/useHomeDashboard.ts
+// -----------------------------------------------------------------------------
+// Objetivo del cambio:
+// - Mantener el hook tal cual.
+// - Solo garantizar que el tipado HomeDashboardResponse (ampliado) fluye sin romper.
+// -----------------------------------------------------------------------------
+
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { fetchHomeDashboard, HomeDashboardResponse } from '../services/homeDashboardApi';
 
