@@ -8,7 +8,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session
 from sqlalchemy import desc
 
-from db.session import get_db  # ajusta a tu proyecto
+from backend.app.db.session import get_db
 from backend.app.db import models
 
 from schemas.cierre_mensual import (
