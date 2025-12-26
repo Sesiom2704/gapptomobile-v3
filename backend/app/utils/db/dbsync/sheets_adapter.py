@@ -1,9 +1,13 @@
-# backend/app/utils/db/dbsync/sheets_adapter.py
 from __future__ import annotations
 
+import base64
+import json
 import os
 import time
+from datetime import date, datetime, time as dtime
+from decimal import Decimal
 from typing import Any, List, Sequence, Tuple
+from uuid import UUID
 
 
 class SheetsAdapter:
@@ -45,6 +49,7 @@ class SheetsAdapter:
             "https://www.googleapis.com/auth/drive",
         ]
         creds = Credentials.from_service_account_file(self.creds_path, scopes=scopes)
+
         self.gc = gspread.authorize(creds)
         self.sh = self._with_retry(self.gc.open_by_key, self.spreadsheet_id)
 
@@ -65,13 +70,70 @@ class SheetsAdapter:
                 msg = repr(e)
                 is_429 = ("429" in msg) or ("Quota exceeded" in msg) or ("RATE_LIMIT" in msg)
                 is_5xx = any(code in msg for code in ["500", "502", "503", "504"])
-
                 if is_429 or is_5xx:
                     sleep_s = min(2 ** attempt, 30)
                     time.sleep(sleep_s)
                     continue
                 raise
         raise RuntimeError("Sheets API: demasiados reintentos (429/5xx).")
+
+    # -----------------------------
+    # Normalización de valores (CRÍTICO)
+    # -----------------------------
+    def _to_cell_value(self, v: Any) -> Any:
+        """
+        Convierte tipos Python no serializables (datetime, Decimal, UUID, etc.)
+        a valores que gspread/Sheets aceptan sin romper serialización JSON.
+
+        Política:
+          - None -> ""
+          - bool/int/float/str -> se dejan
+          - datetime/date/time -> ISO8601
+          - Decimal/UUID -> str
+          - dict/list -> json
+          - bytes -> base64
+          - fallback -> str
+        """
+        if v is None:
+            return ""
+
+        # Tipos básicos
+        if isinstance(v, (str, int, float, bool)):
+            return v
+
+        # Fechas/horas
+        if isinstance(v, (datetime, date, dtime)):
+            # ISO (Sheets lo deja como string; si quieres formato fecha real,
+            # ya lo formateas en la hoja)
+            return v.isoformat()
+
+        # Numéricos/IDs no JSON
+        if isinstance(v, (Decimal, UUID)):
+            return str(v)
+
+        # Bytes
+        if isinstance(v, (bytes, bytearray, memoryview)):
+            b = bytes(v)
+            return base64.b64encode(b).decode("ascii")
+
+        # Estructuras
+        if isinstance(v, (dict, list, tuple)):
+            try:
+                return json.dumps(v, ensure_ascii=False)
+            except Exception:
+                return str(v)
+
+        # Fallback
+        return str(v)
+
+    def _normalize_matrix(self, rows: Sequence[Tuple[Any, ...]]) -> List[List[Any]]:
+        """
+        Convierte rows (tuplas) a matriz lista para ws.update().
+        """
+        out: List[List[Any]] = []
+        for r in rows:
+            out.append([self._to_cell_value(x) for x in r])
+        return out
 
     # -----------------------------
     # Helpers
@@ -85,7 +147,6 @@ class SheetsAdapter:
         try:
             return self._with_retry(self.sh.worksheet, title)
         except Exception:
-            # worksheet nueva con tamaño conservador
             return self._with_retry(self.sh.add_worksheet, title=title, rows=2000, cols=60)
 
     def ensure_headers(self, table: str, headers: List[str]) -> None:
@@ -132,20 +193,16 @@ class SheetsAdapter:
         """
         ws = self._get_or_create_ws(table)
 
-        # Importante: ensure_headers hace lecturas; en SyncEngine lo hacemos solo en execute=True,
-        # pero aquí lo dejamos por seguridad si alguien llama directo.
-        if execute:
-            self.ensure_headers(table, headers)
-
         if not execute:
             return
 
-        # Convertimos rows a valores "gspread-friendly"
-        data: List[List[Any]] = []
-        for r in rows:
-            data.append([("" if v is None else v) for v in r])
+        # Aseguramos headers (esto lee/actualiza)
+        self.ensure_headers(table, headers)
 
-        # Limpieza: destructivo borra todo, no destructivo limpia rango de datos
+        # Normalizamos filas (EVITA TypeError datetime no JSON serializable)
+        data = self._normalize_matrix(rows)
+
+        # Limpieza
         if allow_destructive:
             self._with_retry(ws.clear)
             self._with_retry(ws.update, "A1", [headers])
@@ -155,5 +212,4 @@ class SheetsAdapter:
         if not data:
             return
 
-        # Escritura desde A2
         self._with_retry(ws.update, "A2", data)
