@@ -1,7 +1,7 @@
 # backend/app/utils/db/core.py
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from backend.app.utils.db.dbsync.postgres_adapter import PostgresAdapter
 from backend.app.utils.db.dbsync.sheets_adapter import SheetsAdapter
@@ -11,15 +11,17 @@ class SyncEngine:
     """
     Motor de sincronización “tabla a tabla”.
 
-    Mantiene el mismo contrato conceptual que venías usando:
+    Contrato:
       engine.mirror(tables=[...], execute=..., allow_destructive=...)
 
     Reglas:
-    - source y dest pueden ser Postgres o Sheets.
-    - Si el destino es Postgres: creamos tabla si no existe (schema básico) y escribimos.
-    - Si el destino es Sheets: worksheet por tabla, headers + filas.
-    - Views/MATVIEW:
-        - En modo allow_destructive=False las saltamos para evitar conflictos (DuplicateTable, etc.)
+      - source y dest pueden ser Postgres o Sheets.
+      - Views/MATVIEW:
+          - En allow_destructive=False las saltamos para evitar conflictos.
+      - Dry-run (execute=False):
+          - No escribe.
+          - Importante: si el destino es Sheets, NO hacemos lecturas de headers
+            (evita exceder cuotas por minuto).
     """
 
     def __init__(self, source, dest, config: Optional[Dict[str, Any]] = None):
@@ -35,28 +37,28 @@ class SyncEngine:
         execute: bool,
         allow_destructive: bool,
     ) -> None:
-        """
-        Replica cada tabla:
-        - lee headers+rows desde source
-        - asegura estructura en destino
-        - escribe (si execute=True) o simula (execute=False)
-        """
         for full_name in tables:
             if exclude and full_name in set(exclude):
                 print(f"[mirror] {full_name}: skip (excluded)")
                 continue
 
-            # Si el source es Postgres, detectamos si es view/matview
+            # Detectar views/matviews en source Postgres
             if isinstance(self.source, PostgresAdapter):
                 info = self.source.table_info(full_name)
                 if info.is_view and not allow_destructive:
-                    print(f"{full_name} es VIEW/MATVIEW. allow_drop=False → skip para evitar DuplicateTable")
+                    print(
+                        f"{full_name} es VIEW/MATVIEW. allow_drop=False → skip para evitar conflictos"
+                    )
                     print(f"[mirror] {full_name}: DRY-RUN (no write)" if not execute else f"[mirror] {full_name}: skip view")
+                    print("[mirror] done")
                     continue
 
             print(f"[mirror] {full_name}: begin")
 
-            # --- Read ---
+            # --- Read (desde source) ---
+            headers: List[str]
+            rows: List[Tuple[Any, ...]]
+
             if isinstance(self.source, PostgresAdapter):
                 headers, rows = self.source.read_table(full_name)
             elif isinstance(self.source, SheetsAdapter):
@@ -66,13 +68,18 @@ class SyncEngine:
 
             # --- Ensure destination structure ---
             if isinstance(self.dest, PostgresAdapter) and isinstance(self.source, PostgresAdapter):
-                # Creamos tabla en destino desde reflection del engine origen.
+                # En Postgres->Postgres, reflejamos estructura real
                 self.dest.ensure_table_from_source(self.source.engine, full_name)
 
             if isinstance(self.dest, SheetsAdapter):
-                # Asegura headers en worksheet
-                self.dest.ensure_headers(full_name, headers)
-                print(f"[Sheets] {full_name}: headers OK")
+                # IMPORTANTE:
+                # - ensure_headers hace lecturas de Sheets (cuota)
+                # - en DRY-RUN no tocamos Sheets
+                if execute:
+                    self.dest.ensure_headers(full_name, headers)
+                    print(f"[Sheets] {full_name}: headers OK")
+                else:
+                    print(f"[Sheets] {full_name}: (dry-run) skip headers check")
 
             # --- Write ---
             if isinstance(self.dest, PostgresAdapter):
@@ -84,6 +91,7 @@ class SyncEngine:
                     allow_destructive=allow_destructive,
                 )
             elif isinstance(self.dest, SheetsAdapter):
+                # En dry-run no escribimos (y ya hemos evitado lecturas)
                 self.dest.write_table(
                     full_name,
                     headers,

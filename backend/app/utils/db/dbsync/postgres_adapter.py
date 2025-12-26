@@ -2,217 +2,163 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, List, Sequence, Tuple
 
 from sqlalchemy import (
+    Column,
     MetaData,
     Table,
-    Column,
     create_engine,
     inspect,
     text,
 )
 from sqlalchemy.engine import Engine
-from sqlalchemy.sql import quoted_name
+from sqlalchemy.exc import SQLAlchemyError
 
 
-@dataclass
-class ColumnInfo:
-    name: str
-    type: str
-    nullable: bool
-
-
-@dataclass
+@dataclass(frozen=True)
 class TableInfo:
-    full_name: str            # "public.users"
-    schema: str               # "public"
-    name: str                 # "users"
-    columns: List[ColumnInfo]
-    primary_key: List[str]
-    is_view: bool = False     # vista/materialized view
-    row_count: Optional[int] = None
+    full_name: str
+    schema: str
+    name: str
+    is_view: bool  # True si es VIEW o MATVIEW
 
 
 class PostgresAdapter:
     """
-    Adapter Postgres para SyncEngine (backend/app/utils/db/core.py).
+    Adapter Postgres para SyncEngine.
 
-    CONTRATO (según tu SyncEngine):
-      - list_tables() -> List[str]
-      - table_info(full_name) -> TableInfo
-      - read_table(full_name) -> (headers: List[str], rows: List[Tuple[Any,...]])
-      - ensure_table_from_source(source_engine, full_name) -> None
-      - write_table(full_name, headers, rows, execute, allow_destructive) -> None
+    Características:
+      - Conecta con SQLAlchemy+psycopg.
+      - Implementa introspección mínima para:
+          list_tables, table_info, read_table, ensure_table_from_source, write_table.
 
-    Notas operativas:
-      - execute=False => NO escribe (dry-run).
-      - allow_destructive=False => comportamiento conservador:
-          * si la tabla existe, no la altera (no drop/alter)
-          * en write_table: usa TRUNCATE + INSERT (si execute=True)
-      - allow_destructive=True:
-          * permite DROP + recreate en algunos casos (si tú lo activas).
+    Nota importante:
+      - Para evitar problemas con poolers/prepared statements, es recomendable
+        incluir en la URL: prepare_threshold=0 o en connect_args como int.
+      - Aquí NO sobreescribimos connect_args, asumimos que ya lo traes en la URL,
+        pero añadimos una mitigación defensiva en session.py. Aun así, este adapter
+        funciona si la URL trae prepare_threshold=0.
     """
 
     def __init__(self, db_url: str):
-        self.db_url = db_url
+        self.db_url = (db_url or "").strip().strip('"').strip("'")
+        if not self.db_url:
+            raise RuntimeError("DB URL vacía para PostgresAdapter")
 
-        # OJO: prepare_threshold debe ser INT, no string.
-        # Si lo pasas en URL como "prepare_threshold=0" está bien,
-        # pero además lo fijamos en connect_args para evitar sorpresas.
+        # Engine “ligero”: este adapter se usa para jobs puntuales (sync).
+        # pool_pre_ping ayuda en conexiones efímeras / redes.
         self.engine: Engine = create_engine(
-            db_url,
+            self.db_url,
             pool_pre_ping=True,
             future=True,
             connect_args={
+                # Estas claves son seguras con psycopg3
                 "connect_timeout": 10,
                 "sslmode": "require",
-                "options": "-c search_path=public",
+                # prepare_threshold debe ser int (evita TypeError de psycopg)
                 "prepare_threshold": 0,
             },
         )
-        self._insp = inspect(self.engine)
 
-    # ---------------------------------------------------------------------
-    # Helpers
-    # ---------------------------------------------------------------------
-    @staticmethod
-    def _split_full_name(full_name: str) -> Tuple[str, str]:
-        full = (full_name or "").strip()
-        if "." in full:
-            s, t = full.split(".", 1)
-            return s.strip('"'), t.strip('"')
-        return "public", full.strip('"')
-
-    def _table_exists(self, schema: str, table: str) -> bool:
-        return table in set(self._insp.get_table_names(schema=schema))
-
-    def _view_exists(self, schema: str, name: str) -> bool:
-        return name in set(self._insp.get_view_names(schema=schema))
-
-    # ---------------------------------------------------------------------
-    # API: discovery
-    # ---------------------------------------------------------------------
+    # -----------------------------
+    # Introspección
+    # -----------------------------
     def list_tables(self) -> List[str]:
         """
-        Devuelve tablas y vistas como 'schema.name'.
-        Tu db_router después filtra public.*.
+        Devuelve tablas candidatas en public, incluyendo:
+          - tablas (relkind 'r')
+          - vistas (relkind 'v')
+          - matviews (relkind 'm')
         """
-        out: List[str] = []
-        for schema in self._insp.get_schema_names():
-            for t in self._insp.get_table_names(schema=schema):
-                out.append(f"{schema}.{t}")
-            for v in self._insp.get_view_names(schema=schema):
-                out.append(f"{schema}.{v}")
-        # dedupe manteniendo orden
-        return list(dict.fromkeys(out))
-
-    # ---------------------------------------------------------------------
-    # API: table_info
-    # ---------------------------------------------------------------------
-    def table_info(self, full_name: str) -> TableInfo:
-        schema, name = self._split_full_name(full_name)
-
-        cols_raw = self._insp.get_columns(name, schema=schema)
-        cols = [
-            ColumnInfo(
-                name=c["name"],
-                type=str(c.get("type", "")),
-                nullable=bool(c.get("nullable", True)),
-            )
-            for c in cols_raw
-        ]
-
-        pk = self._insp.get_pk_constraint(name, schema=schema) or {}
-        pk_cols = list(pk.get("constrained_columns") or [])
-
-        is_view = self._view_exists(schema, name)
-
-        # row_count es útil para debug, pero no debe romper nada si falla
-        row_count: Optional[int] = None
-        try:
-            with self.engine.connect() as conn:
-                row_count = conn.execute(
-                    text(f'SELECT COUNT(*) FROM "{schema}"."{name}"')
-                ).scalar_one()
-        except Exception:
-            row_count = None
-
-        return TableInfo(
-            full_name=f"{schema}.{name}",
-            schema=schema,
-            name=name,
-            columns=cols,
-            primary_key=pk_cols,
-            is_view=is_view,
-            row_count=row_count,
+        q = text(
+            """
+            SELECT n.nspname AS schema, c.relname AS name
+            FROM pg_class c
+            JOIN pg_namespace n ON n.oid = c.relnamespace
+            WHERE n.nspname = 'public'
+              AND c.relkind IN ('r','v','m')
+            ORDER BY n.nspname, c.relname
+            """
         )
+        with self.engine.connect() as conn:
+            rows = conn.execute(q).fetchall()
+        return [f"{r.schema}.{r.name}" for r in rows]
 
-    # ---------------------------------------------------------------------
-    # API: read_table  (ESTO era lo que te faltaba)
-    # ---------------------------------------------------------------------
+    def table_info(self, full_name: str) -> TableInfo:
+        schema, name = self._split(full_name)
+
+        q = text(
+            """
+            SELECT c.relkind
+            FROM pg_class c
+            JOIN pg_namespace n ON n.oid = c.relnamespace
+            WHERE n.nspname = :schema AND c.relname = :name
+            LIMIT 1
+            """
+        )
+        with self.engine.connect() as conn:
+            relkind = conn.execute(q, {"schema": schema, "name": name}).scalar()
+
+        # relkind:
+        #   r=table, v=view, m=matview
+        is_view = relkind in ("v", "m")
+        return TableInfo(full_name=full_name, schema=schema, name=name, is_view=is_view)
+
+    # -----------------------------
+    # Lectura / Escritura
+    # -----------------------------
     def read_table(self, full_name: str) -> Tuple[List[str], List[Tuple[Any, ...]]]:
         """
-        Lee todas las filas de una tabla (uso en SyncEngine).
-        Devuelve headers (orden de columnas) + rows (tuplas).
+        Lee tabla/vista completa (SELECT *).
 
-        - Usa ORDER BY por PK si existe; si no, ordena por la primera columna
-          para tener resultados deterministas (útil en comparaciones).
+        Para tablas grandes, considera paginar; en tu caso (tablas auxiliares),
+        suele ser suficiente.
+        """
+        schema, name = self._split(full_name)
+        sql = text(f'SELECT * FROM "{schema}"."{name}"')
+        with self.engine.connect() as conn:
+            res = conn.execute(sql)
+            headers = list(res.keys())
+            rows = [tuple(r) for r in res.fetchall()]
+        return headers, rows
+
+    def ensure_table_from_source(self, source_engine: Engine, full_name: str) -> None:
+        """
+        Crea la tabla en el destino si no existe, reflejando columnas del origen.
+
+        - Si es vista/matview: NO creamos (normalmente no se replica como tabla).
+        - Si ya existe en destino: no hace nada.
         """
         info = self.table_info(full_name)
         if info.is_view:
-            # Views: se pueden leer igualmente.
-            pass
-
-        headers = [c.name for c in info.columns]
-        if not headers:
-            return [], []
-
-        order_cols = info.primary_key or [headers[0]]
-        order_sql = ", ".join([f'"{c}"' for c in order_cols if c in headers]) or f'"{headers[0]}"'
-
-        schema, name = info.schema, info.name
-        sql = text(f'SELECT * FROM "{schema}"."{name}" ORDER BY {order_sql}')
-
-        with self.engine.connect() as conn:
-            res = conn.execute(sql)
-            rows = res.fetchall()
-
-        # rows ya son tuplas (Row), las convertimos a tuple puro por estabilidad
-        return headers, [tuple(r) for r in rows]
-
-    # ---------------------------------------------------------------------
-    # API: ensure_table_from_source  (Postgres -> Postgres)
-    # ---------------------------------------------------------------------
-    def ensure_table_from_source(self, source_engine: Engine, full_name: str) -> None:
-        """
-        Crea la tabla en destino si NO existe, clonando estructura desde origen
-        usando reflection de SQLAlchemy.
-
-        Conservador:
-        - Si existe => no hace nada.
-        - No intenta replicar índices/constraints complejas (más allá del schema básico
-          que SQLAlchemy refleje para CREATE TABLE).
-        """
-        schema, name = self._split_full_name(full_name)
-
-        # Si es vista en el origen, aquí NO la creamos como tabla.
-        # Tu SyncEngine ya filtra views cuando allow_destructive=False.
-        dest_insp = inspect(self.engine)
-        if name in set(dest_insp.get_table_names(schema=schema)):
+            # Las vistas se gestionan fuera de este sync (o se ignoran).
             return
 
+        schema, name = info.schema, info.name
+        dest_inspector = inspect(self.engine)
+
+        # Si existe, no tocamos
+        if name in dest_inspector.get_table_names(schema=schema):
+            return
+
+        # Reflejar columnas desde source_engine
+        src_inspector = inspect(source_engine)
+        cols = src_inspector.get_columns(name, schema=schema)
+        if not cols:
+            raise RuntimeError(f"No se pudieron obtener columnas de {full_name} en source")
+
         md = MetaData(schema=schema)
+        columns: List[Column] = []
+        for c in cols:
+            col_name = c["name"]
+            col_type = c["type"]
+            nullable = bool(c.get("nullable", True))
+            columns.append(Column(col_name, col_type, nullable=nullable))
 
-        # Reflejamos SOLO esa tabla desde el engine origen
-        Table(name, md, autoload_with=source_engine)
+        t = Table(name, md, *columns)
+        md.create_all(self.engine, tables=[t])
 
-        # Creamos en destino
-        md.create_all(self.engine, checkfirst=True)
-
-    # ---------------------------------------------------------------------
-    # API: write_table
-    # ---------------------------------------------------------------------
     def write_table(
         self,
         full_name: str,
@@ -223,71 +169,70 @@ class PostgresAdapter:
         allow_destructive: bool,
     ) -> None:
         """
-        Escribe datos en Postgres.
+        Escribe en Postgres.
 
-        Estrategia (simple y fiable):
-        - Si execute=False => no escribe.
-        - Si tabla no existe:
-            * crea tabla con columnas TEXT si no se ha clonado antes
-              (esto cubre el caso Sheets -> Postgres, donde SyncEngine no llama a ensure_table_from_source).
-        - Si existe:
-            * allow_destructive=False => TRUNCATE + INSERT
-            * allow_destructive=True  => TRUNCATE + INSERT (y opcionalmente podrías DROP+recreate,
-              pero no lo aplico automáticamente para no arriesgar datos)
+        Estrategia conservadora:
+          - execute=False => no escribe
+          - execute=True:
+              - si allow_destructive: intenta DROP+CREATE minimal si hiciera falta
+              - TRUNCATE
+              - INSERT por lotes
+
+        Nota: si ya has llamado ensure_table_from_source(), normalmente no necesitas recrear.
         """
         if not execute:
             return
 
-        schema, name = self._split_full_name(full_name)
+        schema, name = self._split(full_name)
+        ins = inspect(self.engine)
 
-        # 1) Asegurar tabla existe (caso Sheets -> Postgres)
-        if not self._table_exists(schema, name):
-            if not headers:
-                # Nada que crear
-                return
+        # Si no existe, creamos una tabla “mínima” con TEXT (fallback)
+        if name not in ins.get_table_names(schema=schema):
+            if allow_destructive:
+                self._drop_if_exists(schema, name)
             self._create_text_table(schema, name, headers)
 
-        # 2) TRUNCATE (conservador, pero deja el schema intacto)
+        # Truncar (rápido)
         with self.engine.begin() as conn:
-            conn.execute(text(f'TRUNCATE TABLE "{schema}"."{name}"'))
+            conn.execute(text(f'TRUNCATE TABLE "{schema}"."{name}" RESTART IDENTITY CASCADE'))
 
-            if not rows:
-                return
+        if not rows:
+            return
 
-            # 3) INSERT masivo
-            col_sql = ", ".join([f'"{c}"' for c in headers])
-            val_sql = ", ".join([f":v{i}" for i in range(len(headers))])
-            ins = text(f'INSERT INTO "{schema}"."{name}" ({col_sql}) VALUES ({val_sql})')
+        # Insert por lotes
+        md = MetaData(schema=schema)
+        t = Table(name, md, autoload_with=self.engine)
 
-            batch: List[Dict[str, Any]] = []
-            for r in rows:
-                # Asegura longitud y mapea por posición
-                rr = list(r) + [None] * max(0, len(headers) - len(r))
-                rr = rr[: len(headers)]
-                batch.append({f"v{i}": rr[i] for i in range(len(headers))})
+        batch_size = 1000
+        with self.engine.begin() as conn:
+            for i in range(0, len(rows), batch_size):
+                chunk = rows[i : i + batch_size]
+                payload = [dict(zip(headers, r)) for r in chunk]
+                conn.execute(t.insert(), payload)
 
-            conn.execute(ins, batch)
+    # -----------------------------
+    # Helpers internos
+    # -----------------------------
+    def _split(self, full_name: str) -> tuple[str, str]:
+        if "." in full_name:
+            schema, name = full_name.split(".", 1)
+            return schema, name
+        return "public", full_name
 
-    # ---------------------------------------------------------------------
-    # Internal: create TEXT table (Sheets -> Postgres)
-    # ---------------------------------------------------------------------
+    def _drop_if_exists(self, schema: str, name: str) -> None:
+        try:
+            with self.engine.begin() as conn:
+                conn.execute(text(f'DROP TABLE IF EXISTS "{schema}"."{name}" CASCADE'))
+        except SQLAlchemyError:
+            # No bloquea, pero lo dejamos visible en logs superiores
+            raise
+
     def _create_text_table(self, schema: str, name: str, headers: List[str]) -> None:
         """
-        Crea una tabla básica con columnas TEXT.
-        Se usa cuando el origen no es Postgres (p.ej. Sheets) y por tanto no hay reflection.
+        Crea tabla básica con columnas TEXT (fallback).
+        Útil si copias a un destino vacío sin reflection previa.
         """
-        md = MetaData(schema=schema)
-        cols = []
-        for h in headers:
-            # quoted_name preserva case y evita problemas con palabras reservadas
-            colname = quoted_name(h, quote=True)
-            cols.append(Column(colname, text("").type))  # placeholder, lo corregimos abajo
-
-        # SQLAlchemy no expone TEXT directamente así con text("").type de forma elegante.
-        # Usamos Column(String) suele servir, pero prefiero TEXT literal en SQL.
-        # Para mantener esto simple y fiable, generamos SQL manual:
-        cols_sql = ", ".join([f'"{h}" TEXT' for h in headers])
-
+        cols_sql = ", ".join([f'"{h}" TEXT NULL' for h in headers])
+        ddl = f'CREATE TABLE IF NOT EXISTS "{schema}"."{name}" ({cols_sql})'
         with self.engine.begin() as conn:
-            conn.execute(text(f'CREATE SCHEMA IF NOT EXISTS "{schema}"'))
-            conn.execute(text(f'CREATE TABLE "{schema}"."{name}" ({cols_sql})'))
+            conn.execute(text(ddl))
