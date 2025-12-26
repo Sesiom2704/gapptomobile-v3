@@ -15,8 +15,6 @@ import { login as loginRequest, LoginResponse } from "../services/authApi";
  * Mantener constantes evita typos y te permite migrar fácil en el futuro.
  */
 const STORAGE_TOKEN_KEY = "userToken";
-// Si en el futuro decides guardar userData:
-// const STORAGE_USER_KEY = "userData";
 
 type AuthUser = {
   id: string;
@@ -28,8 +26,26 @@ type AuthUser = {
 type AuthContextType = {
   token: string | null;
   user: AuthUser | null;
+
+  /**
+   * isAuthenticated:
+   * - Verdadero si hay token en memoria (lo aplicamos también a axios).
+   */
   isAuthenticated: boolean;
+
+  /**
+   * isLoading:
+   * - Estado del proceso de login (UI del botón “Entrar”).
+   */
   isLoading: boolean;
+
+  /**
+   * isHydrating:
+   * - Verdadero mientras leemos SecureStore al arrancar.
+   * - Nos permite “esperar” en BootScreen para no decidir Login/Main antes de tiempo.
+   */
+  isHydrating: boolean;
+
   login: (email: string, password: string) => Promise<void>;
   logout: () => Promise<void>;
 };
@@ -42,7 +58,7 @@ const AuthContext = createContext<AuthContextType | undefined>(undefined);
  */
 const maskToken = (t: string | null | undefined) => {
   if (!t) return "<none>";
-  const head = t.slice(0, 200); // ej: "eyJhbGciOi..."
+  const head = t.slice(0, 200);
   return `${head}... (len=${t.length})`;
 };
 
@@ -51,7 +67,12 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({
 }) => {
   const [token, setTokenState] = useState<string | null>(null);
   const [user, setUserState] = useState<AuthUser | null>(null);
+
+  // isLoading = login en curso
   const [isLoading, setIsLoading] = useState(false);
+
+  // isHydrating = lectura de SecureStore en arranque
+  const [isHydrating, setIsHydrating] = useState(true);
 
   /**
    * Aplica token:
@@ -104,14 +125,12 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({
    * - lo aplicamos a axios
    * - marcamos sesión como autenticada sin pedir login de nuevo
    *
-   * Nota:
-   * - No reconstruimos el user aquí porque tu backend tiene /api/v1/auth/me.
-   * - Lo ideal es que, si hay token, llames a /me y rellenes user.
-   *   Pero como ahora estamos depurando “por qué no carga datos”, lo importante
-   *   es garantizar que Authorization se envía desde el primer fetch.
+   * Importante:
+   * - Marcamos isHydrating=false al final, para que BootScreen pueda decidir.
    */
   useEffect(() => {
     (async () => {
+      setIsHydrating(true);
       try {
         const savedToken = await SecureStore.getItemAsync(STORAGE_TOKEN_KEY);
         if (savedToken) {
@@ -122,6 +141,8 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({
         }
       } catch (e) {
         console.log("[Auth] Error leyendo token de SecureStore:", e);
+      } finally {
+        setIsHydrating(false);
       }
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -178,6 +199,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({
     user,
     isAuthenticated: !!token,
     isLoading,
+    isHydrating,
     login,
     logout,
   };

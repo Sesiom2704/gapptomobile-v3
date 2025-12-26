@@ -5,26 +5,54 @@ Punto de entrada principal del backend de GapptoMobile v3.
 
 Aquí definimos:
 - La instancia de FastAPI.
-- La configuración básica de CORS.
-- Endpoints de salud (/health y /api/health).
-- El arranque de la aplicación (evento startup) y uso de la base de datos.
+- CORS.
+- Endpoints base: /, /health, /api/health, /ready.
+- Endpoint debug: /__routes.
+- Middleware debug de Authorization en gastos-cotidianos.
+- Routers de negocio (api/v1).
+- Router técnico de gestión de BD (api/db): sync Neon/Supabase/Sheets.
 
-Más adelante:
-- Iremos añadiendo los routers de negocio en backend/app/api/v1/*
-  (gastos, ingresos, daybyday, balance, etc.) sin perder funcionalidades.
+IMPORTANTE:
+- Cargamos backend/.env antes de inicializar engine / adapters.
+- Preparación de credenciales Google (Sheets) NO debe bloquear el arranque.
 """
 
+from __future__ import annotations
+
+from pathlib import Path
 from typing import Callable
 
-from fastapi import FastAPI, Depends
+# ---------------------------------------------------------------------------
+# 0) Carga de variables de entorno (backend/.env) ANTES de importar engine
+# ---------------------------------------------------------------------------
+try:
+    from dotenv import load_dotenv  # type: ignore
+except Exception:
+    load_dotenv = None  # fallback (si no tienes python-dotenv)
+
+if load_dotenv:
+    # Este fichero está en: backend/app/main.py
+    # backend/.env => parents[1] del directorio "app" = ".../backend"
+    BACKEND_ENV = Path(__file__).resolve().parents[1] / ".env"
+    if BACKEND_ENV.is_file():
+        load_dotenv(BACKEND_ENV)
+        print(f"[startup] Loaded env: {BACKEND_ENV}")
+    else:
+        # fallback: carga .env “por defecto” si existe en CWD
+        load_dotenv()
+
+from fastapi import Depends, FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.routing import APIRoute
 from sqlalchemy import text as sa_text
 from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.orm import Session
 
 from backend.app.db.session import engine, get_db
-from backend.app.db.base import Base
-from sqlalchemy.orm import Session
+
+# Bootstrap opcional de Google creds (Sheets)
+# Si no usas Sheets en un entorno, NO debe impedir levantar el backend.
+from backend.app.google_creds_bootstrap import ensure_gcp_creds_file
 
 
 # ---------------------------------------------------------------------------
@@ -32,19 +60,11 @@ from sqlalchemy.orm import Session
 # ---------------------------------------------------------------------------
 def custom_generate_unique_id(route: APIRoute) -> str:
     """
-    Genera un identificador único para cada operación de la API.
+    Genera un operation_id estable y único para OpenAPI.
 
-    ¿Para qué sirve esto?
-    ---------------------
-    - FastAPI genera por defecto operation_id a partir del nombre de la función.
-    - Si tienes muchas rutas o reusas nombres, puede haber colisiones en la
-      documentación OpenAPI/Swagger.
-    - Con este generador, usamos un patrón estable y legible:
-        <nombre_router>_<nombre_función>
-      por ejemplo: "gastos_listar_gastos" o "ingresos_crear_ingreso".
+    - Evita colisiones si reusas nombres de funciones.
+    - Patrón: <tag>_<route.name>
     """
-    # route.name es el nombre de la función de Python que maneja la ruta.
-    # route.tags suele contener el "módulo" o categoría (por ejemplo ["gastos"]).
     tag_prefix = route.tags[0] if route.tags else "default"
     return f"{tag_prefix}_{route.name}"
 
@@ -61,51 +81,53 @@ app = FastAPI(
 
 
 # ---------------------------------------------------------------------------
-# 3) Configuración de CORS
+# 3) CORS
 # ---------------------------------------------------------------------------
-# En desarrollo permitimos todo (*) para no tener problemas con el frontend.
-# Más adelante podemos restringir a la URL real de la app móvil / web.
-origins = [
-    "*",  # ⚠️ Permite cualquier origen. En producción, mejor restringir.
-]
-
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=origins,        # Quién puede hacer peticiones
+    allow_origins=["*"],  # En producción, restringir
     allow_credentials=True,
-    allow_methods=["*"],          # Qué métodos HTTP se permiten
-    allow_headers=["*"],          # Qué cabeceras se permiten
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 
 # ---------------------------------------------------------------------------
-# 4) Evento de arranque (startup)
+# 4) Evento startup
 # ---------------------------------------------------------------------------
 @app.on_event("startup")
 def on_startup() -> None:
     """
-    Código que se ejecuta cuando arranca la aplicación.
+    Arranque del backend.
 
-    Aquí podemos:
-    - Comprobar que la conexión a la base de datos funciona.
-    - (Opcional) crear tablas si estamos en desarrollo.
-      En producción, preferiremos manejar la estructura con Alembic.
+    - Prepara credenciales de Google Sheets (si están configuradas).
+    - Comprueba conectividad con la BD principal (engine).
     """
-    # Opción 1 (recomendada): solo comprobar conexión.
+    import os
+
+    # --- Diagnóstico rápido de env crítica para gestión BD ---
+    print("[startup] DB_URL_NEON set?      ", bool(os.getenv("DB_URL_NEON")))
+    print("[startup] DB_URL_SUPABASE set?  ", bool(os.getenv("DB_URL_SUPABASE")))
+    print("[startup] GOOGLE_SHEETS_ID set? ", bool(os.getenv("GOOGLE_SHEETS_ID")))
+    print("[startup] GOOGLE_APPLICATION_CREDENTIALS =", os.getenv("GOOGLE_APPLICATION_CREDENTIALS"))
+
+    # --- Google creds bootstrap (Sheets) ---
+    # No bloquea el arranque si algo está mal configurado.
+    try:
+        creds_path = ensure_gcp_creds_file()
+        if creds_path:
+            print(f"[startup] Google creds listo: {creds_path}")
+        else:
+            print("[startup] Google creds no configurado (OK si no usas Sheets).")
+    except Exception as e:
+        print(f"[startup] Error preparando Google creds (no bloqueante): {e}")
+
+    # --- Check BD principal ---
     try:
         with engine.connect() as conn:
             conn.execute(sa_text("SELECT 1"))
     except SQLAlchemyError as e:
-        # En un entorno real, aquí usaríamos logging en lugar de print.
         print(f"[startup] Error al comprobar la BD: {e}")
-
-    # Opción 2 (solo para desarrollo):
-    # --------------------------------
-    # Si quisieras crear todas las tablas definidas en Base.metadata
-    # descomenta esta línea, pero OJO: en una BD ya en producción
-    # lo normal es usar migraciones (Alembic), no create_all().
-    #
-    # Base.metadata.create_all(bind=engine)
 
 
 # ---------------------------------------------------------------------------
@@ -113,21 +135,15 @@ def on_startup() -> None:
 # ---------------------------------------------------------------------------
 @app.get("/", tags=["core"])
 def root() -> dict:
-    """
-    Endpoint raíz de la API.
-
-    Útil como prueba rápida de que el servidor está respondiendo.
-    """
+    """Endpoint raíz de la API."""
     return {"message": "GapptoMobile v3 backend is running"}
 
 
 @app.get("/health", tags=["core"])
 def health_simple() -> dict:
     """
-    Healthcheck simple.
-
-    No comprueba la base de datos, solo responde "ok".
-    Útil para un test muy rápido de que el servidor está levantado.
+    Healthcheck simple:
+    - servidor vivo (sin tocar BD).
     """
     return {"status": "ok"}
 
@@ -135,24 +151,33 @@ def health_simple() -> dict:
 @app.get("/api/health", tags=["core"])
 def health_api(db: Session = Depends(get_db)) -> dict:
     """
-    Healthcheck completo de la API.
-
-    - Abre una sesión de base de datos con get_db.
-    - Ejecuta un SELECT 1.
-    - Devuelve información sobre si la conexión ha ido bien.
-
-    Si hay algún problema de conexión con la BD, devuelve status = "error"
-    y un mensaje con el detalle del error.
+    Healthcheck completo:
+    - SELECT 1 a BD.
+    - Mantener por compatibilidad.
     """
     try:
-        # Usamos la sesión "db" que nos inyecta FastAPI mediante Depends(get_db)
         db.execute(sa_text("SELECT 1"))
         return {"status": "ok", "db": "reachable"}
     except SQLAlchemyError as e:
         return {"status": "error", "db": "unreachable", "detail": str(e)}
 
+
+@app.get("/ready", tags=["core"])
+def ready(db: Session = Depends(get_db)) -> dict:
+    """
+    Readiness check (recomendado para app móvil):
+    - servidor vivo + BD accesible
+    """
+    try:
+        db.execute(sa_text("SELECT 1"))
+        return {"status": "ok", "db": "reachable"}
+    except SQLAlchemyError as e:
+        return {"status": "error", "db": "unreachable", "detail": str(e)}
+
+
 @app.get("/__routes", tags=["debug"])
 def list_routes():
+    """Listado de rutas (útil para depurar prefijos)."""
     return sorted(
         [
             {"path": r.path, "name": r.name, "methods": sorted(list(getattr(r, "methods", []) or []))}
@@ -161,32 +186,25 @@ def list_routes():
         key=lambda x: x["path"],
     )
 
-from fastapi import Request
 
+# ---------------------------------------------------------------------------
+# 5.b) Middleware debug (solo para una ruta concreta)
+# ---------------------------------------------------------------------------
 @app.middleware("http")
 async def log_auth_header(request: Request, call_next):
+    """
+    Debug puntual: inspecciona Authorization en gastos-cotidianos.
+    Mantengo tu comportamiento actual para no perder utilidad.
+    """
     if request.url.path.startswith("/api/v1/gastos-cotidianos"):
         auth = request.headers.get("authorization")
         print(f"[DEBUG] {request.method} {request.url.path} authorization={auth!r}")
     return await call_next(request)
 
-# ---------------------------------------------------------------------------
-# 6) Routers de negocio (v1) - MAPEADOS POR MÓDULO
-# ---------------------------------------------------------------------------
-# Objetivo:
-# - Evitar colisiones tipo /api/v1/pendientes (¿pendientes de qué?)
-# - Alinear el backend con el contrato real del móvil:
-#     /api/v1/gastos/...
-#     /api/v1/ingresos/...
-#     /api/v1/gastos-cotidianos/...
-#     /api/v1/movimientos-cuenta/...
-#     /api/v1/ubicaciones/...
-#
-# Regla:
-# - Routers "de dominio" van namespaced: /api/v1/<modulo>
-# - auth_router ya trae prefix="/auth" dentro del router -> solo se le aplica /api/v1
-# ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# 6) Routers de negocio (v1)
+# ---------------------------------------------------------------------------
 from backend.app.api.v1 import (
     auth_router,
     gastos_router,
@@ -214,15 +232,12 @@ from backend.app.api.v1 import (
 
 API_V1 = "/api/v1"
 
-# auth_router ya tiene prefix interno "/auth"
 app.include_router(auth_router.router, prefix=API_V1)
 
-# Routers planos -> namespace aquí
 app.include_router(gastos_router.router,            prefix=f"{API_V1}/gastos")
 app.include_router(ingresos_router.router,          prefix=f"{API_V1}/ingresos")
 app.include_router(gastos_cotidianos_router.router, prefix=f"{API_V1}/gastos-cotidianos")
 
-# Routers que YA llevan /cuentas, /tipos, /ramas, etc. dentro -> solo /api/v1
 app.include_router(cuentas_router.router,      prefix=API_V1)
 app.include_router(proveedores_router.router,  prefix=API_V1)
 app.include_router(tipos_router.router,        prefix=API_V1)
@@ -239,8 +254,22 @@ app.include_router(ramas_gasto_router.router, prefix=API_V1)
 app.include_router(tipos_gasto_router.router, prefix=API_V1)
 app.include_router(ubicaciones_router.router, prefix=API_V1)
 app.include_router(analytics_router.router, prefix=API_V1)
-app.include_router(cierre_mensual_router.router, prefix=API_V1) 
+app.include_router(cierre_mensual_router.router, prefix=API_V1)
 
-
+# Mantengo tu debug_router (si lo usas)
 app.include_router(debug_router.router)
 
+
+# ---------------------------------------------------------------------------
+# 7) Router técnico: gestión de BD (sync/migración)
+# ---------------------------------------------------------------------------
+# Este router expone:
+# - /api/db/ping
+# - /api/db/sync/start
+# - /api/db/sync/{job_id}
+# - /api/db/sync/{job_id}/cancel
+# - /api/db/sheets/check
+from backend.app.api.v1.db_router import router as db_router
+
+# db_router ya trae prefix="/api/db"
+app.include_router(db_router)

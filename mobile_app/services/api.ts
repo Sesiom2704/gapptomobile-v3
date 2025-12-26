@@ -51,6 +51,13 @@ if (!API_URL) {
 }
 
 /**
+ * Export explícito para otras capas (BootScreen, diagnósticos, etc.).
+ * - Evita re-parsear Constants en múltiples sitios.
+ * - Mantiene un único “source of truth”.
+ */
+export const getApiBaseUrl = (): string => API_URL;
+
+/**
  * --------------------------------------------
  * Estado global: DB selector + Auth token
  * --------------------------------------------

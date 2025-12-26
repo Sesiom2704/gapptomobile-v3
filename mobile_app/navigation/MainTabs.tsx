@@ -1,10 +1,12 @@
-// navigation/MainTabs.tsx
+// mobile_app/navigation/MainTabs.tsx
 // -----------------------------------------------------------------------------
 // Objetivo del cambio (simple y sin romper nada):
 // - Mantener tu navegación tal cual.
-// - Conectar tarjeta "Patrimonio" del Home con KPIs reales del HomeDashboard.
-// - Conectar "Ver propiedades" directo al listado:
-//     PatrimonyTab -> PropiedadesStack -> PropiedadesRanking
+// - Home: conectar la tarjeta "Patrimonio" a datos reales del dashboard.
+// - Añadir indicadores extra "pro":
+//     * NOI/VM (%): NOI total anual / Valor Mercado total
+//     * LTV aprox (%): Total inversión / Valor Mercado total
+// - Botón "Ver propiedades": navegar directo al ranking (PropiedadesStack).
 // - NO se elimina ninguna funcionalidad existente.
 // -----------------------------------------------------------------------------
 
@@ -377,6 +379,8 @@ const HomeHeader: React.FC<{
   onToggleHide: () => void;
 }> = ({ monthLabel, saldoPrevisto, hideAmounts, onToggleHide }) => {
   const navigation = useNavigation<any>();
+
+  // Cadena fija de máscara (sencillo y visible).
   const masked = '***********';
 
   return (
@@ -445,14 +449,18 @@ const HomeScreen: React.FC = () => {
 
   const monthLabel = useMemo(() => getMonthLabelES(month, year), [month, year]);
 
-  // Modo privado (ojo): se aplica a importes del HOME.
+  // Estado local para ocultar/mostrar importes en HOME
   const [hideAmounts, setHideAmounts] = useState(false);
   const masked = '***********';
 
-  // Formateo reutilizable: si hideAmounts => máscara, si no => EuroformatEuro
   const fmt = (value: number | null | undefined, mode: any) => {
     if (value == null) return '–';
     return hideAmounts ? masked : EuroformatEuro(value, mode);
+  };
+
+  const fmtPct = (value: number | null | undefined) => {
+    if (value == null) return '—';
+    return hideAmounts ? masked : `${value.toFixed(2)}%`;
   };
 
   const goGastoExtra = () => {
@@ -493,21 +501,12 @@ const HomeScreen: React.FC = () => {
     });
   };
 
-  // ---------------------------------------------------------------------------
-  // CAMBIO: "Ver propiedades" -> entra directo al stack de propiedades y
-  // a la pantalla inicial "PropiedadesRanking".
-  // (Esto evita pasar por PatrimonyHomeScreen si lo que quieres es ver el listado.)
-  // ---------------------------------------------------------------------------
+  // ✅ Ahora abrimos el ranking directamente
   const goVerPropiedades = () => {
-    navigation.navigate('PatrimonyTab', {
-      screen: 'PropiedadesStack',
-      params: { screen: 'PropiedadesRanking' },
-    });
+    navigation.navigate('PatrimonyTab', { screen: 'PropiedadesStack' });
   };
 
-  // -------------------------
   // Navegación desde barras (con retorno explícito a Home)
-  // -------------------------
   const goBarTotalGasto = () => {
     navigation.navigate('MonthTab', {
       screen: 'MonthBalanceScreen',
@@ -554,18 +553,14 @@ const HomeScreen: React.FC = () => {
     });
   };
 
-  // -------------------------
   // Datos para tarjetas y barras (HOME)
-  // -------------------------
   const liquidezTotal = data?.liquidezTotal ?? null;
   const ingresosMes = data?.ingresosMes ?? null;
 
   const gastosGestionablesMes = data?.gestionablesReal ?? null;
   const gastosCotidianosMes = data?.cotidianosReal ?? null;
 
-  // -------------------------
   // Datos para barras
-  // -------------------------
   const totalGastoActual = data?.totalGastoReal ?? 0;
   const totalGastoPresupuesto = data?.totalGastoPresupuestado ?? 0;
 
@@ -579,13 +574,17 @@ const HomeScreen: React.FC = () => {
   const cotidianosPresupuestados = data?.cotidianosPresupuestado ?? 0;
 
   // -------------------------
-  // NUEVO: Patrimonio (desde HomeDashboard)
+  // Patrimonio (Home)
   // -------------------------
-  const patrimonioCount = data?.patrimonioPropiedadesCount ?? 0;
-  const patrimonioValorMercado = data?.patrimonioValorMercadoTotal ?? null;
-  const patrimonioNoi = data?.patrimonioNoiTotal ?? null;
-  const patrimonioEquity = data?.patrimonioEquityTotal ?? null;
-  const patrimonioRentabBrutaPct = data?.patrimonioRentabilidadBrutaMediaPct ?? null;
+  const patPropsCount = data?.patrimonioPropiedadesCount ?? 0;
+  const patValorMercadoTotal = data?.patrimonioValorMercadoTotal ?? null;
+  const patNoiTotal = data?.patrimonioNoiTotal ?? null;
+  const patEquityTotal = data?.patrimonioEquityTotal ?? null;
+  const patBrutoMedioPct = data?.patrimonioRentabilidadBrutaMediaPct ?? null;
+
+  // Extras pro
+  const patNoiSobreVmPct = data?.patrimonioNoiSobreVmPct ?? null;
+  const patLtvAproxPct = data?.patrimonioLtvAproxPct ?? null;
 
   return (
     <View style={panelStyles.screen}>
@@ -873,38 +872,41 @@ const HomeScreen: React.FC = () => {
               <View>
                 <Text style={panelStyles.cardTitle}>Resumen de propiedades</Text>
                 <Text style={panelStyles.cardSubtitle}>
-                  {patrimonioCount > 0 ? `${patrimonioCount} activas` : 'Sin propiedades activas'}
+                  {patPropsCount > 0 ? `${patPropsCount} activa${patPropsCount === 1 ? '' : 's'}` : 'Sin propiedades activas'}
                 </Text>
               </View>
 
+              {/* Chip: Equity */}
               <Text style={styles.cardChipHighlight}>
-                Equity {fmt(patrimonioEquity, 'normal')}
+                Equity {fmt(patEquityTotal, 'signed')}
               </Text>
             </View>
 
             <View style={styles.patrimonioTopRow}>
               <View style={styles.patrimonioColLeft}>
-                <Text style={panelStyles.cardValue}>{fmt(patrimonioValorMercado, 'normal')}</Text>
+                <Text style={panelStyles.cardValue}>{fmt(patValorMercadoTotal, 'normal')}</Text>
                 <Text style={panelStyles.cardSubtitleSmall}>Valor mercado total</Text>
               </View>
 
               <View style={styles.patrimonioColRight}>
                 <Text style={styles.patrimonioRentLabel}>Rentabilidad bruta media</Text>
-                <Text style={styles.patrimonioRentValue}>
-                  {patrimonioRentabBrutaPct == null
-                    ? '—'
-                    : hideAmounts
-                      ? masked
-                      : `${patrimonioRentabBrutaPct.toFixed(2)} %`}
-                </Text>
+                <Text style={styles.patrimonioRentValue}>{fmtPct(patBrutoMedioPct)}</Text>
               </View>
             </View>
 
-            {/* Dato relevante extra: NOI total (compacto) */}
-            <View style={{ marginTop: 2, marginBottom: 6 }}>
-              <Text style={{ fontSize: 11, color: colors.textSecondary }}>
-                NOI total: {fmt(patrimonioNoi, 'normal')}
-              </Text>
+            {/* Segunda fila: NOI total + indicadores PRO */}
+            <View style={styles.patrimonioMetaRow}>
+              <View style={styles.patrimonioMetaItem}>
+                <Text style={styles.patrimonioMetaLabel}>NOI total (anual)</Text>
+                <Text style={styles.patrimonioMetaValue}>{fmt(patNoiTotal, 'signed')}</Text>
+              </View>
+
+              <View style={styles.patrimonioMetaItemRight}>
+                <Text style={styles.patrimonioMetaLabel}>Indicadores</Text>
+                <Text style={styles.patrimonioMetaValueSmall}>
+                  NOI/VM {fmtPct(patNoiSobreVmPct)} · LTV aprox {fmtPct(patLtvAproxPct)}
+                </Text>
+              </View>
             </View>
 
             <TouchableOpacity style={panelStyles.cardButton} onPress={goVerPropiedades}>
@@ -1352,7 +1354,7 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'flex-start',
-    marginBottom: 8,
+    marginBottom: 10,
   },
   patrimonioColLeft: {
     flex: 1,
@@ -1372,6 +1374,39 @@ const styles = StyleSheet.create({
     fontWeight: '700',
     color: colors.primary,
     marginTop: 2,
+  },
+
+  // NUEVO: fila meta (NOI + indicadores)
+  patrimonioMetaRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'flex-start',
+    marginBottom: 8,
+    marginTop: 2,
+    gap: 12,
+  },
+  patrimonioMetaItem: {
+    flex: 1,
+  },
+  patrimonioMetaItemRight: {
+    flex: 1,
+    alignItems: 'flex-end',
+  },
+  patrimonioMetaLabel: {
+    fontSize: 11,
+    color: colors.textSecondary,
+  },
+  patrimonioMetaValue: {
+    marginTop: 2,
+    fontSize: 14,
+    fontWeight: '700',
+    color: colors.textPrimary,
+  },
+  patrimonioMetaValueSmall: {
+    marginTop: 2,
+    fontSize: 11,
+    color: colors.textSecondary,
+    fontWeight: '600',
   },
 
   extrasBarBg: {

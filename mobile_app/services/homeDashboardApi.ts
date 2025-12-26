@@ -1,51 +1,28 @@
 // mobile_app/services/homeDashboardApi.ts
-// -----------------------------------------------------------------------------
-// Objetivo del cambio (sin romper nada):
-// - Mantener contrato actual del HomeDashboard (legacy incluido).
-// - Añadir KPIs agregados de Patrimonio para Home:
-//   - Rentabilidad bruta media
-//   - Equity total
-//   - Cantidad de propiedades
-//   - Valor mercado total
-//   - NOI total
-// - NO se crean nuevos services: la llamada se integra aquí.
-// - Defensivo: si el endpoint no existe / falla, no rompe Home (devuelve 0/NULL).
-// -----------------------------------------------------------------------------
+//
+// Objetivo del cambio (sin crear un service nuevo):
+// - Mantener el HomeDashboard tal cual.
+// - Añadir un bloque "Patrimonio" calculado con la MISMA lógica que el Ranking:
+//   - KPIs por propiedad desde /api/v1/analytics/patrimonios/{id}/kpis
+//   - Valor mercado / inversión desde /api/v1/patrimonios/{id}/compra
+// - Agregar a nivel usuario (activos):
+//   - rentabilidadBrutaMediaPct (ponderada por valor_base)
+//   - noiTotal (anual, annualize=true)
+//   - valorMercadoTotal
+//   - equityTotal = Σ(valor_mercado) − Σ(total_inversion)
+//   - indicadores extra "pro":
+//       * noiSobreVmPct = NOI / Valor Mercado
+//       * ltvAproxPct   = Total Inversión / Valor Mercado  (aprox, no es deuda real)
+//
+// Nota importante:
+// - NO usamos /api/v1/analytics/patrimonio/summary porque en tu entorno daba 404.
+// - Si alguna propiedad no tiene compra/kpis, se agrega de forma defensiva (no rompe).
 
 import { getMonthlySummary } from './analyticsApi';
 import { fetchBalanceMes } from './balanceApi';
 import { fetchGastosCotidianos } from './gastosCotidianosApi';
 import { fetchMovimientosMes } from './movimientosApi';
 import { api } from './api';
-
-// ----------------------------
-// Tipos: Patrimonio Summary
-// ----------------------------
-// Endpoint esperado (backend):
-//   GET /api/v1/analytics/patrimonio/summary?year=YYYY
-// Debe devolver KPIs agregados del usuario autenticado (por token).
-export type PatrimonioSummaryResponse = {
-  year: number;
-
-  propiedades_count: number;
-  valor_mercado_total: number;
-
-  // NOI total (según derivadas backend)
-  noi_total: number;
-
-  // % (puede ser null si no hay datos suficientes)
-  rentabilidad_bruta_media_pct: number | null;
-
-  // Equity total (según definición backend)
-  equity_total: number;
-
-  // Opcional (trazabilidad)
-  equity_basis?: string | null;
-
-  // Opcionales (si en futuro incluyes préstamos)
-  deuda_total?: number | null;
-  ltv_pct?: number | null;
-};
 
 export type HomeDashboardResponse = {
   year: number;
@@ -98,27 +75,28 @@ export type HomeDashboardResponse = {
     importe: number;
   }>;
 
-  // ---------------------------------------------------------------------------
-  // NUEVO: Patrimonio (para tarjeta Home)
-  // ---------------------------------------------------------------------------
+  // -----------------------
+  // NUEVO: Resumen Patrimonio (para Home)
+  // -----------------------
   patrimonioPropiedadesCount: number;
   patrimonioValorMercadoTotal: number;
-  patrimonioNoiTotal: number;
-  patrimonioRentabilidadBrutaMediaPct: number | null;
+  patrimonioNoiTotal: number; // anual (annualize=true)
   patrimonioEquityTotal: number;
+  patrimonioRentabilidadBrutaMediaPct: number | null; // % (ponderada). null si no hay base
 
-  // Opcionales (si backend lo expone)
-  patrimonioDeudaTotal?: number | null;
-  patrimonioLtvPct?: number | null;
+  // Extras "pro"
+  patrimonioNoiSobreVmPct: number | null; // NOI / VM * 100
+  patrimonioLtvAproxPct: number | null;   // Inversión / VM * 100 (aprox)
+  patrimonioNoiMensual: number;           // NOI / 12
 };
 
 function n(v: unknown): number {
   return typeof v === 'number' && Number.isFinite(v) ? v : 0;
 }
 
-// -----------------------------------------------------------------------------
-// Suma de gastos cotidianos pagados en el mes (paginado, lógica actual intacta)
-// -----------------------------------------------------------------------------
+/**
+ * Suma de cotidianos pagados (paginado).
+ */
 async function sumGastosCotidianosMes(year: number, month: number): Promise<number> {
   const limit = 1000;
   let offset = 0;
@@ -138,15 +116,141 @@ async function sumGastosCotidianosMes(year: number, month: number): Promise<numb
   return total;
 }
 
-// -----------------------------------------------------------------------------
-// NUEVO: Fetch agregado de patrimonio (integrado en este mismo fichero)
-// - Defensivo: lo usamos dentro de Promise.all con .catch(() => null)
-// -----------------------------------------------------------------------------
-async function fetchPatrimonioSummary(year: number): Promise<PatrimonioSummaryResponse> {
-  const r = await api.get<PatrimonioSummaryResponse>(`/api/v1/analytics/patrimonio/summary`, {
-    params: { year },
-  });
-  return r.data;
+// -----------------------
+// Tipos mínimos para patrimonio
+// -----------------------
+type PatrimonioRow = {
+  id: string;
+  activo?: boolean | null;
+};
+
+type PatrimonioCompraOut = {
+  patrimonio_id: string;
+  total_inversion?: number | null;
+  valor_mercado?: number | null;
+  valor_mercado_fecha?: string | null;
+};
+
+type PatrimonioKpisOut = {
+  valor_base?: number | null;
+  noi?: number | null;
+  rendimiento_bruto_pct?: number | null;
+};
+
+// Helpers defensivos
+function numOrNull(x: any): number | null {
+  const v = typeof x === 'number' ? x : x == null ? null : Number(x);
+  return v == null || Number.isNaN(v) ? null : v;
+}
+
+function isActive(p: PatrimonioRow): boolean {
+  return p.activo !== false; // por defecto true si viene null/undefined
+}
+
+/**
+ * Carga resumen de patrimonio para HOME usando:
+ * - /api/v1/patrimonios
+ * - /api/v1/patrimonios/{id}/compra
+ * - /api/v1/analytics/patrimonios/{id}/kpis
+ */
+async function fetchPatrimonioSummaryForHome(year: number): Promise<{
+  propiedadesCount: number;
+  valorMercadoTotal: number;
+  noiTotal: number;
+  equityTotal: number;
+  rentabilidadBrutaMediaPct: number | null;
+
+  noiSobreVmPct: number | null;
+  ltvAproxPct: number | null;
+  noiMensual: number;
+}> {
+  // 1) Listado patrimonios
+  const rProps = await api.get<PatrimonioRow[]>(`/api/v1/patrimonios`);
+  const activos = (rProps.data ?? []).filter(isActive);
+
+  if (activos.length === 0) {
+    return {
+      propiedadesCount: 0,
+      valorMercadoTotal: 0,
+      noiTotal: 0,
+      equityTotal: 0,
+      rentabilidadBrutaMediaPct: null,
+      noiSobreVmPct: null,
+      ltvAproxPct: null,
+      noiMensual: 0,
+    };
+  }
+
+  // 2) Enriquecemos cada propiedad con compra y kpis (en paralelo)
+  const enriched = await Promise.all(
+    activos.map(async (p) => {
+      const pid = encodeURIComponent(p.id);
+
+      const compraPromise = api
+        .get<PatrimonioCompraOut | null>(`/api/v1/patrimonios/${pid}/compra`)
+        .then((x) => x.data)
+        .catch(() => null);
+
+      const kpisPromise = api
+        .get<PatrimonioKpisOut>(`/api/v1/analytics/patrimonios/${pid}/kpis`, {
+          params: { year, annualize: true, basis: 'total' },
+        })
+        .then((x) => x.data)
+        .catch(() => null);
+
+      const [compra, kpis] = await Promise.all([compraPromise, kpisPromise]);
+      return { compra, kpis };
+    })
+  );
+
+  // 3) Agregados
+  let valorMercadoTotal = 0;
+  let totalInversionTotal = 0;
+  let noiTotal = 0;
+
+  // rentabilidad bruta media ponderada por valor_base
+  let wSum = 0; // SUM(valor_base)
+  let wPct = 0; // SUM(rendimiento_bruto_pct * valor_base)
+
+  for (const it of enriched) {
+    const vm = numOrNull(it.compra?.valor_mercado) ?? 0;
+    const inv = numOrNull(it.compra?.total_inversion) ?? 0;
+
+    valorMercadoTotal += vm;
+    totalInversionTotal += inv;
+
+    const noi = numOrNull(it.kpis?.noi) ?? 0;
+    noiTotal += noi;
+
+    const base = numOrNull(it.kpis?.valor_base);
+    const bruto = numOrNull(it.kpis?.rendimiento_bruto_pct);
+
+    if (base != null && base > 0 && bruto != null) {
+      wSum += base;
+      wPct += bruto * base;
+    }
+  }
+
+  const equityTotal = valorMercadoTotal - totalInversionTotal;
+  const rentabilidadBrutaMediaPct = wSum > 0 ? wPct / wSum : null;
+
+  const noiSobreVmPct = valorMercadoTotal > 0 ? (noiTotal / valorMercadoTotal) * 100 : null;
+
+  // “LTV aprox” (realmente: inversión/valor mercado). Útil como indicador rápido, pero no es deuda.
+  const ltvAproxPct = valorMercadoTotal > 0 ? (totalInversionTotal / valorMercadoTotal) * 100 : null;
+
+  const noiMensual = noiTotal / 12;
+
+  return {
+    propiedadesCount: activos.length,
+    valorMercadoTotal: Number(valorMercadoTotal.toFixed(2)),
+    noiTotal: Number(noiTotal.toFixed(2)),
+    equityTotal: Number(equityTotal.toFixed(2)),
+    rentabilidadBrutaMediaPct: rentabilidadBrutaMediaPct == null ? null : Number(rentabilidadBrutaMediaPct.toFixed(2)),
+    noiSobreVmPct: noiSobreVmPct == null ? null : Number(noiSobreVmPct.toFixed(2)),
+    ltvAproxPct: ltvAproxPct == null ? null : Number(ltvAproxPct.toFixed(2)),
+    noiMensual: Number(noiMensual.toFixed(2)),
+  };
 }
 
 export async function fetchHomeDashboard(params: {
@@ -155,16 +259,23 @@ export async function fetchHomeDashboard(params: {
 }): Promise<HomeDashboardResponse> {
   const { year, month } = params;
 
-  // ---------------------------------------------------------------------------
-  // Añadimos patrimonioSummary al Promise.all.
-  // Importante: catch defensivo para NO romper Home si backend no lo tiene.
-  // ---------------------------------------------------------------------------
   const [summary, balance, totalCotidianos, movimientosMes, patrimonioSummary] = await Promise.all([
     getMonthlySummary({ year, month }),
     fetchBalanceMes({ year, month }),
     sumGastosCotidianosMes(year, month),
     fetchMovimientosMes(year, month),
-    fetchPatrimonioSummary(year).catch(() => null),
+
+    // ✅ Patrimonio (si falla, no rompemos Home)
+    fetchPatrimonioSummaryForHome(year).catch(() => ({
+      propiedadesCount: 0,
+      valorMercadoTotal: 0,
+      noiTotal: 0,
+      equityTotal: 0,
+      rentabilidadBrutaMediaPct: null,
+      noiSobreVmPct: null,
+      ltvAproxPct: null,
+      noiMensual: 0,
+    })),
   ]);
 
   // -----------------------
@@ -217,9 +328,6 @@ export async function fetchHomeDashboard(params: {
   const ingresosPendientesTotal = n((balance as any)?.ingresos_pendientes_total);
   const gastosPendientesTotal = n((balance as any)?.gastos_pendientes_total);
 
-  // -----------------------
-  // Actividad reciente
-  // -----------------------
   const ultimosMovimientos = (((movimientosMes as any)?.movimientos ?? []) as any[])
     .slice(0, 5)
     .map((m: any) => ({
@@ -232,7 +340,7 @@ export async function fetchHomeDashboard(params: {
     }));
 
   // -----------------------
-  // ALIAS para MainTabs (legacy)
+  // ALIAS para MainTabs
   // -----------------------
   const gestionablesReal = gestionablesConsumidos;
   const cotidianosReal = cotidianosConsumidos;
@@ -240,15 +348,6 @@ export async function fetchHomeDashboard(params: {
 
   const gestionablesPresupuestado = gestionablesPresupuestados;
   const cotidianosPresupuestado = cotidianosPresupuestados;
-
-  // ---------------------------------------------------------------------------
-  // NUEVO: KPIs Patrimonio (defensivo)
-  // ---------------------------------------------------------------------------
-  const patrimonioPropiedadesCount = patrimonioSummary?.propiedades_count ?? 0;
-  const patrimonioValorMercadoTotal = patrimonioSummary?.valor_mercado_total ?? 0;
-  const patrimonioNoiTotal = patrimonioSummary?.noi_total ?? 0;
-  const patrimonioRentabilidadBrutaMediaPct = patrimonioSummary?.rentabilidad_bruta_media_pct ?? null;
-  const patrimonioEquityTotal = patrimonioSummary?.equity_total ?? 0;
 
   return {
     year,
@@ -287,15 +386,17 @@ export async function fetchHomeDashboard(params: {
 
     ultimosMovimientos,
 
-    // Patrimonio (Home)
-    patrimonioPropiedadesCount,
-    patrimonioValorMercadoTotal,
-    patrimonioNoiTotal,
-    patrimonioRentabilidadBrutaMediaPct,
-    patrimonioEquityTotal,
+    // -----------------------
+    // Patrimonio para Home
+    // -----------------------
+    patrimonioPropiedadesCount: patrimonioSummary.propiedadesCount,
+    patrimonioValorMercadoTotal: patrimonioSummary.valorMercadoTotal,
+    patrimonioNoiTotal: patrimonioSummary.noiTotal,
+    patrimonioEquityTotal: patrimonioSummary.equityTotal,
+    patrimonioRentabilidadBrutaMediaPct: patrimonioSummary.rentabilidadBrutaMediaPct,
 
-    // Opcionales (si backend lo expone)
-    patrimonioDeudaTotal: patrimonioSummary?.deuda_total ?? null,
-    patrimonioLtvPct: patrimonioSummary?.ltv_pct ?? null,
+    patrimonioNoiSobreVmPct: patrimonioSummary.noiSobreVmPct,
+    patrimonioLtvAproxPct: patrimonioSummary.ltvAproxPct,
+    patrimonioNoiMensual: patrimonioSummary.noiMensual,
   };
 }
