@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, List, Sequence, Tuple
+from typing import Any, Dict, Iterable, List, Sequence, Set, Tuple
 
 from sqlalchemy import (
     Column,
@@ -30,15 +30,14 @@ class PostgresAdapter:
 
     Características:
       - Conecta con SQLAlchemy+psycopg.
-      - Implementa introspección mínima para:
+      - Introspección:
           list_tables, table_info, read_table, ensure_table_from_source, write_table.
+      - NUEVO (blindaje FK):
+          list_fk_edges(): devuelve aristas (child -> parent) por constraints FK.
 
     Nota importante:
       - Para evitar problemas con poolers/prepared statements, es recomendable
-        incluir en la URL: prepare_threshold=0 o en connect_args como int.
-      - Aquí NO sobreescribimos connect_args, asumimos que ya lo traes en la URL,
-        pero añadimos una mitigación defensiva en session.py. Aun así, este adapter
-        funciona si la URL trae prepare_threshold=0.
+        incluir prepare_threshold=0 (INT). Aquí lo forzamos en connect_args.
     """
 
     def __init__(self, db_url: str):
@@ -46,17 +45,15 @@ class PostgresAdapter:
         if not self.db_url:
             raise RuntimeError("DB URL vacía para PostgresAdapter")
 
-        # Engine “ligero”: este adapter se usa para jobs puntuales (sync).
-        # pool_pre_ping ayuda en conexiones efímeras / redes.
+        # Engine “ligero” para jobs puntuales (sync).
         self.engine: Engine = create_engine(
             self.db_url,
             pool_pre_ping=True,
             future=True,
             connect_args={
-                # Estas claves son seguras con psycopg3
                 "connect_timeout": 10,
                 "sslmode": "require",
-                # prepare_threshold debe ser int (evita TypeError de psycopg)
+                # CLAVE: psycopg3 espera int, no string (evita TypeError)
                 "prepare_threshold": 0,
             },
         )
@@ -100,10 +97,46 @@ class PostgresAdapter:
         with self.engine.connect() as conn:
             relkind = conn.execute(q, {"schema": schema, "name": name}).scalar()
 
-        # relkind:
-        #   r=table, v=view, m=matview
+        # relkind: r=table, v=view, m=matview
         is_view = relkind in ("v", "m")
         return TableInfo(full_name=full_name, schema=schema, name=name, is_view=is_view)
+
+    def list_fk_edges(self, *, schema: str = "public") -> List[Tuple[str, str]]:
+        """
+        NUEVO: Devuelve relaciones FK como aristas:
+            (child_full_name, parent_full_name)
+
+        Se usa para:
+          - auto-incluir dependencias
+          - ordenar por topological sort (padres antes que hijos)
+
+        Notas:
+          - Las FKs sólo existen en tablas (no en vistas).
+          - Limitamos por schema (por defecto 'public').
+        """
+        q = text(
+            """
+            SELECT
+              conrelid::regclass::text  AS child,
+              confrelid::regclass::text AS parent
+            FROM pg_constraint
+            WHERE contype = 'f'
+            """
+        )
+        with self.engine.connect() as conn:
+            rows = conn.execute(q).fetchall()
+
+        edges: List[Tuple[str, str]] = []
+        for r in rows:
+            child = str(r.child)
+            parent = str(r.parent)
+            if schema:
+                if not child.startswith(f"{schema}."):
+                    continue
+                if not parent.startswith(f"{schema}."):
+                    continue
+            edges.append((child, parent))
+        return edges
 
     # -----------------------------
     # Lectura / Escritura
@@ -127,18 +160,16 @@ class PostgresAdapter:
         """
         Crea la tabla en el destino si no existe, reflejando columnas del origen.
 
-        - Si es vista/matview: NO creamos (normalmente no se replica como tabla).
+        - Si es view/matview: NO creamos.
         - Si ya existe en destino: no hace nada.
         """
         info = self.table_info(full_name)
         if info.is_view:
-            # Las vistas se gestionan fuera de este sync (o se ignoran).
             return
 
         schema, name = info.schema, info.name
         dest_inspector = inspect(self.engine)
 
-        # Si existe, no tocamos
         if name in dest_inspector.get_table_names(schema=schema):
             return
 
@@ -171,14 +202,16 @@ class PostgresAdapter:
         """
         Escribe en Postgres.
 
-        Estrategia conservadora:
+        Estrategia (Insert + TRUNCATE):
           - execute=False => no escribe
           - execute=True:
-              - si allow_destructive: intenta DROP+CREATE minimal si hiciera falta
+              - crea tabla básica si no existe (fallback)
               - TRUNCATE
               - INSERT por lotes
 
-        Nota: si ya has llamado ensure_table_from_source(), normalmente no necesitas recrear.
+        Nota:
+          - La integridad referencial depende del ORDEN de tablas.
+            Por eso el router ahora ordena por FKs.
         """
         if not execute:
             return
@@ -192,14 +225,14 @@ class PostgresAdapter:
                 self._drop_if_exists(schema, name)
             self._create_text_table(schema, name, headers)
 
-        # Truncar (rápido)
+        # Truncar (rápido). CASCADE ayuda cuando hay FKs colgando,
+        # pero el orden correcto es la solución principal.
         with self.engine.begin() as conn:
             conn.execute(text(f'TRUNCATE TABLE "{schema}"."{name}" RESTART IDENTITY CASCADE'))
 
         if not rows:
             return
 
-        # Insert por lotes
         md = MetaData(schema=schema)
         t = Table(name, md, autoload_with=self.engine)
 
@@ -224,13 +257,11 @@ class PostgresAdapter:
             with self.engine.begin() as conn:
                 conn.execute(text(f'DROP TABLE IF EXISTS "{schema}"."{name}" CASCADE'))
         except SQLAlchemyError:
-            # No bloquea, pero lo dejamos visible en logs superiores
             raise
 
     def _create_text_table(self, schema: str, name: str, headers: List[str]) -> None:
         """
         Crea tabla básica con columnas TEXT (fallback).
-        Útil si copias a un destino vacío sin reflection previa.
         """
         cols_sql = ", ".join([f'"{h}" TEXT NULL' for h in headers])
         ddl = f'CREATE TABLE IF NOT EXISTS "{schema}"."{name}" ({cols_sql})'

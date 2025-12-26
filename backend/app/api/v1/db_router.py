@@ -8,7 +8,7 @@ import time
 import uuid
 import threading
 import traceback
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Set, Tuple
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
@@ -19,7 +19,7 @@ from backend.app.utils.db.dbsync.sheets_adapter import SheetsAdapter
 
 
 # ------------------------------
-# PRIORITY (orden estricto)
+# PRIORITY (preferencia / desempate)
 # ------------------------------
 PRIORITY = [
     "public.users",
@@ -41,23 +41,12 @@ PRIORITY = [
     "public.prestamo",
     "public.prestamo_cuota",
 ]
-PRIORITY_SET = set(PRIORITY)
-
-
-def enforce_strict_priority(candidates: List[str]) -> List[str]:
-    """
-    Orden:
-      1) Todo lo que esté en PRIORITY, respetando el orden PRIORITY.
-      2) El resto (no-priority) al final, manteniendo orden original.
-    """
-    cand_set = set(candidates)
-    head = [t for t in PRIORITY if t in cand_set]
-    tail = [t for t in candidates if t not in PRIORITY_SET]
-    return list(dict.fromkeys(head + tail))
+PRIORITY_INDEX = {t: i for i, t in enumerate(PRIORITY)}
 
 
 # ------------------------------
 # Router (RUTA FINAL: /api/db/...)
+# main.py debe incluir este router con prefix="/api"
 # ------------------------------
 router = APIRouter(prefix="/db", tags=["db"])
 
@@ -120,7 +109,7 @@ JOBS_LOCK = threading.Lock()
 
 
 # ------------------------------
-# Adapters factory
+# Helpers env/adapters
 # ------------------------------
 def _get_env(name: str) -> str:
     v = os.getenv(name, "")
@@ -154,6 +143,214 @@ def make_adapter(name: str):
     raise HTTPException(status_code=400, detail=f"Adapter desconocido: {name}")
 
 
+def _normalize_requested_tables(all_tables: List[str], requested: Optional[List[str]]) -> List[str]:
+    """
+    Convierte payload.tables a full_names existentes.
+    Acepta:
+      - "public.users"
+      - "users"  (se busca en all_tables)
+    """
+    if not requested:
+        return list(all_tables)
+
+    wanted = set([t.strip() for t in requested if t and t.strip()])
+    out: List[str] = []
+    for t in all_tables:
+        short = t.split(".", 1)[-1]
+        if t in wanted or short in wanted:
+            out.append(t)
+    return out
+
+
+def _normalize_exclude(exclude: Optional[List[str]]) -> Set[str]:
+    """
+    Normaliza exclude aceptando "public.x" o "x".
+    Devuelve set con ambos formatos posibles para comparación flexible.
+    """
+    ex = set()
+    for e in (exclude or []):
+        if not e:
+            continue
+        e2 = e.strip()
+        if not e2:
+            continue
+        ex.add(e2)
+        # si viene "public.x", añadimos "x"
+        if "." in e2:
+            ex.add(e2.split(".", 1)[-1])
+        else:
+            # si viene "x", añadimos "public.x" como comodín típico
+            ex.add(f"public.{e2}")
+    return ex
+
+
+# ------------------------------
+# Blindaje: expandir dependencias FK + topological sort
+# ------------------------------
+def _expand_with_fk_dependencies(
+    *,
+    src: PostgresAdapter,
+    initial_tables: List[str],
+    public_only: bool = True,
+) -> Tuple[List[str], List[str]]:
+    """
+    Devuelve:
+      (expanded_tables, added_tables)
+
+    - initial_tables: tablas objetivo (full_names)
+    - expanded_tables: incluye dependencias transitivas (padres) por FKs
+    """
+    initial_set = set(initial_tables)
+
+    edges = src.list_fk_edges(schema="public" if public_only else "")
+    parents_by_child: Dict[str, Set[str]] = {}
+    for child, parent in edges:
+        parents_by_child.setdefault(child, set()).add(parent)
+
+    expanded: Set[str] = set(initial_set)
+    added: Set[str] = set()
+
+    # BFS/DFS: por cada tabla, incluir sus parents, y los parents de esos parents, etc.
+    stack = list(initial_set)
+    while stack:
+        t = stack.pop()
+        for p in parents_by_child.get(t, set()):
+            if p not in expanded:
+                expanded.add(p)
+                added.add(p)
+                stack.append(p)
+
+    # Mantener orden determinista (PRIORITY primero si aplica)
+    def sort_key(x: str):
+        return (PRIORITY_INDEX.get(x, 10_000), x)
+
+    expanded_list = sorted(expanded, key=sort_key)
+    added_list = sorted(added, key=sort_key)
+    return expanded_list, added_list
+
+
+def _toposort_with_priority(
+    *,
+    nodes: List[str],
+    edges_child_parent: List[Tuple[str, str]],
+) -> List[str]:
+    """
+    Ordena nodes de forma que:
+      parent -> child (padres antes que hijos)
+
+    edges_child_parent viene como (child, parent), lo convertimos internamente a parent->child.
+
+    Desempate:
+      - PRIORITY primero
+      - luego alfabético
+    """
+    node_set = set(nodes)
+
+    # Build adjacency parent -> children, and indegree
+    children: Dict[str, Set[str]] = {n: set() for n in node_set}
+    indeg: Dict[str, int] = {n: 0 for n in node_set}
+
+    for child, parent in edges_child_parent:
+        if child not in node_set or parent not in node_set:
+            continue
+        # parent -> child
+        if child not in children[parent]:
+            children[parent].add(child)
+            indeg[child] += 1
+
+    def pick_key(x: str):
+        return (PRIORITY_INDEX.get(x, 10_000), x)
+
+    # Ready = indegree 0
+    ready = sorted([n for n in node_set if indeg[n] == 0], key=pick_key)
+    out: List[str] = []
+
+    while ready:
+        n = ready.pop(0)
+        out.append(n)
+        for ch in sorted(children.get(n, set()), key=pick_key):
+            indeg[ch] -= 1
+            if indeg[ch] == 0:
+                # insert in order keeping ready sorted by pick_key
+                ready.append(ch)
+                ready.sort(key=pick_key)
+
+    # Si hay ciclo (raro), hacemos fallback: PRIORITY + alpha,
+    # y dejamos visible que hubo ciclo.
+    if len(out) != len(node_set):
+        remaining = [n for n in nodes if n not in set(out)]
+        remaining_sorted = sorted(set(remaining), key=pick_key)
+        return out + remaining_sorted
+
+    return out
+
+
+def _build_final_plan(
+    *,
+    src,
+    all_tables: List[str],
+    requested_tables: Optional[List[str]],
+    exclude: Optional[List[str]],
+) -> Tuple[List[str], List[str]]:
+    """
+    Devuelve:
+      (final_target_tables, info_lines)
+
+    - Si src es PostgresAdapter:
+        - normaliza requested
+        - filtra public.*
+        - aplica exclude (pero NO bloquea dependencias; auto-incluir manda)
+        - expande dependencias FK
+        - toposort por FKs con PRIORITY tie-break
+    - Si src NO es PostgresAdapter:
+        - fallback: PRIORITY primero + resto estable
+    """
+    info: List[str] = []
+
+    # 1) Candidate base
+    base = _normalize_requested_tables(all_tables, requested_tables)
+    base = [t for t in base if t.startswith("public.")]
+    info.append(f"[plan] Tablas base seleccionadas: {len(base)}")
+
+    ex = _normalize_exclude(exclude)
+
+    # 2) Apply exclude a base (solo para lo “pedido”)
+    base_excluded = [t for t in base if (t not in ex and t.split(".", 1)[-1] not in ex)]
+    if len(base_excluded) != len(base):
+        info.append(f"[plan] Exclude aplicado sobre base: {len(base) - len(base_excluded)} removidas")
+    base = base_excluded
+
+    # 3) Blindaje FK si source es Postgres
+    if isinstance(src, PostgresAdapter):
+        expanded, added = _expand_with_fk_dependencies(src=src, initial_tables=base, public_only=True)
+        if added:
+            info.append(f"[plan] Dependencias FK auto-incluidas: {len(added)}")
+            info.append("[plan] Added: " + " -> ".join(added))
+
+        # Re-aplicar exclude SOLO si el usuario insiste:
+        # Pero tú pediste “auto incluir” para blindar. Así que:
+        # - si una tabla requerida está en exclude, la mantenemos y lo avisamos.
+        forced = [t for t in expanded if (t in ex or t.split(".", 1)[-1] in ex)]
+        if forced:
+            info.append(
+                f"[plan] AVISO: {len(forced)} tablas estaban en exclude pero se fuerzan por dependencias FK."
+            )
+
+        edges = src.list_fk_edges(schema="public")
+        ordered = _toposort_with_priority(nodes=expanded, edges_child_parent=edges)
+
+        info.append(f"[plan] Orden final (FK): {len(ordered)}")
+        return ordered, info
+
+    # 4) Fallback (Sheets como source, etc.)
+    def pr_key(x: str):
+        return (PRIORITY_INDEX.get(x, 10_000), x)
+
+    ordered = sorted(set(base), key=pr_key)
+    info.append(f"[plan] Orden final (fallback PRIORITY): {len(ordered)}")
+    return ordered, info
+
+
 # ------------------------------
 # Runner del job
 # ------------------------------
@@ -162,7 +359,6 @@ def _run_job(job: Job):
     job.started_at = time.time()
     payload = job.payload
 
-    # Capturamos prints del engine/adapters en el buffer del job
     old_stdout = sys.stdout
     sys.stdout = job.log_buf
 
@@ -173,29 +369,21 @@ def _run_job(job: Job):
         src = make_adapter(payload.source)
         dst = make_adapter(payload.dest)
 
-        # 1) Tablas candidatas: desde source
+        # 1) Tablas candidatas desde source
         all_tables = src.list_tables()
 
-        # filtro opcional tables (acepta full_name o nombre sin schema)
-        if payload.tables:
-            wanted = set(payload.tables)
-            target = [t for t in all_tables if (t in wanted or t.split(".", 1)[-1] in wanted)]
-        else:
-            target = all_tables
+        # 2) Plan blindado (auto deps + topo sort)
+        target, plan_info = _build_final_plan(
+            src=src,
+            all_tables=all_tables,
+            requested_tables=payload.tables,
+            exclude=payload.exclude,
+        )
 
-        # exclude opcional
-        if payload.exclude:
-            ex = set(payload.exclude)
-            target = [t for t in target if (t not in ex and t.split(".", 1)[-1] not in ex)]
-
-        # por defecto: solo public.*
-        target = [t for t in target if t.startswith("public.")]
-
-        # 2) Orden priority
-        target = enforce_strict_priority(target)
-        target = list(dict.fromkeys(target))
-
-        print(f"[order] PRIORITY aplicada. {len(target)} tablas seleccionadas.")
+        # Logs del plan (muy útiles para depurar FKs)
+        print(f"[order] Selección inicial: {len(target)} tablas.")
+        for line in plan_info:
+            print(line)
         print("[order] Orden final:", " -> ".join(target))
 
         job.total_tables = len(target)
@@ -213,7 +401,7 @@ def _run_job(job: Job):
             f"Tablas={job.total_tables}, execute={payload.execute}, destructive={payload.allow_destructive}"
         )
 
-        # 3) Procesar tabla a tabla
+        # 3) Ejecutar tabla a tabla
         for idx, full in enumerate(target, start=1):
             if job._cancel:
                 job.status = "canceled"
@@ -233,7 +421,7 @@ def _run_job(job: Job):
             job.processed_tables = idx
             job.progress = round((idx / (job.total_tables or 1)) * 100.0, 2)
 
-            # Si el destino es Sheets y estás ejecutando, una micro-pausa ayuda a distribuir cuota
+            # Si el destino es Sheets y estás ejecutando, micro pausa para repartir cuota
             if payload.dest == "sheets" and payload.execute:
                 time.sleep(0.4)
 
