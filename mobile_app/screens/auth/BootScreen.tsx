@@ -19,44 +19,41 @@ import { getApiBaseUrl } from "../../services/api";
 /**
  * BootScreen
  * ----------
- * Pantalla de arranque “profesional”:
- * - Mismo diseño que LoginScreen (logo, family, card)
- * - En lugar de inputs, muestra progreso + estado del backend
+ * Pantalla de arranque con hitos reales:
+ * 1) /health -> servidor vivo
+ * 2) /ready (o fallback /api/health) -> BD accesible
+ * 3) Si hay token -> /api/v1/auth/me -> token válido
  *
  * Objetivo:
- * - Evitar que el usuario llegue al Login/Main con el backend dormido (Render free).
- * - Mostrar una experiencia guiada: “despertando backend”, “validando BD”, etc.
- *
- * Funcionamiento:
- * 1) Fase A: /health OK  -> el servidor está vivo
- * 2) Fase B: /ready OK   -> servidor + DB OK (alias de /api/health)
- * 3) Fase C: sesión lista (SecureStore leído) para decidir Login/Main
+ * - No entrar en Main hasta que backend esté listo.
+ * - No entrar en Main con token inválido (evita “entra en main y luego te tira a login”).
  */
 export const BootScreen: React.FC<{ navigation: any }> = ({ navigation }) => {
+  console.log("[BOOT] BootScreen mounted");
+
   const insets = useSafeAreaInsets();
-  const { isAuthenticated, isHydrating } = useAuth();
+  const { isAuthenticated, isHydrating, token, logout } = useAuth();
 
   const [progress, setProgress] = useState(0);
   const [status, setStatus] = useState("Inicializando…");
   const [failed, setFailed] = useState(false);
-
-  // Para mostrar un motivo de fallo legible
   const [errorDetail, setErrorDetail] = useState<string | null>(null);
 
-  // Evita setState si desmontan la pantalla durante un reset de navegación
   const mountedRef = useRef(true);
 
-  // “Fondo suave” como en Login (lo dejé listo por si lo vuelves a usar)
-  const primarySoft = useMemo(() => {
-    return "#F3FBFA";
-  }, []);
+  // Igual que LoginScreen (lo dejo por si más adelante quieres tint suave)
+  const primarySoft = useMemo(() => "#F3FBFA", []);
 
-  /**
-   * Helpers: sleep + fetch con timeout
-   */
   const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
-  const fetchWithTimeout = async (url: string, timeoutMs: number) => {
+  /**
+   * Fetch con timeout para no colgar la UI.
+   */
+  const fetchWithTimeout = async (
+    url: string,
+    timeoutMs: number,
+    extraHeaders?: Record<string, string>
+  ) => {
     const controller = new AbortController();
     const t = setTimeout(() => controller.abort(), timeoutMs);
 
@@ -64,7 +61,10 @@ export const BootScreen: React.FC<{ navigation: any }> = ({ navigation }) => {
       const res = await fetch(url, {
         method: "GET",
         signal: controller.signal,
-        headers: { "Cache-Control": "no-cache" },
+        headers: {
+          "Cache-Control": "no-cache",
+          ...(extraHeaders || {}),
+        },
       });
       return res;
     } finally {
@@ -73,9 +73,7 @@ export const BootScreen: React.FC<{ navigation: any }> = ({ navigation }) => {
   };
 
   /**
-   * Polling robusto:
-   * - Reintenta hasta totalMs
-   * - Incrementa el intervalo gradualmente (backoff)
+   * Polling robusto (Render puede tardar en despertar).
    */
   const pollOk = async (
     url: string,
@@ -98,7 +96,7 @@ export const BootScreen: React.FC<{ navigation: any }> = ({ navigation }) => {
         const res = await fetchWithTimeout(url, requestTimeoutMs);
         if (res.ok) return true;
       } catch {
-        // Normal durante wake-up o sin conexión
+        // Normal durante el wake-up o sin conexión
       }
 
       await sleep(intervalMs);
@@ -109,14 +107,39 @@ export const BootScreen: React.FC<{ navigation: any }> = ({ navigation }) => {
   };
 
   /**
-   * Progreso por hitos (recomendado):
-   * - No existe “% real” de Render, pero sí hay estados medibles.
-   * - Asignamos porcentajes a cada estado, y avanzamos al cumplirlos.
+   * Validación de token:
+   * - Si el token es inválido, el backend responderá 401.
+   * - En ese caso hacemos logout() y forzamos Login.
    *
-   * Nota UX:
-   * - No hacemos animación “suavizada” aquí para mantenerlo simple y fiable.
-   *   Si quieres, luego añadimos un “smoother” para que la barra no salte.
+   * Importante:
+   * - Si /api/v1/auth/me no existe (404), no bloqueamos el arranque (compatibilidad),
+   *   pero es recomendable crearlo para un flujo robusto.
    */
+  const validateSessionIfToken = async (base: string): Promise<"valid" | "invalid" | "unknown"> => {
+    if (!token) return "unknown";
+
+    const meUrl = `${base}/api/v1/auth/me`;
+    const authHeader = { Authorization: `Bearer ${token}` };
+
+    try {
+      const res = await fetchWithTimeout(meUrl, 6_000, authHeader);
+
+      if (res.status === 401) return "invalid";
+      if (res.ok) return "valid";
+
+      if (res.status === 404) {
+        console.warn("[BOOT] /api/v1/auth/me no existe. Se omite validación de sesión.");
+        return "unknown";
+      }
+
+      // Otros estados (500, etc.) -> no asumimos válido
+      return "unknown";
+    } catch {
+      // Si el backend está justo despertando o hay problemas de red, no podemos afirmar
+      return "unknown";
+    }
+  };
+
   const runBoot = useCallback(async () => {
     setFailed(false);
     setErrorDetail(null);
@@ -130,8 +153,6 @@ export const BootScreen: React.FC<{ navigation: any }> = ({ navigation }) => {
       return;
     }
 
-    // URLs objetivo: preferimos /health y /ready (nuevos/claros)
-    // Aun así, mantenemos compatibilidad con tu /api/health (existente).
     const urlHealth = `${base}/health`;
     const urlReadyPrimary = `${base}/ready`;
     const urlReadyFallback = `${base}/api/health`;
@@ -140,49 +161,62 @@ export const BootScreen: React.FC<{ navigation: any }> = ({ navigation }) => {
       setStatus("Preparando…");
       setProgress(5);
 
-      // Fase 1: servidor vivo
+      // 1) Servidor vivo
       setStatus("Despertando backend…");
       setProgress(15);
 
       const okHealth = await pollOk(urlHealth, { totalMs: 60_000 });
       if (!okHealth) {
-        throw new Error(
-          `No responde /health. Puede estar dormido en Render o no hay conexión.\nURL: ${urlHealth}`
-        );
+        throw new Error(`No responde /health.\nURL: ${urlHealth}`);
       }
       if (!mountedRef.current) return;
       setProgress(45);
 
-      // Fase 2: servidor + DB OK (ready)
+      // 2) DB accesible
       setStatus("Validando base de datos…");
       setProgress(55);
 
-      // Intentamos /ready (nuevo). Si no existe (404), probamos /api/health.
       let okReady = await pollOk(urlReadyPrimary, { totalMs: 30_000 });
-      if (!okReady) {
-        okReady = await pollOk(urlReadyFallback, { totalMs: 30_000 });
-      }
+      if (!okReady) okReady = await pollOk(urlReadyFallback, { totalMs: 30_000 });
 
       if (!okReady) {
         throw new Error(
-          `No responde /ready (ni /api/health). El backend puede estar arriba, pero la BD no está accesible.\nURLs:\n- ${urlReadyPrimary}\n- ${urlReadyFallback}`
+          `No responde /ready (ni /api/health).\nURLs:\n- ${urlReadyPrimary}\n- ${urlReadyFallback}`
         );
       }
       if (!mountedRef.current) return;
-      setProgress(85);
+      setProgress(80);
 
-      // Fase 3: esperar a que AuthContext termine de leer SecureStore
+      // 3) Esperar a que SecureStore termine (AuthContext)
       setStatus("Preparando sesión…");
       const t0 = Date.now();
       while (mountedRef.current && isHydrating && Date.now() - t0 < 6_000) {
         await sleep(120);
       }
       if (!mountedRef.current) return;
+      setProgress(88);
+
+      // 4) Si hay token, validarlo (evita “entro en Main y luego me tira a Login”)
+      if (token) {
+        setStatus("Validando credenciales…");
+        setProgress(92);
+
+        const session = await validateSessionIfToken(base);
+
+        if (session === "invalid") {
+          // Token inválido -> limpiar y mandar a Login de forma controlada
+          await logout();
+          if (!mountedRef.current) return;
+          setProgress(100);
+          navigation.reset({ index: 0, routes: [{ name: "Login" }] });
+          return;
+        }
+      }
+
+      // 5) Final: navegar según estado
+      setStatus("Listo");
       setProgress(100);
 
-      // Decisión final:
-      // - Si hay token (isAuthenticated), vamos a Main
-      // - Si no, vamos a Login
       if (isAuthenticated) {
         navigation.reset({ index: 0, routes: [{ name: "Main" }] });
       } else {
@@ -193,9 +227,8 @@ export const BootScreen: React.FC<{ navigation: any }> = ({ navigation }) => {
       setFailed(true);
       setStatus("No se pudo iniciar la app.");
       setErrorDetail(typeof e?.message === "string" ? e.message : "Error desconocido");
-      // Si fallamos, dejamos progreso donde esté (para diagnóstico visual)
     }
-  }, [isAuthenticated, isHydrating, navigation]);
+  }, [isAuthenticated, isHydrating, token, logout, navigation]);
 
   useEffect(() => {
     mountedRef.current = true;
@@ -219,10 +252,8 @@ export const BootScreen: React.FC<{ navigation: any }> = ({ navigation }) => {
         keyboardShouldPersistTaps="handled"
         showsVerticalScrollIndicator={false}
       >
-        {/* Header suave (igual que Login) */}
         <View style={[styles.headerSoft, { backgroundColor: "#FFFFFF" }]} />
 
-        {/* Logo (igual que Login) */}
         <View style={styles.logoWrap}>
           <Image
             source={require("../../assets/brand/logotipo.png")}
@@ -231,7 +262,6 @@ export const BootScreen: React.FC<{ navigation: any }> = ({ navigation }) => {
           />
         </View>
 
-        {/* Family (igual que Login) */}
         <View style={styles.familyWrap}>
           <Image
             source={require("../../assets/brand/family.png")}
@@ -240,12 +270,10 @@ export const BootScreen: React.FC<{ navigation: any }> = ({ navigation }) => {
           />
         </View>
 
-        {/* Card de carga (misma card, distinto contenido) */}
         <View style={styles.card}>
           <Text style={styles.title}>Iniciando aplicación</Text>
           <Text style={styles.subtitle}>{status}</Text>
 
-          {/* Barra */}
           <View style={styles.progressTrack}>
             <View style={[styles.progressFill, { width: `${progress}%` }]} />
           </View>
@@ -255,7 +283,6 @@ export const BootScreen: React.FC<{ navigation: any }> = ({ navigation }) => {
             {!failed ? <ActivityIndicator /> : null}
           </View>
 
-          {/* Error detail (solo si falla) */}
           {failed ? (
             <>
               <Text style={styles.errorText}>
@@ -263,7 +290,7 @@ export const BootScreen: React.FC<{ navigation: any }> = ({ navigation }) => {
               </Text>
 
               {errorDetail ? (
-                <Text style={styles.errorDetailText} numberOfLines={6}>
+                <Text style={styles.errorDetailText} numberOfLines={8}>
                   {errorDetail}
                 </Text>
               ) : null}

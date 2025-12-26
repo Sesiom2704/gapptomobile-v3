@@ -7,12 +7,13 @@ import React, {
   useCallback,
 } from "react";
 import * as SecureStore from "expo-secure-store";
+
 import { setAuthToken, setOnUnauthorizedHandler } from "../services/api";
 import { login as loginRequest, LoginResponse } from "../services/authApi";
+import { resetToLogin } from "../navigation/navigationRef";
 
 /**
  * Claves de storage.
- * Mantener constantes evita typos y te permite migrar fácil en el futuro.
  */
 const STORAGE_TOKEN_KEY = "userToken";
 
@@ -26,23 +27,18 @@ type AuthUser = {
 type AuthContextType = {
   token: string | null;
   user: AuthUser | null;
-
-  /**
-   * isAuthenticated:
-   * - Verdadero si hay token en memoria (lo aplicamos también a axios).
-   */
   isAuthenticated: boolean;
 
   /**
    * isLoading:
-   * - Estado del proceso de login (UI del botón “Entrar”).
+   * - true mientras se ejecuta el login (para deshabilitar botón/spinner)
    */
   isLoading: boolean;
 
   /**
    * isHydrating:
-   * - Verdadero mientras leemos SecureStore al arrancar.
-   * - Nos permite “esperar” en BootScreen para no decidir Login/Main antes de tiempo.
+   * - true mientras leemos SecureStore al arrancar
+   * - BootScreen lo usa para no decidir Main/Login antes de tiempo
    */
   isHydrating: boolean;
 
@@ -52,10 +48,6 @@ type AuthContextType = {
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
 
-/**
- * Helper: log seguro del token.
- * Nunca imprimimos JWT completo en consola.
- */
 const maskToken = (t: string | null | undefined) => {
   if (!t) return "<none>";
   const head = t.slice(0, 200);
@@ -67,17 +59,13 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({
 }) => {
   const [token, setTokenState] = useState<string | null>(null);
   const [user, setUserState] = useState<AuthUser | null>(null);
-
-  // isLoading = login en curso
   const [isLoading, setIsLoading] = useState(false);
-
-  // isHydrating = lectura de SecureStore en arranque
   const [isHydrating, setIsHydrating] = useState(true);
 
   /**
-   * Aplica token:
-   * - actualiza estado react
-   * - configura axios para mandar Authorization en siguientes requests
+   * Aplica token a:
+   * - estado React
+   * - axios (Authorization)
    */
   const applyToken = (newToken: string | null) => {
     setTokenState(newToken);
@@ -86,9 +74,14 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({
 
   /**
    * Logout:
-   * - borra token en memoria y en axios
-   * - borra user
-   * - borra token persistido (SecureStore)
+   * - limpia token (memoria + axios)
+   * - limpia user
+   * - borra SecureStore
+   * - resetea navegación a Login (si el NavigationContainer ya está listo)
+   *
+   * Nota:
+   * - El reset a Login aquí garantiza que “pierdo token -> vuelvo a Login”
+   *   desde cualquier pantalla, sin depender de watchers en la UI.
    */
   const logout = useCallback(async () => {
     console.log("[Auth] logout()");
@@ -101,12 +94,14 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({
     } catch (e) {
       console.log("[Auth] No se pudo borrar token de SecureStore (ignorable):", e);
     }
+
+    // Navegación global a Login
+    resetToLogin();
   }, []);
 
   /**
-   * Handler global 401:
-   * Si el backend responde 401 en cualquier request (api.ts),
-   * ejecutamos logout para forzar vuelta a login.
+   * Handler global de 401:
+   * - Si cualquier request devuelve 401, forzamos logout.
    */
   useEffect(() => {
     setOnUnauthorizedHandler(() => {
@@ -119,14 +114,9 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({
   }, [logout]);
 
   /**
-   * Bootstrap de sesión:
-   * Al arrancar la app intentamos recuperar token del SecureStore.
-   * Si existe:
-   * - lo aplicamos a axios
-   * - marcamos sesión como autenticada sin pedir login de nuevo
-   *
-   * Importante:
-   * - Marcamos isHydrating=false al final, para que BootScreen pueda decidir.
+   * Bootstrap de sesión al arrancar:
+   * - recupera token si existe
+   * - lo aplica a axios
    */
   useEffect(() => {
     (async () => {
@@ -151,7 +141,6 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({
   /**
    * Login:
    * - llama al backend
-   * - valida access_token
    * - guarda token en SecureStore
    * - aplica token a axios
    * - setea user
@@ -168,11 +157,10 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({
         throw new Error("Respuesta de login sin access_token");
       }
 
-      // Guardamos token persistente ANTES de navegar/cargar datos
       try {
         await SecureStore.setItemAsync(STORAGE_TOKEN_KEY, accessToken);
       } catch (e) {
-        console.log("[Auth] No se pudo guardar token en SecureStore (ojo, pero seguimos):", e);
+        console.log("[Auth] No se pudo guardar token en SecureStore (seguimos):", e);
       }
 
       const userFromApi: AuthUser = {
@@ -182,12 +170,8 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({
         role: data.user.role ?? null,
       };
 
-      // Aplicamos token a axios y al estado
       applyToken(accessToken);
-
-      // Log seguro: confirma token presente
       console.log("[Auth] login OK. Token:", maskToken(accessToken));
-
       setUserState(userFromApi);
     } finally {
       setIsLoading(false);
@@ -209,8 +193,6 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({
 
 export const useAuth = (): AuthContextType => {
   const ctx = useContext(AuthContext);
-  if (!ctx) {
-    throw new Error("useAuth debe usarse dentro de AuthProvider");
-  }
+  if (!ctx) throw new Error("useAuth debe usarse dentro de AuthProvider");
   return ctx;
 };
