@@ -13,6 +13,7 @@ from typing import Dict, List, Optional
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
+from backend.app.google_creds_bootstrap import ensure_gcp_creds_file
 from backend.app.utils.db.core import SyncEngine
 from backend.app.utils.db.dbsync.postgres_adapter import PostgresAdapter
 from backend.app.utils.db.dbsync.sheets_adapter import SheetsAdapter
@@ -49,19 +50,21 @@ def enforce_strict_priority(candidates: List[str]) -> List[str]:
     """
     Orden:
       1) Todo lo que esté en PRIORITY, respetando el orden PRIORITY.
-      2) El resto (no-priority) al final, manteniendo orden original.
+      2) El resto (no-priority) al final, manteniendo el orden original.
     """
     cand_set = set(candidates)
     head = [t for t in PRIORITY if t in cand_set]
     tail = [t for t in candidates if t not in PRIORITY_SET]
-    # dedupe manteniendo orden
     return list(dict.fromkeys(head + tail))
 
 
 # ------------------------------
 # Router
 # ------------------------------
+# OJO: este router se incluye con prefix="/api/v1" (según tu main),
+# por eso la ruta final será /api/v1/db/...
 router = APIRouter(prefix="/db", tags=["db"])
+
 
 # ------------------------------
 # Modelos
@@ -121,27 +124,74 @@ JOBS_LOCK = threading.Lock()
 
 
 # ------------------------------
+# Helpers de env / URL
+# ------------------------------
+def _get_env(name: str) -> str:
+    """
+    Lee env, y elimina comillas accidentales (muy típico en Render/CI).
+    """
+    v = os.getenv(name, "")
+    return v.strip().strip('"').strip("'")
+
+
+def _sanitize_psycopg_url(url: str) -> str:
+    """
+    Previene el error:
+      TypeError: '>=' not supported between instances of 'int' and 'str'
+
+    Causa típica:
+      ...?prepare_threshold=0  (en URL) => psycopg lo recibe como string "0"
+      pero espera int.
+
+    Solución:
+      - eliminamos prepare_threshold del DSN
+      - el adapter lo inyecta como connect_arg int: prepare_threshold=0
+    """
+    from urllib.parse import urlsplit, urlunsplit, parse_qsl, urlencode
+
+    try:
+        parts = urlsplit(url)
+        q = [(k, v) for (k, v) in parse_qsl(parts.query, keep_blank_values=True) if k != "prepare_threshold"]
+        new_query = urlencode(q, doseq=True)
+        return urlunsplit((parts.scheme, parts.netloc, parts.path, new_query, parts.fragment))
+    except Exception:
+        # si no podemos parsear, devolvemos original
+        return url
+
+
+# ------------------------------
 # Adapters factory
 # ------------------------------
 def make_adapter(name: str):
-    name = (name or "").lower()
+    name = (name or "").lower().strip()
 
     if name == "neon":
-        url = os.environ.get("DB_URL_NEON", "").strip()
+        url = _get_env("DB_URL_NEON")
         if not url:
             raise HTTPException(status_code=500, detail="DB_URL_NEON no está configurada")
+        url = _sanitize_psycopg_url(url)
         return PostgresAdapter(url)
 
     if name == "supabase":
-        url = os.environ.get("DB_URL_SUPABASE", "").strip()
+        url = _get_env("DB_URL_SUPABASE")
         if not url:
             raise HTTPException(status_code=500, detail="DB_URL_SUPABASE no está configurada")
+        url = _sanitize_psycopg_url(url)
         return PostgresAdapter(url)
 
     if name == "sheets":
-        spreadsheet_id = os.environ.get("GOOGLE_SHEETS_ID", "").strip()
-        creds_path = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS", "").strip()
-        return SheetsAdapter(spreadsheet_id=spreadsheet_id, creds_path=creds_path)
+        # Materializa credenciales si vienen por GOOGLE_CREDENTIALS_JSON (Render)
+        ensure_gcp_creds_file()
+
+        sid = _get_env("GOOGLE_SHEETS_ID")
+        creds = _get_env("GOOGLE_APPLICATION_CREDENTIALS")
+
+        if not sid:
+            raise HTTPException(status_code=500, detail="GOOGLE_SHEETS_ID no está configurada")
+        if not creds:
+            raise HTTPException(status_code=500, detail="GOOGLE_APPLICATION_CREDENTIALS no está configurada")
+
+        return SheetsAdapter(spreadsheet_id=sid, creds_path=creds)
 
     raise HTTPException(status_code=400, detail=f"Adapter desconocido: {name}")
 
@@ -235,10 +285,8 @@ def _run_job(job: Job):
         job.ended_at = time.time()
         job.error = repr(e)
 
-        # 1) Mensaje corto
         job.write_log("❌ ERROR: " + repr(e))
 
-        # 2) Traceback completo (clave para localizar el bug real)
         tb = traceback.format_exc()
         job.write_log("----- TRACEBACK BEGIN -----")
         job.write_log(tb.rstrip())
@@ -253,7 +301,8 @@ def _run_job(job: Job):
 # ------------------------------
 @router.get("/ping")
 def db_ping():
-    return {"ok": True, "where": "/api/db/ping"}
+    # Nota: tu "where" histórico decía /api/db/ping. Aquí devolvemos algo neutro.
+    return {"ok": True, "where": "/db/ping"}
 
 
 @router.get("/targets")
@@ -301,8 +350,16 @@ def cancel_job(job_id: str):
 
 @router.get("/sheets/check")
 def sheets_check():
-    sid = os.getenv("GOOGLE_SHEETS_ID", "").strip()
-    creds = os.getenv("GOOGLE_APPLICATION_CREDENTIALS", "").strip()
+    """
+    Verifica que:
+    - Existe GOOGLE_SHEETS_ID
+    - Existen credenciales (o se pueden materializar desde GOOGLE_CREDENTIALS_JSON)
+    - Podemos acceder al spreadsheet y listar “tables” (worksheets/targets)
+    """
+    ensure_gcp_creds_file()
+
+    sid = _get_env("GOOGLE_SHEETS_ID")
+    creds = _get_env("GOOGLE_APPLICATION_CREDENTIALS")
 
     if not sid:
         return {"ok": False, "error": "GOOGLE_SHEETS_ID is empty"}
