@@ -228,6 +228,7 @@ from backend.app.api.v1 import (
     ubicaciones_router,
     analytics_router,
     cierre_mensual_router,
+    db_router
 )
 
 API_V1 = "/api/v1"
@@ -255,21 +256,7 @@ app.include_router(tipos_gasto_router.router, prefix=API_V1)
 app.include_router(ubicaciones_router.router, prefix=API_V1)
 app.include_router(analytics_router.router, prefix=API_V1)
 app.include_router(cierre_mensual_router.router, prefix=API_V1)
-
+# db_router ya trae prefix="/api/db"
+app.include_router(db_router.router, prefix=API_V1)
 # Mantengo tu debug_router (si lo usas)
 app.include_router(debug_router.router)
-
-
-# ---------------------------------------------------------------------------
-# 7) Router técnico: gestión de BD (sync/migración)
-# ---------------------------------------------------------------------------
-# Este router expone:
-# - /api/db/ping
-# - /api/db/sync/start
-# - /api/db/sync/{job_id}
-# - /api/db/sync/{job_id}/cancel
-# - /api/db/sheets/check
-from backend.app.api.v1.db_router import router as db_router
-
-# db_router ya trae prefix="/api/db"
-app.include_router(db_router)

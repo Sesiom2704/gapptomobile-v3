@@ -61,8 +61,7 @@ def enforce_strict_priority(candidates: List[str]) -> List[str]:
 # ------------------------------
 # Router
 # ------------------------------
-router = APIRouter(prefix="/api/db", tags=["db"])
-
+router = APIRouter(prefix="/db", tags=["db"])
 
 # ------------------------------
 # Modelos
