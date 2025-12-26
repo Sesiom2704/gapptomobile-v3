@@ -59,7 +59,7 @@ def enforce_strict_priority(candidates: List[str]) -> List[str]:
 # ------------------------------
 # Router (RUTA FINAL: /api/db/...)
 # ------------------------------
-router = APIRouter(prefix="/api/db", tags=["db"])
+router = APIRouter(prefix="/db", tags=["db"])
 
 
 # ------------------------------
