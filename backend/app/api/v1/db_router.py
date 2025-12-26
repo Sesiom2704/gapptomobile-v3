@@ -234,7 +234,16 @@ def _run_job(job: Job):
         job.status = "error"
         job.ended_at = time.time()
         job.error = repr(e)
-        job.write_log("❌ ERROR: " + "".join(traceback.format_exception_only(type(e), e)).strip())
+
+        # 1) Mensaje corto
+        job.write_log("❌ ERROR: " + repr(e))
+
+        # 2) Traceback completo (clave para localizar el bug real)
+        tb = traceback.format_exc()
+        job.write_log("----- TRACEBACK BEGIN -----")
+        job.write_log(tb.rstrip())
+        job.write_log("----- TRACEBACK END -----")
+
     finally:
         sys.stdout = old_stdout
 
