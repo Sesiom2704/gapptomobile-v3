@@ -141,6 +141,59 @@ class PostgresAdapter:
 
         return edges
 
+    def truncate_tables(
+        self,
+        full_names: List[str],
+        *,
+        allow_destructive: bool,
+    ) -> None:
+        """
+        Trunca múltiples tablas en una única sentencia TRUNCATE.
+
+        Motivo:
+        Postgres no permite truncar una tabla referenciada por FK
+        salvo que incluyas también las tablas hijas en el mismo TRUNCATE,
+        o uses CASCADE.
+
+        - allow_destructive=False:
+            TRUNCATE ... RESTART IDENTITY (sin CASCADE) pero con TODAS las tablas a la vez
+        - allow_destructive=True:
+            añade CASCADE
+
+        Nota:
+        Ignora views/matviews; solo tablas reales (relkind='r').
+        """
+        if not full_names:
+            return
+
+        # Filtrar solo tablas reales en destino (evitar vistas/matviews)
+        real_tables: List[str] = []
+        for full in full_names:
+            try:
+                info = self.table_info(full)
+                if info.is_view:
+                    continue
+                schema, name = info.schema, info.name
+                real_tables.append(f'"{schema}"."{name}"')
+            except Exception:
+                # Si algo no se puede inspeccionar, lo saltamos para no bloquear todo el truncate
+                continue
+
+        if not real_tables:
+            return
+
+        sql = "TRUNCATE TABLE " + ", ".join(real_tables) + " RESTART IDENTITY"
+        if allow_destructive:
+            sql += " CASCADE"
+
+        try:
+            with self.engine.begin() as conn:
+                conn.execute(text(sql))
+        except SQLAlchemyError as e:
+            raise RuntimeError(
+                f"TRUNCATE multi-tabla falló. allow_destructive={allow_destructive}. Error: {e}"
+            ) from e
+
 
     # -----------------------------
     # Lectura / Escritura
@@ -202,14 +255,15 @@ class PostgresAdapter:
         *,
         execute: bool,
         allow_destructive: bool,
+        clear_first: bool = True,
     ) -> None:
         """
         Escribe en Postgres.
 
         - execute=False => no escribe
         - execute=True:
-            - crea tabla básica si no existe (fallback)
-            - TRUNCATE (sin CASCADE salvo allow_destructive=True)
+            - crea tabla si no existe (fallback)
+            - si clear_first=True: limpia (antes era TRUNCATE por tabla)
             - INSERT por lotes
         """
         if not execute:
@@ -224,21 +278,19 @@ class PostgresAdapter:
                 self._drop_if_exists(schema, name)
             self._create_text_table(schema, name, headers)
 
-        # TRUNCATE
-        truncate_sql = f'TRUNCATE TABLE "{schema}"."{name}" RESTART IDENTITY'
-        if allow_destructive:
-            truncate_sql += " CASCADE"
+        # Limpieza opcional (por defecto sí, pero en el job lo desactivaremos tras el pre-truncate)
+        if clear_first:
+            truncate_sql = f'TRUNCATE TABLE "{schema}"."{name}" RESTART IDENTITY'
+            if allow_destructive:
+                truncate_sql += " CASCADE"
 
-        try:
-            with self.engine.begin() as conn:
-                conn.execute(text(truncate_sql))
-        except SQLAlchemyError as e:
-            # Mensaje más accionable
-            raise RuntimeError(
-                f"TRUNCATE falló en {schema}.{name}. "
-                f"allow_destructive={allow_destructive}. "
-                f"Error: {e}"
-            ) from e
+            try:
+                with self.engine.begin() as conn:
+                    conn.execute(text(truncate_sql))
+            except SQLAlchemyError as e:
+                raise RuntimeError(
+                    f"TRUNCATE falló en {schema}.{name}. allow_destructive={allow_destructive}. Error: {e}"
+                ) from e
 
         if not rows:
             return
@@ -252,6 +304,7 @@ class PostgresAdapter:
                 chunk = rows[i : i + batch_size]
                 payload = [dict(zip(headers, r)) for r in chunk]
                 conn.execute(t.insert(), payload)
+
 
     # -----------------------------
     # Helpers internos

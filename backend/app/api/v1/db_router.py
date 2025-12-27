@@ -393,13 +393,25 @@ def _run_job(job: Job):
         engine = SyncEngine(
             src,
             dst,
-            config={"include": ["public.*"], "exclude": ["public.alembic_version"]},
+            config={
+                "include": ["public.*"],
+                "exclude": ["public.alembic_version"],
+                # Tras pre-truncate global, no truncar en cada tabla:
+                "clear_first_per_table": False,
+            },
         )
 
         job.write_log(
             f"Comienza sync {payload.source} → {payload.dest}. "
             f"Tablas={job.total_tables}, execute={payload.execute}, destructive={payload.allow_destructive}"
         )
+
+        # --- PRE-CLEAR DEST (Postgres): truncar todas las tablas a la vez ---
+        # Esto evita: "cannot truncate a table referenced in a foreign key constraint"
+        if payload.execute and isinstance(dst, PostgresAdapter):
+            job.write_log("[pre] Truncating destination tables (single statement) to satisfy FKs...")
+            dst.truncate_tables(target, allow_destructive=payload.allow_destructive)
+            job.write_log("[pre] Destination truncated OK.")
 
         # 3) Ejecutar tabla a tabla
         for idx, full in enumerate(target, start=1):

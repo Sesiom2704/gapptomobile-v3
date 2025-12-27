@@ -83,13 +83,17 @@ class SyncEngine:
 
             # --- Write ---
             if isinstance(self.dest, PostgresAdapter):
+                # Si el job ya hizo un pre-truncate global, aquí no hay que truncar por tabla.
+                clear_first = bool(self.config.get("clear_first_per_table", True))
                 self.dest.write_table(
                     full_name,
                     headers,
                     rows,
                     execute=execute,
                     allow_destructive=allow_destructive,
+                    clear_first=clear_first,
                 )
+
             elif isinstance(self.dest, SheetsAdapter):
                 # En dry-run no escribimos (y ya hemos evitado lecturas)
                 self.dest.write_table(
