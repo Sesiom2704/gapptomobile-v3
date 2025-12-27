@@ -1,10 +1,24 @@
 // screens/gastos/GastosListScreen.tsx
-import React, {
-  useMemo,
-  useState,
-  useEffect,
-  useCallback,
-} from 'react';
+/**
+ * RESPONSABILIDAD (sin romper nada):
+ * - Listado de gastos gestionables (pendientes/todos) y cotidianos.
+ * - Buscador avanzado (filtros plegables) + ActionSheet de acciones.
+ * - Navegación a formularios (nuevo/editar/ver detalle) y marcado pagado.
+ *
+ * NUEVO (requisito "Reiniciar mes"):
+ * - En el header (donde estaba el "+") debe aparecer un botón para "Reiniciar mes"
+ *   SOLO cuando:
+ *     - NO existen gastos pendientes (gestionables), y
+ *     - NO existen ingresos pendientes (gestionables)
+ * - Si NO se cumple, se mantiene el "+" legacy (no se pierde funcionalidad).
+ *
+ * NOTAS DE IMPLEMENTACIÓN:
+ * - Gastos pendientes: se obtienen con un useGastos('pendientes') adicional (no afecta al listado actual).
+ * - Ingresos pendientes: se consulta /api/v1/ingresos/pendientes (misma ruta ya usada en IngresoListScreen).
+ * - El botón navega a MonthTab -> ReinciarCierreScreen (tu ruta nueva).
+ */
+
+import React, { useMemo, useState, useEffect, useCallback } from 'react';
 import {
   View,
   Text,
@@ -15,9 +29,7 @@ import {
   RefreshControl,
   Alert,
 } from 'react-native';
-import DateTimePicker, {
-  DateTimePickerEvent,
-} from '@react-native-community/datetimepicker';
+import DateTimePicker, { DateTimePickerEvent } from '@react-native-community/datetimepicker';
 import Ionicons from '@expo/vector-icons/Ionicons';
 import { useFocusEffect, useRoute } from '@react-navigation/native';
 
@@ -45,19 +57,16 @@ import {
 } from '../../services/gastosCotidianosApi';
 
 import { TIPOS_COTIDIANO } from '../../constants/gastosCotidianos';
-import {
-  PERIODICIDAD_OPTIONS,
-  type PeriodicidadFiltro,
-} from '../../constants/general';
+import { PERIODICIDAD_OPTIONS, type PeriodicidadFiltro } from '../../constants/general';
 import { EuroformatEuro } from '../../utils/format';
-import { colors,spacing } from '../../theme';
-import {
-  ActionSheet,
-  ActionSheetAction,
-} from '../../components/modals/ActionSheet';
+import { colors, spacing } from '../../theme';
+import { ActionSheet, ActionSheetAction } from '../../components/modals/ActionSheet';
 import { useGastos } from '../../hooks/useGastos';
 import { listStyles as styles } from '../../components/list/listStyles';
 import screenStyles from '../styles/screenStyles';
+
+// ✅ NUEVO: API para comprobar ingresos pendientes (misma base que IngresoListScreen)
+import { api } from '../../services/api';
 
 // Tipo local que amplía FiltroGastos con 'cotidiano'
 type FiltroLista = FiltroGastos | 'cotidiano';
@@ -73,10 +82,10 @@ type KpiFiltro = 'todos' | 'si' | 'no';
 type FiltroPagado = 'todos' | 'pagado' | 'no_pagado';
 type FiltroSegmento = 'todos' | string;
 type FiltroTipoGasto = 'todos' | string;
-// NUEVO: filtro de quién paga en cotidianos
+// filtro de quién paga en cotidianos
 type FiltroQuienPaga = 'todos' | 'yo' | 'otro';
 
-// ✅ NUEVO: params para “volver” perfecto
+// ✅ Params para “volver” perfecto
 type RouteParams = {
   fromHome?: boolean;
   initialFiltro?: 'pendientes' | 'todos' | 'cotidiano';
@@ -85,18 +94,18 @@ type RouteParams = {
 };
 
 // Mapa estático: tipo_id -> label (para cotidianos)
-const TIPOS_COTIDIANO_LABEL_BY_ID: Record<string, string> =
-  TIPOS_COTIDIANO.reduce((acc, t) => {
+const TIPOS_COTIDIANO_LABEL_BY_ID: Record<string, string> = TIPOS_COTIDIANO.reduce(
+  (acc, t) => {
     acc[t.value] = t.label;
     return acc;
-  }, {} as Record<string, string>);
+  },
+  {} as Record<string, string>
+);
 
 /** Nombre del tipo de gasto cotidiano a partir del registro + constantes */
 function getTipoCotidianoNombre(g: GastoCotidiano): string {
   const tipoNombreApi = (g as any).tipo_nombre as string | undefined;
-  if (tipoNombreApi && tipoNombreApi.trim() !== '') {
-    return tipoNombreApi;
-  }
+  if (tipoNombreApi && tipoNombreApi.trim() !== '') return tipoNombreApi;
 
   if (g.tipo_id && TIPOS_COTIDIANO_LABEL_BY_ID[g.tipo_id]) {
     return TIPOS_COTIDIANO_LABEL_BY_ID[g.tipo_id];
@@ -120,36 +129,16 @@ function formatFechaLarga(fecha: string): string {
 function getIconNameForTipoCotidiano(g: GastoCotidiano): string {
   const label = getTipoCotidianoNombre(g).toUpperCase();
 
-  if (label.includes('COMIDA') || label.includes('SUPERMERC')) {
-    return 'cart-outline';
-  }
-  if (label.includes('RESTAUR')) {
-    return 'restaurant-outline';
-  }
-  if (label.includes('HOTEL')) {
-    return 'business-outline';
-  }
-  if (label.includes('ACTIVIDAD')) {
-    return 'walk-outline';
-  }
-  if (label.includes('TRANSPORTE')) {
-    return 'bus-outline';
-  }
-  if (label.includes('GASOLINA')) {
-    return 'car-sport-outline';
-  }
-  if (label.includes('PEAJE')) {
-    return 'car-outline';
-  }
-  if (label.includes('MANTENIMIENTO')) {
-    return 'construct-outline';
-  }
-  if (label.includes('ELECTRICIDAD')) {
-    return 'flash-outline';
-  }
-  if (label.includes('ROPA')) {
-    return 'shirt-outline';
-  }
+  if (label.includes('COMIDA') || label.includes('SUPERMERC')) return 'cart-outline';
+  if (label.includes('RESTAUR')) return 'restaurant-outline';
+  if (label.includes('HOTEL')) return 'business-outline';
+  if (label.includes('ACTIVIDAD')) return 'walk-outline';
+  if (label.includes('TRANSPORTE')) return 'bus-outline';
+  if (label.includes('GASOLINA')) return 'car-sport-outline';
+  if (label.includes('PEAJE')) return 'car-outline';
+  if (label.includes('MANTENIMIENTO')) return 'construct-outline';
+  if (label.includes('ELECTRICIDAD')) return 'flash-outline';
+  if (label.includes('ROPA')) return 'shirt-outline';
 
   return 'pricetag-outline';
 }
@@ -170,19 +159,16 @@ export const GastosListScreen: React.FC<{ navigation: any; route: any }> = ({
   const returnToScreen = params.returnToScreen;
 
   const handleBack = useCallback(() => {
-    // 1) Si venimos desde una “barra/click” y nos pasaron origen, volvemos exacto
     if (returnToTab && returnToScreen) {
       navigation.navigate(returnToTab, { screen: returnToScreen });
       return;
     }
 
-    // 2) Caso legacy: venimos de Home
     if (fromHome) {
       navigation.navigate('HomeTab');
       return;
     }
 
-    // 3) Back normal
     if (navigation?.canGoBack?.()) navigation.goBack();
   }, [navigation, returnToTab, returnToScreen, fromHome]);
 
@@ -203,7 +189,6 @@ export const GastosListScreen: React.FC<{ navigation: any; route: any }> = ({
   const [filtroPagado, setFiltroPagado] = useState<FiltroPagado>('todos');
   const [filtroSegmento, setFiltroSegmento] = useState<FiltroSegmento>('todos');
   const [filtroTipoGasto, setFiltroTipoGasto] = useState<FiltroTipoGasto>('todos');
-  // Periodicidad (para las pills de PERIODICIDAD_OPTIONS)
   const [filtroPeriodicidad, setFiltroPeriodicidad] =
     useState<PeriodicidadFiltro>('todos');
 
@@ -218,9 +203,23 @@ export const GastosListScreen: React.FC<{ navigation: any; route: any }> = ({
   const [tiposGasto, setTiposGasto] = useState<TipoGasto[]>([]);
   const [proveedores, setProveedores] = useState<Proveedor[]>([]);
 
+  /**
+   * Hook de gastos para LISTADO (depende del filtro seleccionado).
+   * Importante: no se toca para no romper nada.
+   */
   const { gastos, loading, error, reload } = useGastos(
     filtro === 'cotidiano' ? 'pendientes' : filtro
   );
+
+  /**
+   * ✅ NUEVO: Hook de gastos PENDIENTES (siempre), para poder habilitar Reiniciar mes
+   * aunque estemos viendo "Todos" o "Cotidianos".
+   */
+  const {
+    gastos: gastosPendientes,
+    loading: loadingPendientes,
+    reload: reloadPendientes,
+  } = useGastos('pendientes');
 
   // ======= Estados específicos de cotidianos =======
   const [gastosCotidianos, setGastosCotidianos] = useState<GastoCotidiano[]>([]);
@@ -230,9 +229,10 @@ export const GastosListScreen: React.FC<{ navigation: any; route: any }> = ({
   const [selectedGastoCotidiano, setSelectedGastoCotidiano] =
     useState<GastoCotidiano | null>(null);
 
-  const [filtroTipoCotidiano, setFiltroTipoCotidiano] = useState<string | 'todos'>('todos');
+  const [filtroTipoCotidiano, setFiltroTipoCotidiano] = useState<string | 'todos'>(
+    'todos'
+  );
 
-  // NUEVO: filtro de quién paga en cotidianos
   const [filtroQuienPaga, setFiltroQuienPaga] = useState<FiltroQuienPaga>('todos');
 
   const [fechaDesde, setFechaDesde] = useState<string | null>(null);
@@ -250,6 +250,59 @@ export const GastosListScreen: React.FC<{ navigation: any; route: any }> = ({
     'gestionable' | 'cotidiano' | null
   >(null);
 
+  // ============================
+  // ✅ NUEVO: ingresos pendientes (para habilitar Reiniciar mes)
+  // ============================
+  const [ingresosPendientesCount, setIngresosPendientesCount] = useState<number | null>(
+    null
+  );
+  const [loadingIngresosPendientes, setLoadingIngresosPendientes] = useState(false);
+
+  const fetchIngresosPendientesCount = useCallback(async () => {
+    setLoadingIngresosPendientes(true);
+    try {
+      // Misma ruta que ya usas en IngresoListScreen
+      const resp = await api.get<any[]>('/api/v1/ingresos/pendientes');
+      const list = resp.data ?? [];
+      setIngresosPendientesCount(Array.isArray(list) ? list.length : 0);
+    } catch (e) {
+      // No rompemos la pantalla si falla el check. Dejamos null (desactiva reinicio).
+      console.error('[GastosList] Error cargando ingresos pendientes', e);
+      setIngresosPendientesCount(null);
+    } finally {
+      setLoadingIngresosPendientes(false);
+    }
+  }, []);
+
+  // ============================
+  // ✅ NUEVO: eligibility "Reiniciar mes"
+  // ============================
+  const gastosPendientesCount = gastosPendientes?.length ?? 0;
+
+  /**
+   * Regla final:
+   * - Reiniciar mes SOLO si no hay gastos pendientes ni ingresos pendientes.
+   * - Si ingresosPendientesCount es null (no se pudo cargar), NO habilitamos.
+   */
+  const canReiniciarMes = useMemo(() => {
+    if (ingresosPendientesCount == null) return false;
+    return gastosPendientesCount === 0 && ingresosPendientesCount === 0;
+  }, [gastosPendientesCount, ingresosPendientesCount]);
+
+  /**
+   * Navegación al nuevo screen.
+   * Incluimos "returnTo" para que el screen de reinicio pueda volver aquí si lo necesitas.
+   */
+  const goReiniciarMes = useCallback(() => {
+    navigation.navigate('MonthTab', {
+      screen: 'ReinciarCierreScreen',
+      params: {
+        returnToTab: 'DayToDayTab',
+        returnToScreen: 'GastosList',
+      },
+    });
+  }, [navigation]);
+
   const handleAddGasto = () => {
     navigation.navigate('NuevoGasto');
   };
@@ -259,10 +312,13 @@ export const GastosListScreen: React.FC<{ navigation: any; route: any }> = ({
   // ======= Plegar buscador al salir de la pantalla =======
   useFocusEffect(
     useCallback(() => {
+      // Al entrar: refrescamos check de ingresos pendientes (y dejamos gastos pendientes al hook).
+      void fetchIngresosPendientesCount();
+
       return () => {
         setBuscadorAbierto(false);
       };
-    }, [])
+    }, [fetchIngresosPendientesCount])
   );
 
   // ======= Cargar tipos de gasto y proveedores =======
@@ -272,6 +328,7 @@ export const GastosListScreen: React.FC<{ navigation: any; route: any }> = ({
         const [tipos, provs] = await Promise.all([fetchTiposGasto(), fetchProveedores()]);
         setTiposGasto(tipos);
         setProveedores(provs);
+        // debug seguro: no rompe nada
         console.log('[Proveedores] count=', provs?.length, 'sample=', provs?.[0]);
       } catch (err) {
         console.error('Error al cargar tipos/proveedores', err);
@@ -288,15 +345,12 @@ export const GastosListScreen: React.FC<{ navigation: any; route: any }> = ({
     return map;
   }, [tiposGasto]);
 
-    const mapaProveedoresPorId = useMemo(() => {
+  const mapaProveedoresPorId = useMemo(() => {
     /**
      * Mapa robusto proveedor_id -> nombre.
-     *
      * Motivo:
-     * - En algunos históricos, proveedor_id puede venir como number.
-     * - En otros, puede venir con variaciones de casing/espacios.
-     * - Si el Map se llena con string “normalizada” pero se consulta con otro tipo,
-     *   nunca habrá match y la UI cae en "Sin proveedor".
+     * - proveedor_id puede venir como number o string.
+     * - normalizamos a string trim + upper para asegurar match.
      */
     const map = new Map<string, string>();
 
@@ -309,7 +363,6 @@ export const GastosListScreen: React.FC<{ navigation: any; route: any }> = ({
     return map;
   }, [proveedores]);
 
-
   // Segmentos disponibles (para filtro por segmento, solo dinámicos)
   const segmentosDisponibles = useMemo(() => {
     const map = new Map<string, string>();
@@ -320,10 +373,7 @@ export const GastosListScreen: React.FC<{ navigation: any; route: any }> = ({
         }
       }
     });
-    return Array.from(map.entries()).map(([id, nombre]) => ({
-      id,
-      nombre,
-    }));
+    return Array.from(map.entries()).map(([id, nombre]) => ({ id, nombre }));
   }, [gastos]);
 
   // ======= Cargar gastos cotidianos cuando filtro === 'cotidiano' =======
@@ -350,31 +400,22 @@ export const GastosListScreen: React.FC<{ navigation: any; route: any }> = ({
 
   // ======= Helpers de formato =======
 
-  // Para gestionables: obtener nombre de segmento con fallback
   const getSegmentoNombre = (gasto: Gasto): string => {
-    if (gasto.segmento_nombre && gasto.segmento_nombre.trim() !== '') {
-      return gasto.segmento_nombre;
-    }
-    if (gasto.segmento_id && gasto.segmento_id.trim() !== '') {
-      return gasto.segmento_id; // fallback técnico por si falla el backend
-    }
+    if (gasto.segmento_nombre && gasto.segmento_nombre.trim() !== '') return gasto.segmento_nombre;
+    if (gasto.segmento_id && gasto.segmento_id.trim() !== '') return gasto.segmento_id;
     return 'Sin segmento';
   };
 
-  // Para gestionables: "Gasto previsto del X al Y" usando rango_pago si existe
   const formatFechaRangoGestionable = (gasto: Gasto): string => {
     if (gasto.rango_pago) {
       const [desdeRaw, hastaRaw] = gasto.rango_pago.split('-').map((p) => p.trim());
-      if (desdeRaw && hastaRaw) {
-        return `Gasto previsto del ${desdeRaw} al ${hastaRaw}`;
-      }
-      // fallback si el formato de rango no es correcto
+      if (desdeRaw && hastaRaw) return `Gasto previsto del ${desdeRaw} al ${hastaRaw}`;
       return `Gasto previsto (${gasto.rango_pago})`;
     }
+
     const d = new Date(gasto.fecha);
-    if (Number.isNaN(d.getTime())) {
-      return gasto.fecha;
-    }
+    if (Number.isNaN(d.getTime())) return gasto.fecha;
+
     return `Gasto previsto el ${d.toLocaleDateString('es-ES', {
       day: '2-digit',
       month: 'long',
@@ -383,11 +424,9 @@ export const GastosListScreen: React.FC<{ navigation: any; route: any }> = ({
   };
 
   const formatImporteNegativo = (importe: number): string => {
-    // Siempre mostramos el gasto como salida: "- 50,00 €"
     return EuroformatEuro(-Math.abs(importe), 'signed');
   };
 
-  // Para gestionables: segunda línea debe ser el SEGMENTO (nombre)
   const getCategoriaTextoGestionable = (gasto: Gasto): string => {
     return getSegmentoNombre(gasto);
   };
@@ -395,17 +434,14 @@ export const GastosListScreen: React.FC<{ navigation: any; route: any }> = ({
   // ======= Fijar filtros cuando estamos en "Pendientes" =======
   useEffect(() => {
     if (filtro === 'pendientes') {
-      // Sólo aplicable en gestionables (no afecta a cotidianos)
       setFiltroActivo('activo');
       setFiltroPagado('no_pagado');
       setFiltroKpi('si');
     } else if (filtro === 'todos') {
-      // En "Todos" devolvemos los filtros a estado libre
       setFiltroActivo('todos');
       setFiltroPagado('todos');
       setFiltroKpi('todos');
     }
-    // Si filtro === 'cotidiano', no tocamos nada
   }, [filtro]);
 
   // ======= Filtros LOCALES para gestionables =======
@@ -431,7 +467,6 @@ export const GastosListScreen: React.FC<{ navigation: any; route: any }> = ({
         if (g.tipo_id !== filtroTipoGasto) return false;
       }
 
-      // Periodicidad
       if (filtroPeriodicidad !== 'todos') {
         const per = (g.periodicidad || '').toUpperCase();
         switch (filtroPeriodicidad) {
@@ -487,7 +522,9 @@ export const GastosListScreen: React.FC<{ navigation: any; route: any }> = ({
         if (term.length > 0) {
           const proveedorNombre =
             (g as any).proveedor_nombre ??
-            (g.proveedor_id ? mapaProveedoresPorId.get(g.proveedor_id) ?? '' : '');
+            (g.proveedor_id
+              ? mapaProveedoresPorId.get(String(g.proveedor_id).trim().toUpperCase()) ?? ''
+              : '');
           const tipoNombre = getTipoCotidianoNombre(g);
 
           const hayCoincidencia =
@@ -502,7 +539,6 @@ export const GastosListScreen: React.FC<{ navigation: any; route: any }> = ({
           if (g.tipo_id !== filtroTipoCotidiano) return false;
         }
 
-        // NUEVO: filtro "Quién paga"
         if (filtroQuienPaga !== 'todos') {
           const pagaYo = (g as any).paga_yo as boolean | null | undefined;
           if (filtroQuienPaga === 'yo' && pagaYo === false) return false;
@@ -526,14 +562,7 @@ export const GastosListScreen: React.FC<{ navigation: any; route: any }> = ({
         return true;
       });
     };
-  }, [
-    searchText,
-    filtroTipoCotidiano,
-    filtroQuienPaga,
-    fechaDesde,
-    fechaHasta,
-    mapaProveedoresPorId,
-  ]);
+  }, [searchText, filtroTipoCotidiano, filtroQuienPaga, fechaDesde, fechaHasta, mapaProveedoresPorId]);
 
   // ======= Stats para deshabilitar pills sin datos (gestionables) =======
   const statsPagado = useMemo(
@@ -567,15 +596,11 @@ export const GastosListScreen: React.FC<{ navigation: any; route: any }> = ({
 
   // TIPOS DISPONIBLES (gestionables), filtrados por segmento + deshabilitados sin datos
   const tiposDisponiblesGestionables = useMemo(() => {
-    // Conteo de gastos por tipo
     const counts: Record<string, number> = {};
     gastos.forEach((g) => {
-      if (g.tipo_id) {
-        counts[g.tipo_id] = (counts[g.tipo_id] ?? 0) + 1;
-      }
+      if (g.tipo_id) counts[g.tipo_id] = (counts[g.tipo_id] ?? 0) + 1;
     });
 
-    // Filtramos catálogo por segmento (si hay filtroSegmento)
     const tiposFiltradosPorSegmento = tiposGasto.filter((t) => {
       if (filtroSegmento === 'todos') return true;
       return t.segmento_id === filtroSegmento;
@@ -592,9 +617,7 @@ export const GastosListScreen: React.FC<{ navigation: any; route: any }> = ({
   const statsTiposCotidiano = useMemo(() => {
     const counts: Record<string, number> = {};
     gastosCotidianos.forEach((g) => {
-      if (g.tipo_id) {
-        counts[g.tipo_id] = (counts[g.tipo_id] ?? 0) + 1;
-      }
+      if (g.tipo_id) counts[g.tipo_id] = (counts[g.tipo_id] ?? 0) + 1;
     });
     return counts;
   }, [gastosCotidianos]);
@@ -608,6 +631,9 @@ export const GastosListScreen: React.FC<{ navigation: any; route: any }> = ({
       } else {
         await reload();
       }
+
+      // ✅ NUEVO: refrescamos eligibility (sin afectar UX)
+      await Promise.all([reloadPendientes(), fetchIngresosPendientesCount()]);
     } catch (err) {
       console.error('Error al refrescar gastos', err);
     } finally {
@@ -620,6 +646,8 @@ export const GastosListScreen: React.FC<{ navigation: any; route: any }> = ({
     try {
       await marcarGastoComoPagado(gasto.id);
       await reload();
+      // ✅ NUEVO: tras cambios, refrescamos pending counts
+      await Promise.all([reloadPendientes(), fetchIngresosPendientesCount()]);
     } catch (err) {
       console.error('Error al marcar como pagado', err);
       Alert.alert('Error', 'No se ha podido marcar el gasto como pagado.');
@@ -627,26 +655,22 @@ export const GastosListScreen: React.FC<{ navigation: any; route: any }> = ({
   };
 
   const confirmarMarcarPagadoGestionable = (gasto: Gasto) => {
-    Alert.alert(
-      'Marcar como pagado',
-      `¿Quieres marcar el gasto "${gasto.nombre}" como pagado?`,
-      [
-        { text: 'Cancelar', style: 'cancel' },
-        {
-          text: 'Marcar como pagado',
-          style: 'default',
-          onPress: () => {
-            void handleMarcarComoPagadoGestionable(gasto);
-          },
-        },
-      ]
-    );
+    Alert.alert('Marcar como pagado', `¿Quieres marcar el gasto "${gasto.nombre}" como pagado?`, [
+      { text: 'Cancelar', style: 'cancel' },
+      {
+        text: 'Marcar como pagado',
+        style: 'default',
+        onPress: () => void handleMarcarComoPagadoGestionable(gasto),
+      },
+    ]);
   };
 
   const handleMarcarComoPagadoCotidiano = async (gasto: GastoCotidiano) => {
     try {
       await marcarGastoComoPagado(gasto.id);
       await cargarGastosCotidianos();
+      // ✅ NUEVO: tras cambios, refrescamos pending counts
+      await Promise.all([reloadPendientes(), fetchIngresosPendientesCount()]);
     } catch (err) {
       console.error('Error al marcar gasto cotidiano como pagado', err);
       Alert.alert('Error', 'No se ha podido marcar el gasto cotidiano como pagado.');
@@ -659,9 +683,7 @@ export const GastosListScreen: React.FC<{ navigation: any; route: any }> = ({
       {
         text: 'Marcar como pagado',
         style: 'default',
-        onPress: () => {
-          void handleMarcarComoPagadoCotidiano(gasto);
-        },
+        onPress: () => void handleMarcarComoPagadoCotidiano(gasto),
       },
     ]);
   };
@@ -715,10 +737,7 @@ export const GastosListScreen: React.FC<{ navigation: any; route: any }> = ({
       label: 'Duplicar gasto',
       onPress: () => {
         setSheetVisible(false);
-        navigation.navigate('GastoGestionableForm', {
-          gasto,
-          duplicate: true,
-        });
+        navigation.navigate('GastoGestionableForm', { gasto, duplicate: true });
       },
       iconName: 'copy-outline',
       color: azul,
@@ -728,10 +747,7 @@ export const GastosListScreen: React.FC<{ navigation: any; route: any }> = ({
       label: 'Ver detalle',
       onPress: () => {
         setSheetVisible(false);
-        navigation.navigate('GastoGestionableForm', {
-          gasto,
-          readOnly: true,
-        });
+        navigation.navigate('GastoGestionableForm', { gasto, readOnly: true });
       },
       iconName: 'information-circle-outline',
       color: gris,
@@ -750,6 +766,8 @@ export const GastosListScreen: React.FC<{ navigation: any; route: any }> = ({
                 await eliminarGasto(gasto.id);
                 setSheetVisible(false);
                 await reload();
+                // ✅ NUEVO: tras cambios, refrescamos pending counts
+                await Promise.all([reloadPendientes(), fetchIngresosPendientesCount()]);
               } catch (err) {
                 console.error('Error al eliminar gasto', err);
                 Alert.alert('Error', 'No se ha podido eliminar el gasto. Inténtalo de nuevo.');
@@ -788,10 +806,7 @@ export const GastosListScreen: React.FC<{ navigation: any; route: any }> = ({
       label: 'Ver detalle',
       onPress: () => {
         setSheetVisible(false);
-        navigation.navigate('GastoCotidianoForm', {
-          gasto,
-          readOnly: true,
-        });
+        navigation.navigate('GastoCotidianoForm', { gasto, readOnly: true });
       },
       iconName: 'information-circle-outline',
       color: gris,
@@ -810,6 +825,8 @@ export const GastosListScreen: React.FC<{ navigation: any; route: any }> = ({
                 await eliminarGastoCotidiano(gasto.id);
                 setSheetVisible(false);
                 await cargarGastosCotidianos();
+                // ✅ NUEVO: tras cambios, refrescamos pending counts
+                await Promise.all([reloadPendientes(), fetchIngresosPendientesCount()]);
               } catch (err) {
                 console.error('Error al eliminar gasto cotidiano', err);
                 Alert.alert(
@@ -836,399 +853,394 @@ export const GastosListScreen: React.FC<{ navigation: any; route: any }> = ({
 
   // ======= Buscador avanzado: GESTIONABLES =======
   const renderBuscadorGestionable = () => {
-  // Reglas de “bloqueo” cuando estamos en Pendientes
-  const disableByPendientes = isPendientesGestionables;
+    const disableByPendientes = isPendientesGestionables;
 
-  // Flags de datos (para deshabilitar pills sin resultados)
-  const hasPagadoData = statsPagado.pagado > 0;
-  const hasNoPagadoData = statsPagado.no_pagado > 0;
-  const hasAnyPagadoData = statsPagado.todos > 0;
+    const hasPagadoData = statsPagado.pagado > 0;
+    const hasNoPagadoData = statsPagado.no_pagado > 0;
+    const hasAnyPagadoData = statsPagado.todos > 0;
 
-  const hasActivoData = statsActivo.activo > 0;
-  const hasInactivoData = statsActivo.inactivo > 0;
-  const hasAnyActivoData = statsActivo.todos > 0;
+    const hasActivoData = statsActivo.activo > 0;
+    const hasInactivoData = statsActivo.inactivo > 0;
+    const hasAnyActivoData = statsActivo.todos > 0;
 
-  const hasKpiSiData = statsKpi.si > 0;
-  const hasKpiNoData = statsKpi.no > 0;
-  const hasAnyKpiData = statsKpi.todos > 0;
+    const hasKpiSiData = statsKpi.si > 0;
+    const hasKpiNoData = statsKpi.no > 0;
+    const hasAnyKpiData = statsKpi.todos > 0;
 
-  return (
-    <View style={styles.searchPanel}>
-      {/* BUSCAR TEXTO (NO PLEGABLE) */}
-      <Text style={styles.searchLabel}>Buscar</Text>
-      <View style={styles.searchRow}>
-        <Ionicons
-          name="search-outline"
-          size={16}
-          color={colors.textSecondary}
-          style={styles.searchIcon}
-        />
-        <TextInput
-          value={searchText}
-          onChangeText={setSearchText}
-          placeholder="Nombre, proveedor, segmento, tipo…"
-          placeholderTextColor={colors.textMuted}
-          style={styles.searchInput}
-        />
-      </View>
-
-      {/* PERIODICIDAD (PLEGABLE) */}
-      <View
-        style={{
-          flexDirection: 'row',
-          alignItems: 'center',
-          justifyContent: 'space-between',
-          marginTop: 12,
-        }}
-      >
-        <Text style={styles.searchLabel}>Periodicidad</Text>
-        <TouchableOpacity
-          onPress={() => setShowPeriodicidadFilter((prev) => !prev)}
-          style={{ flexDirection: 'row', alignItems: 'center' }}
-        >
+    return (
+      <View style={styles.searchPanel}>
+        <Text style={styles.searchLabel}>Buscar</Text>
+        <View style={styles.searchRow}>
           <Ionicons
-            name={showPeriodicidadFilter ? 'remove-circle-outline' : 'add-circle-outline'}
+            name="search-outline"
             size={16}
             color={colors.textSecondary}
-            style={{ marginRight: 4 }}
+            style={styles.searchIcon}
           />
-          <Text style={{ color: colors.textSecondary, fontSize: 12 }}>
-            {showPeriodicidadFilter ? 'Ocultar' : 'Mostrar'}
-          </Text>
-        </TouchableOpacity>
-      </View>
-
-      {showPeriodicidadFilter && (
-        <View style={styles.pillsRow}>
-          <View style={styles.pillWrapper}>
-            <FilterPill
-              label="Todos"
-              selected={filtroPeriodicidad === 'todos'}
-              onPress={() => setFiltroPeriodicidad('todos')}
-              style={styles.filterPill}
-            />
-          </View>
-
-          {PERIODICIDAD_OPTIONS.map((opt) => {
-            const selected = filtroPeriodicidad === opt.value;
-            return (
-              <View key={opt.value} style={styles.pillWrapper}>
-                <FilterPill
-                  label={opt.label}
-                  selected={selected}
-                  onPress={() => setFiltroPeriodicidad(selected ? 'todos' : opt.value)}
-                  style={styles.filterPill}
-                />
-              </View>
-            );
-          })}
+          <TextInput
+            value={searchText}
+            onChangeText={setSearchText}
+            placeholder="Nombre, proveedor, segmento, tipo…"
+            placeholderTextColor={colors.textMuted}
+            style={styles.searchInput}
+          />
         </View>
-      )}
 
-      {/* SEGMENTO (PLEGABLE) */}
-      {segmentosDisponibles.length > 0 && (
-        <>
-          <View
-            style={{
-              flexDirection: 'row',
-              alignItems: 'center',
-              justifyContent: 'space-between',
-              marginTop: 12,
-            }}
+        {/* PERIODICIDAD (PLEGABLE) */}
+        <View
+          style={{
+            flexDirection: 'row',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+            marginTop: 12,
+          }}
+        >
+          <Text style={styles.searchLabel}>Periodicidad</Text>
+          <TouchableOpacity
+            onPress={() => setShowPeriodicidadFilter((prev) => !prev)}
+            style={{ flexDirection: 'row', alignItems: 'center' }}
           >
-            <Text style={styles.searchLabel}>Segmento</Text>
-            <TouchableOpacity
-              onPress={() => setShowSegmentoFilter((prev) => !prev)}
-              style={{ flexDirection: 'row', alignItems: 'center' }}
-            >
-              <Ionicons
-                name={showSegmentoFilter ? 'remove-circle-outline' : 'add-circle-outline'}
-                size={16}
-                color={colors.textSecondary}
-                style={{ marginRight: 4 }}
+            <Ionicons
+              name={showPeriodicidadFilter ? 'remove-circle-outline' : 'add-circle-outline'}
+              size={16}
+              color={colors.textSecondary}
+              style={{ marginRight: 4 }}
+            />
+            <Text style={{ color: colors.textSecondary, fontSize: 12 }}>
+              {showPeriodicidadFilter ? 'Ocultar' : 'Mostrar'}
+            </Text>
+          </TouchableOpacity>
+        </View>
+
+        {showPeriodicidadFilter && (
+          <View style={styles.pillsRow}>
+            <View style={styles.pillWrapper}>
+              <FilterPill
+                label="Todos"
+                selected={filtroPeriodicidad === 'todos'}
+                onPress={() => setFiltroPeriodicidad('todos')}
+                style={styles.filterPill}
               />
-              <Text style={{ color: colors.textSecondary, fontSize: 12 }}>
-                {showSegmentoFilter ? 'Ocultar' : 'Mostrar'}
-              </Text>
-            </TouchableOpacity>
-          </View>
-
-          {showSegmentoFilter && (
-            <View style={styles.pillsRowWrap}>
-              <View style={styles.pillWrapper}>
-                <FilterPill
-                  label="Todos"
-                  selected={filtroSegmento === 'todos'}
-                  onPress={() => setFiltroSegmento('todos')}
-                  style={styles.filterPill}
-                />
-              </View>
-
-              {segmentosDisponibles.map((seg) => {
-                const selected = filtroSegmento === seg.id;
-                return (
-                  <View style={styles.pillWrapper} key={seg.id}>
-                    <FilterPill
-                      label={seg.nombre}
-                      selected={selected}
-                      onPress={() => setFiltroSegmento(seg.id)}
-                      style={styles.filterPill}
-                    />
-                  </View>
-                );
-              })}
             </View>
-          )}
-        </>
-      )}
 
-      {/* TIPO DE GASTO (PLEGABLE) */}
-      <View
-        style={{
-          flexDirection: 'row',
-          alignItems: 'center',
-          justifyContent: 'space-between',
-          marginTop: 12,
-        }}
-      >
-        <Text style={styles.searchLabel}>Tipo de gasto</Text>
-        <TouchableOpacity
-          onPress={() => setShowTiposGastoFilter((prev) => !prev)}
-          style={{ flexDirection: 'row', alignItems: 'center' }}
-        >
-          <Ionicons
-            name={showTiposGastoFilter ? 'remove-circle-outline' : 'add-circle-outline'}
-            size={16}
-            color={colors.textSecondary}
-            style={{ marginRight: 4 }}
-          />
-          <Text style={{ color: colors.textSecondary, fontSize: 12 }}>
-            {showTiposGastoFilter ? 'Ocultar' : 'Mostrar'}
-          </Text>
-        </TouchableOpacity>
-      </View>
-
-      {showTiposGastoFilter && (
-        <View style={styles.pillsRowWrap}>
-          <View style={styles.pillWrapper}>
-            <FilterPill
-              label="Todos"
-              selected={filtroTipoGasto === 'todos'}
-              onPress={() => setFiltroTipoGasto('todos')}
-              style={styles.filterPill}
-            />
+            {PERIODICIDAD_OPTIONS.map((opt) => {
+              const selected = filtroPeriodicidad === opt.value;
+              return (
+                <View key={opt.value} style={styles.pillWrapper}>
+                  <FilterPill
+                    label={opt.label}
+                    selected={selected}
+                    onPress={() => setFiltroPeriodicidad(selected ? 'todos' : opt.value)}
+                    style={styles.filterPill}
+                  />
+                </View>
+              );
+            })}
           </View>
+        )}
 
-          {tiposDisponiblesGestionables.map((t) => {
-            const selected = filtroTipoGasto === t.id;
-            const disabled = !t.tieneGastos;
-
-            return (
-              <View style={styles.pillWrapper} key={t.id}>
-                <FilterPill
-                  label={t.nombre}
-                  selected={selected}
-                  disabled={disabled}
-                  onPress={() =>
-                    setFiltroTipoGasto(selected ? 'todos' : (t.id as FiltroTipoGasto))
-                  }
-                  style={styles.filterPill}
+        {/* SEGMENTO (PLEGABLE) */}
+        {segmentosDisponibles.length > 0 && (
+          <>
+            <View
+              style={{
+                flexDirection: 'row',
+                alignItems: 'center',
+                justifyContent: 'space-between',
+                marginTop: 12,
+              }}
+            >
+              <Text style={styles.searchLabel}>Segmento</Text>
+              <TouchableOpacity
+                onPress={() => setShowSegmentoFilter((prev) => !prev)}
+                style={{ flexDirection: 'row', alignItems: 'center' }}
+              >
+                <Ionicons
+                  name={showSegmentoFilter ? 'remove-circle-outline' : 'add-circle-outline'}
+                  size={16}
+                  color={colors.textSecondary}
+                  style={{ marginRight: 4 }}
                 />
+                <Text style={{ color: colors.textSecondary, fontSize: 12 }}>
+                  {showSegmentoFilter ? 'Ocultar' : 'Mostrar'}
+                </Text>
+              </TouchableOpacity>
+            </View>
+
+            {showSegmentoFilter && (
+              <View style={styles.pillsRowWrap}>
+                <View style={styles.pillWrapper}>
+                  <FilterPill
+                    label="Todos"
+                    selected={filtroSegmento === 'todos'}
+                    onPress={() => setFiltroSegmento('todos')}
+                    style={styles.filterPill}
+                  />
+                </View>
+
+                {segmentosDisponibles.map((seg) => {
+                  const selected = filtroSegmento === seg.id;
+                  return (
+                    <View style={styles.pillWrapper} key={seg.id}>
+                      <FilterPill
+                        label={seg.nombre}
+                        selected={selected}
+                        onPress={() => setFiltroSegmento(seg.id)}
+                        style={styles.filterPill}
+                      />
+                    </View>
+                  );
+                })}
               </View>
-            );
-          })}
-        </View>
-      )}
+            )}
+          </>
+        )}
 
-      {/* ESTADO (PAGADO) PLEGABLE */}
-      <View
-        style={{
-          flexDirection: 'row',
-          alignItems: 'center',
-          justifyContent: 'space-between',
-          marginTop: 12,
-        }}
-      >
-        <Text style={styles.searchLabel}>Estado</Text>
-        <TouchableOpacity
-          onPress={() => setShowEstadoFilter((prev) => !prev)}
-          style={{ flexDirection: 'row', alignItems: 'center' }}
+        {/* TIPO DE GASTO (PLEGABLE) */}
+        <View
+          style={{
+            flexDirection: 'row',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+            marginTop: 12,
+          }}
         >
-          <Ionicons
-            name={showEstadoFilter ? 'remove-circle-outline' : 'add-circle-outline'}
-            size={16}
-            color={colors.textSecondary}
-            style={{ marginRight: 4 }}
-          />
-          <Text style={{ color: colors.textSecondary, fontSize: 12 }}>
-            {showEstadoFilter ? 'Ocultar' : 'Mostrar'}
-          </Text>
-        </TouchableOpacity>
-      </View>
-
-      {showEstadoFilter && (
-        <View style={styles.pillsRow}>
-          <View style={styles.pillWrapper}>
-            <FilterPill
-              label="Todos"
-              selected={filtroPagado === 'todos'}
-              disabled={disableByPendientes || !hasAnyPagadoData}
-              onPress={() => setFiltroPagado('todos')}
-              style={styles.filterPill}
+          <Text style={styles.searchLabel}>Tipo de gasto</Text>
+          <TouchableOpacity
+            onPress={() => setShowTiposGastoFilter((prev) => !prev)}
+            style={{ flexDirection: 'row', alignItems: 'center' }}
+          >
+            <Ionicons
+              name={showTiposGastoFilter ? 'remove-circle-outline' : 'add-circle-outline'}
+              size={16}
+              color={colors.textSecondary}
+              style={{ marginRight: 4 }}
             />
-          </View>
-
-          <View style={styles.pillWrapper}>
-            <FilterPill
-              label="Pagado"
-              selected={filtroPagado === 'pagado'}
-              disabled={disableByPendientes || !hasPagadoData}
-              onPress={() => setFiltroPagado('pagado')}
-              style={styles.filterPill}
-            />
-          </View>
-
-          <View style={styles.pillWrapper}>
-            <FilterPill
-              label="No pagado"
-              selected={filtroPagado === 'no_pagado'}
-              disabled={disableByPendientes || !hasNoPagadoData}
-              onPress={() => setFiltroPagado('no_pagado')}
-              style={styles.filterPill}
-            />
-          </View>
+            <Text style={{ color: colors.textSecondary, fontSize: 12 }}>
+              {showTiposGastoFilter ? 'Ocultar' : 'Mostrar'}
+            </Text>
+          </TouchableOpacity>
         </View>
-      )}
 
-      {/* ACTIVO (PLEGABLE) */}
-      <View
-        style={{
-          flexDirection: 'row',
-          alignItems: 'center',
-          justifyContent: 'space-between',
-          marginTop: 12,
-        }}
-      >
-        <Text style={styles.searchLabel}>Activo</Text>
-        <TouchableOpacity
-          onPress={() => setShowActivoFilter((prev) => !prev)}
-          style={{ flexDirection: 'row', alignItems: 'center' }}
+        {showTiposGastoFilter && (
+          <View style={styles.pillsRowWrap}>
+            <View style={styles.pillWrapper}>
+              <FilterPill
+                label="Todos"
+                selected={filtroTipoGasto === 'todos'}
+                onPress={() => setFiltroTipoGasto('todos')}
+                style={styles.filterPill}
+              />
+            </View>
+
+            {tiposDisponiblesGestionables.map((t) => {
+              const selected = filtroTipoGasto === t.id;
+              const disabled = !t.tieneGastos;
+
+              return (
+                <View style={styles.pillWrapper} key={t.id}>
+                  <FilterPill
+                    label={t.nombre}
+                    selected={selected}
+                    disabled={disabled}
+                    onPress={() =>
+                      setFiltroTipoGasto(selected ? 'todos' : (t.id as FiltroTipoGasto))
+                    }
+                    style={styles.filterPill}
+                  />
+                </View>
+              );
+            })}
+          </View>
+        )}
+
+        {/* ESTADO (PAGADO) PLEGABLE */}
+        <View
+          style={{
+            flexDirection: 'row',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+            marginTop: 12,
+          }}
         >
-          <Ionicons
-            name={showActivoFilter ? 'remove-circle-outline' : 'add-circle-outline'}
-            size={16}
-            color={colors.textSecondary}
-            style={{ marginRight: 4 }}
-          />
-          <Text style={{ color: colors.textSecondary, fontSize: 12 }}>
-            {showActivoFilter ? 'Ocultar' : 'Mostrar'}
-          </Text>
-        </TouchableOpacity>
-      </View>
-
-      {showActivoFilter && (
-        <View style={styles.pillsRow}>
-          <View style={styles.pillWrapper}>
-            <FilterPill
-              label="Todos"
-              selected={filtroActivo === 'todos'}
-              disabled={disableByPendientes || !hasAnyActivoData}
-              onPress={() => setFiltroActivo('todos')}
-              style={styles.filterPill}
+          <Text style={styles.searchLabel}>Estado</Text>
+          <TouchableOpacity
+            onPress={() => setShowEstadoFilter((prev) => !prev)}
+            style={{ flexDirection: 'row', alignItems: 'center' }}
+          >
+            <Ionicons
+              name={showEstadoFilter ? 'remove-circle-outline' : 'add-circle-outline'}
+              size={16}
+              color={colors.textSecondary}
+              style={{ marginRight: 4 }}
             />
-          </View>
-
-          <View style={styles.pillWrapper}>
-            <FilterPill
-              label="Solo activos"
-              selected={filtroActivo === 'activo'}
-              disabled={disableByPendientes || !hasActivoData}
-              onPress={() => setFiltroActivo('activo')}
-              style={styles.filterPill}
-            />
-          </View>
-
-          <View style={styles.pillWrapper}>
-            <FilterPill
-              label="Solo inactivos"
-              selected={filtroActivo === 'inactivo'}
-              disabled={disableByPendientes || !hasInactivoData}
-              onPress={() => setFiltroActivo('inactivo')}
-              style={styles.filterPill}
-            />
-          </View>
+            <Text style={{ color: colors.textSecondary, fontSize: 12 }}>
+              {showEstadoFilter ? 'Ocultar' : 'Mostrar'}
+            </Text>
+          </TouchableOpacity>
         </View>
-      )}
 
-      {/* KPI (PLEGABLE) */}
-      <View
-        style={{
-          flexDirection: 'row',
-          alignItems: 'center',
-          justifyContent: 'space-between',
-          marginTop: 12,
-        }}
-      >
-        <Text style={styles.searchLabel}>KPI</Text>
-        <TouchableOpacity
-          onPress={() => setShowKpiFilter((prev) => !prev)}
-          style={{ flexDirection: 'row', alignItems: 'center' }}
+        {showEstadoFilter && (
+          <View style={styles.pillsRow}>
+            <View style={styles.pillWrapper}>
+              <FilterPill
+                label="Todos"
+                selected={filtroPagado === 'todos'}
+                disabled={disableByPendientes || !hasAnyPagadoData}
+                onPress={() => setFiltroPagado('todos')}
+                style={styles.filterPill}
+              />
+            </View>
+
+            <View style={styles.pillWrapper}>
+              <FilterPill
+                label="Pagado"
+                selected={filtroPagado === 'pagado'}
+                disabled={disableByPendientes || !hasPagadoData}
+                onPress={() => setFiltroPagado('pagado')}
+                style={styles.filterPill}
+              />
+            </View>
+
+            <View style={styles.pillWrapper}>
+              <FilterPill
+                label="No pagado"
+                selected={filtroPagado === 'no_pagado'}
+                disabled={disableByPendientes || !hasNoPagadoData}
+                onPress={() => setFiltroPagado('no_pagado')}
+                style={styles.filterPill}
+              />
+            </View>
+          </View>
+        )}
+
+        {/* ACTIVO (PLEGABLE) */}
+        <View
+          style={{
+            flexDirection: 'row',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+            marginTop: 12,
+          }}
         >
-          <Ionicons
-            name={showKpiFilter ? 'remove-circle-outline' : 'add-circle-outline'}
-            size={16}
-            color={colors.textSecondary}
-            style={{ marginRight: 4 }}
-          />
-          <Text style={{ color: colors.textSecondary, fontSize: 12 }}>
-            {showKpiFilter ? 'Ocultar' : 'Mostrar'}
-          </Text>
-        </TouchableOpacity>
-      </View>
-
-      {showKpiFilter && (
-        <View style={styles.pillsRow}>
-          <View style={styles.pillWrapper}>
-            <FilterPill
-              label="Todos"
-              selected={filtroKpi === 'todos'}
-              disabled={disableByPendientes || !hasAnyKpiData}
-              onPress={() => setFiltroKpi('todos')}
-              style={styles.filterPill}
+          <Text style={styles.searchLabel}>Activo</Text>
+          <TouchableOpacity
+            onPress={() => setShowActivoFilter((prev) => !prev)}
+            style={{ flexDirection: 'row', alignItems: 'center' }}
+          >
+            <Ionicons
+              name={showActivoFilter ? 'remove-circle-outline' : 'add-circle-outline'}
+              size={16}
+              color={colors.textSecondary}
+              style={{ marginRight: 4 }}
             />
-          </View>
-
-          <View style={styles.pillWrapper}>
-            <FilterPill
-              label="KPI sí"
-              selected={filtroKpi === 'si'}
-              disabled={disableByPendientes || !hasKpiSiData}
-              onPress={() => setFiltroKpi('si')}
-              style={styles.filterPill}
-            />
-          </View>
-
-          <View style={styles.pillWrapper}>
-            <FilterPill
-              label="KPI no"
-              selected={filtroKpi === 'no'}
-              disabled={disableByPendientes || !hasKpiNoData}
-              onPress={() => setFiltroKpi('no')}
-              style={styles.filterPill}
-            />
-          </View>
+            <Text style={{ color: colors.textSecondary, fontSize: 12 }}>
+              {showActivoFilter ? 'Ocultar' : 'Mostrar'}
+            </Text>
+          </TouchableOpacity>
         </View>
-      )}
-    </View>
-  );
-};
 
+        {showActivoFilter && (
+          <View style={styles.pillsRow}>
+            <View style={styles.pillWrapper}>
+              <FilterPill
+                label="Todos"
+                selected={filtroActivo === 'todos'}
+                disabled={disableByPendientes || !hasAnyActivoData}
+                onPress={() => setFiltroActivo('todos')}
+                style={styles.filterPill}
+              />
+            </View>
+
+            <View style={styles.pillWrapper}>
+              <FilterPill
+                label="Solo activos"
+                selected={filtroActivo === 'activo'}
+                disabled={disableByPendientes || !hasActivoData}
+                onPress={() => setFiltroActivo('activo')}
+                style={styles.filterPill}
+              />
+            </View>
+
+            <View style={styles.pillWrapper}>
+              <FilterPill
+                label="Solo inactivos"
+                selected={filtroActivo === 'inactivo'}
+                disabled={disableByPendientes || !hasInactivoData}
+                onPress={() => setFiltroActivo('inactivo')}
+                style={styles.filterPill}
+              />
+            </View>
+          </View>
+        )}
+
+        {/* KPI (PLEGABLE) */}
+        <View
+          style={{
+            flexDirection: 'row',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+            marginTop: 12,
+          }}
+        >
+          <Text style={styles.searchLabel}>KPI</Text>
+          <TouchableOpacity
+            onPress={() => setShowKpiFilter((prev) => !prev)}
+            style={{ flexDirection: 'row', alignItems: 'center' }}
+          >
+            <Ionicons
+              name={showKpiFilter ? 'remove-circle-outline' : 'add-circle-outline'}
+              size={16}
+              color={colors.textSecondary}
+              style={{ marginRight: 4 }}
+            />
+            <Text style={{ color: colors.textSecondary, fontSize: 12 }}>
+              {showKpiFilter ? 'Ocultar' : 'Mostrar'}
+            </Text>
+          </TouchableOpacity>
+        </View>
+
+        {showKpiFilter && (
+          <View style={styles.pillsRow}>
+            <View style={styles.pillWrapper}>
+              <FilterPill
+                label="Todos"
+                selected={filtroKpi === 'todos'}
+                disabled={disableByPendientes || !hasAnyKpiData}
+                onPress={() => setFiltroKpi('todos')}
+                style={styles.filterPill}
+              />
+            </View>
+
+            <View style={styles.pillWrapper}>
+              <FilterPill
+                label="KPI sí"
+                selected={filtroKpi === 'si'}
+                disabled={disableByPendientes || !hasKpiSiData}
+                onPress={() => setFiltroKpi('si')}
+                style={styles.filterPill}
+              />
+            </View>
+
+            <View style={styles.pillWrapper}>
+              <FilterPill
+                label="KPI no"
+                selected={filtroKpi === 'no'}
+                disabled={disableByPendientes || !hasKpiNoData}
+                onPress={() => setFiltroKpi('no')}
+                style={styles.filterPill}
+              />
+            </View>
+          </View>
+        )}
+      </View>
+    );
+  };
 
   // ======= Buscador avanzado: COTIDIANOS =======
   const renderBuscadorCotidiano = () => {
     return (
       <View style={styles.searchPanel}>
-        {/* BUSCAR TEXTO (NO PLEGABLE) */}
         <Text style={styles.searchLabel}>Buscar</Text>
         <View style={styles.searchRow}>
           <Ionicons
@@ -1486,12 +1498,11 @@ export const GastosListScreen: React.FC<{ navigation: any; route: any }> = ({
 
       const listaFiltrada = aplicarFiltrosCotidianos(gastosCotidianos);
 
-      // Ordenar de más reciente a más antiguo
       const listaOrdenada = [...listaFiltrada].sort((a, b) => {
         const ta = new Date(a.fecha).getTime();
         const tb = new Date(b.fecha).getTime();
         if (Number.isNaN(ta) || Number.isNaN(tb)) return 0;
-        return tb - ta; // descendente
+        return tb - ta;
       });
 
       if (listaOrdenada.length === 0) {
@@ -1509,27 +1520,26 @@ export const GastosListScreen: React.FC<{ navigation: any; route: any }> = ({
           style={styles.list}
           contentContainerStyle={styles.listContent}
           showsVerticalScrollIndicator={false}
-          refreshControl={
-            <RefreshControl refreshing={refreshing} onRefresh={handleRefresh} />
-          }
+          refreshControl={<RefreshControl refreshing={refreshing} onRefresh={handleRefresh} />}
         >
           {listaOrdenada.map((g) => {
             const titulo = (() => {
               const nombreApi = (g as any).proveedor_nombre as string | undefined;
               if (nombreApi && nombreApi.trim() !== '') return nombreApi;
+
               if (g.proveedor_id != null) {
                 const key = String(g.proveedor_id).trim().toUpperCase();
                 const nombre = mapaProveedoresPorId.get(key);
                 if (nombre && nombre.trim() !== '') return nombre;
               }
-              // Fallback UX: si no hay proveedor, mostramos algo útil
-              // (evento u observaciones) antes de "Sin proveedor"
+
               const evento = (g as any).evento as string | undefined;
               if (evento && evento.trim() !== '') return evento.trim();
+
               const obs = (g.observaciones ?? '').trim();
               if (obs !== '') return obs;
-              return 'Sin proveedor';
 
+              return 'Sin proveedor';
             })();
 
             const categoria = getTipoCotidianoNombre(g);
@@ -1538,11 +1548,8 @@ export const GastosListScreen: React.FC<{ navigation: any; route: any }> = ({
             return (
               <ExpenseCard
                 key={g.id}
-                // 1ª línea: proveedor
                 title={titulo}
-                // 2ª línea: tipo de gasto cotidiano
                 category={categoria}
-                // 3ª línea: fecha larga
                 dateLabel={formatFechaLarga(g.fecha)}
                 amountLabel={formatImporteNegativo(g.importe)}
                 segmentoId="COTIDIANO"
@@ -1550,10 +1557,7 @@ export const GastosListScreen: React.FC<{ navigation: any; route: any }> = ({
                 iconNameOverride={iconNameOverride}
                 onOptionsPress={() => abrirMenuCotidiano(g)}
                 onPress={() =>
-                  navigation.navigate('GastoCotidianoForm', {
-                    gasto: g,
-                    readOnly: true,
-                  })
+                  navigation.navigate('GastoCotidianoForm', { gasto: g, readOnly: true })
                 }
                 actionIconName={g.pagado ? 'checkmark-done-outline' : 'cash-outline'}
                 onActionPress={g.pagado ? undefined : () => confirmarMarcarPagadoCotidiano(g)}
@@ -1602,33 +1606,24 @@ export const GastosListScreen: React.FC<{ navigation: any; route: any }> = ({
         {lista.map((gasto) => (
           <ExpenseCard
             key={gasto.id}
-            // 1ª línea: nombre del gasto
             title={gasto.nombre}
-            // 2ª línea: segmento (nombre)
             category={getCategoriaTextoGestionable(gasto)}
-            // 3ª línea: "Gasto previsto del X al Y" o fecha
             dateLabel={formatFechaRangoGestionable(gasto)}
             amountLabel={formatImporteNegativo(gasto.importe)}
             segmentoId={gasto.segmento_id}
             inactive={gasto.activo === false}
             onOptionsPress={() => abrirMenuGestionable(gasto)}
-            // Tap = ver detalle
-            onPress={() =>
-              navigation.navigate('GastoGestionableForm', {
-                gasto,
-                readOnly: true,
-              })
-            }
-            // Botón billete con confirmación
+            onPress={() => navigation.navigate('GastoGestionableForm', { gasto, readOnly: true })}
             actionIconName={gasto.pagado ? 'checkmark-done-outline' : 'cash-outline'}
-            onActionPress={
-              gasto.pagado ? undefined : () => confirmarMarcarPagadoGestionable(gasto)
-            }
+            onActionPress={gasto.pagado ? undefined : () => confirmarMarcarPagadoGestionable(gasto)}
           />
         ))}
       </ScrollView>
     );
   };
+
+  // ✅ Si está cargando eligibility, preferimos NO mostrar el botón de reinicio (mantenemos "+").
+  const eligibilityLoading = loadingPendientes || loadingIngresosPendientes;
 
   return (
     <>
@@ -1637,7 +1632,14 @@ export const GastosListScreen: React.FC<{ navigation: any; route: any }> = ({
         subtitle="Muestra todos tus gastos. Desde la parte de gastos gestionables como los del día a día."
         showBack
         onBackPress={handleBack}
-        onAddPress={handleAddGasto}
+        /**
+         * ✅ NUEVO:
+         * - Si canReiniciarMes (y no estamos cargando), mostramos botón de reinicio.
+         * - Si no, mantenemos el "+" legacy (onAddPress) sin perder funcionalidad.
+         */
+        rightIconName={!eligibilityLoading && canReiniciarMes ? 'calendar-outline' : undefined}
+        onRightPress={!eligibilityLoading && canReiniciarMes ? goReiniciarMes : undefined}
+        onAddPress={!eligibilityLoading && canReiniciarMes ? undefined : handleAddGasto}
       />
 
       <View style={styles.screen}>

@@ -68,6 +68,7 @@ import CierreEditScreen from '../screens/cierres/CierreEditScreen';
 import { CuentasBancariasListScreen } from '../screens/cuentas/CuentasBancariasListScreen';
 import { CuentaBancariaFormScreen } from '../screens/cuentas/CuentaBancariaFormScreen';
 import GestionDbScreen from '../screens/bd/gestionDbScreen';
+import ReinciarCierreScreen from '../screens/cierres/ReinciarCierreScreen';
 
 // --------------------
 // Tipos de navegación
@@ -247,6 +248,14 @@ export type MonthStackParamList = {
 
   // IMPORTANTE: tu listado navega pasando { cierreId, cierre }
   CierreDetalleScreen: { cierreId: string; cierre?: any };
+
+  ReinciarCierreScreen:
+    | {
+        returnToTab?: keyof MainTabsParamList;
+        returnToScreen?: string;
+      }
+    | undefined;
+  
 };
 
 export type PatrimonyStackParamList = {
@@ -978,6 +987,7 @@ function MonthStackNavigator() {
       <MonthStack.Screen name="CierreDetalleScreen" component={CierreDetalleScreen} />
       <MonthStack.Screen name="CierreKpiScreen" component={CierreKpiScreen} />
       <MonthStack.Screen name="CierreEditScreen" component={CierreEditScreen} />
+      <MonthStack.Screen name="ReinciarCierreScreen" component={ReinciarCierreScreen} />
     </MonthStack.Navigator>
   );
 }

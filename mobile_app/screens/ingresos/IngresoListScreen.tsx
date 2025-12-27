@@ -1,3 +1,4 @@
+// screens/ingresos/IngresoListScreen.tsx
 /**
  * Archivo: screens/ingresos/IngresoListScreen.tsx
  *
@@ -6,27 +7,18 @@
  *   - Integración de “Buscador avanzado” con filtros plegables (periodicidad, tipo, estado, pagado, KPI).
  *   - Acciones contextuales por ingreso mediante ActionSheet (cobrar, editar, duplicar, ver detalle, eliminar).
  *
- * Maneja:
- *   - Data fetching: API de ingresos (pendientes / todos) + catálogo de tipos.
- *   - Estado UI: loading/refreshing/error, buscador abierto/cerrado, filtros locales, selección de item.
- *   - UX: confirmaciones (Alert) para cobrar/eliminar y pull-to-refresh.
+ * NUEVO (Reiniciar mes en header):
+ *   - En el header (donde estaba el "+") debe aparecer un botón para "Reiniciar mes"
+ *     SOLO cuando:
+ *       - NO existen gastos pendientes (gestionables), y
+ *       - NO existen ingresos pendientes (gestionables)
+ *   - Si NO se cumple, se mantiene el "+" legacy (no se pierde funcionalidad).
  *
- * Dependencias clave:
- *   - components/ui: Chip, FilterPill, FilterRow
- *   - components/cards: ExpenseCard
- *   - components/modals: ActionSheet
- *   - services: api, fetchTiposIngreso
- *   - constants: PERIODICIDAD_OPTIONS
- *   - theme: colors + listStyles
- *
- * Reutilización:
- *   - Candidato a externalizar: MEDIO
- *     (patrón “ListScreen + filtros plegables + ActionSheet” repetible, pero con lógica de dominio específica).
- *
- * Notas:
- *   - Evitar hardcodes: usar tokens del theme (spacing/radius/colors) y estilos compartidos (listStyles).
- *   - Los filtros “fijos” en modo pendientes (estado/pagado/KPI) deben bloquear opciones no seleccionadas
- *     sin replicar “disabled visual” en screens (la UI lo resuelve el componente base).
+ * Implementación:
+ *   - Ingresos pendientes: ya existe endpoint /api/v1/ingresos/pendientes.
+ *     - Si estamos en filtro "pendientes", usamos ingresos.length (la lista ya es esa).
+ *     - Si estamos en "todos", pedimos el endpoint para el count.
+ *   - Gastos pendientes: usamos useGastos('pendientes') (mismo hook que en GastosList).
  */
 
 import React, { useEffect, useState, useMemo, useCallback } from 'react';
@@ -50,20 +42,16 @@ import { ExpenseCard } from '../../components/cards/ExpenseCard';
 import FilterRow from '../../components/ui/FilterRow';
 
 import { colors } from '../../theme';
-import {
-  ActionSheet,
-  ActionSheetAction,
-} from '../../components/modals/ActionSheet';
+import { ActionSheet, ActionSheetAction } from '../../components/modals/ActionSheet';
 import { listStyles as styles } from '../../components/list/listStyles';
 
 import { api } from '../../services/api';
 import { TipoIngreso, fetchTiposIngreso } from '../../services/ingresosApi';
-import {
-  PERIODICIDAD_OPTIONS,
-  type PeriodicidadFiltro,
-} from '../../constants/general';
-
+import { PERIODICIDAD_OPTIONS, type PeriodicidadFiltro } from '../../constants/general';
 import { EuroformatEuro } from '../../utils/format';
+
+// ✅ NUEVO: para saber si hay gastos pendientes (gestionables)
+import { useGastos } from '../../hooks/useGastos';
 
 type Props = {
   navigation: any;
@@ -107,7 +95,6 @@ type EstadoFiltro = 'todos' | 'activos' | 'inactivos';
 type PagadoFiltro = 'todos' | 'pagado' | 'no_pagado';
 type KpiFiltro = 'todos' | 'kpi_si' | 'kpi_no';
 
-/** Fecha de referencia: fecha_inicio o createon (por si la necesitas en el futuro) */
 function formatFechaIngreso(ing: Ingreso): string {
   const raw = ing.fecha_inicio || ing.createon || null;
   if (!raw) return '-';
@@ -121,16 +108,11 @@ function formatFechaIngreso(ing: Ingreso): string {
 }
 
 function getNombreTipoIngreso(ing: Ingreso): string {
-  if (ing.tipo_nombre && ing.tipo_nombre.trim() !== '') {
-    return ing.tipo_nombre;
-  }
-  if (ing.tipo_id && ing.tipo_id.trim() !== '') {
-    return ing.tipo_id;
-  }
+  if (ing.tipo_nombre && ing.tipo_nombre.trim() !== '') return ing.tipo_nombre;
+  if (ing.tipo_id && ing.tipo_id.trim() !== '') return ing.tipo_id;
   return 'Ingreso';
 }
 
-/** Texto "Ingreso previsto del X al X" a partir de rango_cobro (ej: "1-3") */
 function formatRangoCobroLabel(ing: Ingreso): string {
   const rc = (ing.rango_cobro || '').trim();
   if (!rc) return '';
@@ -148,9 +130,7 @@ export const IngresoListScreen: React.FC<Props> = ({ navigation }) => {
       navigation.navigate(returnToTab, { screen: returnToScreen });
       return;
     }
-    if (navigation?.canGoBack?.()) {
-      navigation.goBack();
-    }
+    if (navigation?.canGoBack?.()) navigation.goBack();
   }, [navigation, returnToTab, returnToScreen]);
 
   const [filtro, setFiltro] = useState<Filtro>('pendientes');
@@ -166,8 +146,7 @@ export const IngresoListScreen: React.FC<Props> = ({ navigation }) => {
   // Buscador avanzado
   const [buscadorAbierto, setBuscadorAbierto] = useState(false);
   const [searchText, setSearchText] = useState('');
-  const [filtroPeriodicidad, setFiltroPeriodicidad] =
-    useState<PeriodicidadFiltro>('todos');
+  const [filtroPeriodicidad, setFiltroPeriodicidad] = useState<PeriodicidadFiltro>('todos');
   const [filtroTipo, setFiltroTipo] = useState<TipoFiltro>('todos');
   const [filtroEstado, setFiltroEstado] = useState<EstadoFiltro>('todos');
   const [filtroPagado, setFiltroPagado] = useState<PagadoFiltro>('todos');
@@ -184,9 +163,42 @@ export const IngresoListScreen: React.FC<Props> = ({ navigation }) => {
     navigation.navigate('NuevoIngreso');
   };
 
+  // ============================
+  // ✅ NUEVO: gastos pendientes para eligibility de reinicio
+  // ============================
+  const {
+    gastos: gastosPendientes,
+    loading: loadingGastosPendientes,
+    reload: reloadGastosPendientes,
+  } = useGastos('pendientes');
+  const gastosPendientesCount = gastosPendientes?.length ?? 0;
+
+  // ============================
+  // ✅ NUEVO: ingresos pendientes count para eligibility (cuando NO estamos en filtro pendientes)
+  // ============================
+  const [ingresosPendientesCountApi, setIngresosPendientesCountApi] = useState<number | null>(
+    null
+  );
+  const [loadingIngresosPendientes, setLoadingIngresosPendientes] = useState(false);
+
+  const fetchIngresosPendientesCount = useCallback(async () => {
+    setLoadingIngresosPendientes(true);
+    try {
+      const resp = await api.get<Ingreso[]>('/api/v1/ingresos/pendientes');
+      const list = resp.data ?? [];
+      setIngresosPendientesCountApi(Array.isArray(list) ? list.length : 0);
+    } catch (e) {
+      console.error('[IngresoList] Error cargando ingresos pendientes', e);
+      setIngresosPendientesCountApi(null);
+    } finally {
+      setLoadingIngresosPendientes(false);
+    }
+  }, []);
+
   const cargarIngresos = async () => {
     setLoading(true);
     setError(null);
+
     try {
       let data: Ingreso[] = [];
 
@@ -248,15 +260,37 @@ export const IngresoListScreen: React.FC<Props> = ({ navigation }) => {
     }
   }, [isPendientes]);
 
+  // ✅ Al enfocar pantalla: refrescamos counts de eligibility
+  useFocusEffect(
+    useCallback(() => {
+      void fetchIngresosPendientesCount();
+      return () => {
+        setBuscadorAbierto(false);
+        setSearchText('');
+        setFiltroPeriodicidad('todos');
+        setFiltroTipo('todos');
+        setFiltroEstado('todos');
+        setFiltroPagado('todos');
+        setFiltroKpi('todos');
+      };
+    }, [fetchIngresosPendientesCount])
+  );
+
   const handleRefresh = async () => {
     setRefreshing(true);
     await cargarIngresos();
+
+    // ✅ refresco extra: eligibility
+    await Promise.all([reloadGastosPendientes(), fetchIngresosPendientesCount()]);
   };
 
   const handleCobrar = async (ingreso: Ingreso) => {
     try {
       await api.put(`/api/v1/ingresos/${ingreso.id}/cobrar`);
       await cargarIngresos();
+
+      // ✅ tras cambios: refrescamos eligibility
+      await Promise.all([reloadGastosPendientes(), fetchIngresosPendientesCount()]);
     } catch (err) {
       console.error('[IngresoList] Error al cobrar ingreso', err);
       Alert.alert('Error', 'No se ha podido marcar el ingreso como cobrado.');
@@ -269,41 +303,31 @@ export const IngresoListScreen: React.FC<Props> = ({ navigation }) => {
       `¿Quieres marcar el ingreso ${ingreso.concepto || ingreso.id} como cobrado?`,
       [
         { text: 'Cancelar', style: 'cancel' },
-        {
-          text: 'Marcar como cobrado',
-          style: 'default',
-          onPress: () => {
-            void handleCobrar(ingreso);
-          },
-        },
+        { text: 'Marcar como cobrado', style: 'default', onPress: () => void handleCobrar(ingreso) },
       ]
     );
   };
 
   const handleEliminar = async (ingreso: Ingreso) => {
-    Alert.alert(
-      'Eliminar ingreso',
-      `¿Eliminar el ingreso "${ingreso.concepto || ingreso.id}"?`,
-      [
-        { text: 'Cancelar', style: 'cancel' },
-        {
-          text: 'Eliminar',
-          style: 'destructive',
-          onPress: async () => {
-            try {
-              await api.delete(`/api/v1/ingresos/${ingreso.id}`);
-              await cargarIngresos();
-            } catch (err) {
-              console.error('[IngresoList] Error al eliminar ingreso', err);
-              Alert.alert(
-                'Error',
-                'No se ha podido eliminar el ingreso. Inténtalo de nuevo.'
-              );
-            }
-          },
+    Alert.alert('Eliminar ingreso', `¿Eliminar el ingreso "${ingreso.concepto || ingreso.id}"?`, [
+      { text: 'Cancelar', style: 'cancel' },
+      {
+        text: 'Eliminar',
+        style: 'destructive',
+        onPress: async () => {
+          try {
+            await api.delete(`/api/v1/ingresos/${ingreso.id}`);
+            await cargarIngresos();
+
+            // ✅ tras cambios: refrescamos eligibility
+            await Promise.all([reloadGastosPendientes(), fetchIngresosPendientesCount()]);
+          } catch (err) {
+            console.error('[IngresoList] Error al eliminar ingreso', err);
+            Alert.alert('Error', 'No se ha podido eliminar el ingreso. Inténtalo de nuevo.');
+          }
         },
-      ]
-    );
+      },
+    ]);
   };
 
   const abrirMenuIngreso = (ingreso: Ingreso) => {
@@ -351,11 +375,7 @@ export const IngresoListScreen: React.FC<Props> = ({ navigation }) => {
       label: 'Duplicar ingreso',
       onPress: () => {
         setSheetVisible(false);
-        navigation.navigate('IngresoForm', {
-          ingreso,
-          duplicate: true,
-          mode: 'gestionable',
-        });
+        navigation.navigate('IngresoForm', { ingreso, duplicate: true, mode: 'gestionable' });
       },
       iconName: 'copy-outline',
       color: azul,
@@ -481,30 +501,7 @@ export const IngresoListScreen: React.FC<Props> = ({ navigation }) => {
 
       return true;
     });
-  }, [
-    ingresos,
-    searchText,
-    filtroPeriodicidad,
-    filtroTipo,
-    filtroEstado,
-    filtroPagado,
-    filtroKpi,
-  ]);
-
-  // Reset buscador al salir de la pantalla
-  useFocusEffect(
-    useCallback(() => {
-      return () => {
-        setBuscadorAbierto(false);
-        setSearchText('');
-        setFiltroPeriodicidad('todos');
-        setFiltroTipo('todos');
-        setFiltroEstado('todos');
-        setFiltroPagado('todos');
-        setFiltroKpi('todos');
-      };
-    }, [])
-  );
+  }, [ingresos, searchText, filtroPeriodicidad, filtroTipo, filtroEstado, filtroPagado, filtroKpi]);
 
   const renderBuscador = () => {
     const canChangeFixedFilters = !isPendientes;
@@ -549,11 +546,7 @@ export const IngresoListScreen: React.FC<Props> = ({ navigation }) => {
               style={{ flexDirection: 'row', alignItems: 'center' }}
             >
               <Ionicons
-                name={
-                  showPeriodicidadFilter
-                    ? 'remove-circle-outline'
-                    : 'add-circle-outline'
-                }
+                name={showPeriodicidadFilter ? 'remove-circle-outline' : 'add-circle-outline'}
                 size={16}
                 color={colors.textSecondary}
                 style={{ marginRight: 4 }}
@@ -586,9 +579,7 @@ export const IngresoListScreen: React.FC<Props> = ({ navigation }) => {
                       label={opt.label}
                       selected={selected}
                       disabled={disabled}
-                      onPress={() =>
-                        setFiltroPeriodicidad(selected ? 'todos' : opt.value)
-                      }
+                      onPress={() => setFiltroPeriodicidad(selected ? 'todos' : opt.value)}
                       style={styles.filterPill}
                     />
                   </View>
@@ -646,9 +637,7 @@ export const IngresoListScreen: React.FC<Props> = ({ navigation }) => {
                       label={t.nombre}
                       selected={selected}
                       disabled={disabled}
-                      onPress={() =>
-                        setFiltroTipo(selected ? 'todos' : (t.id as TipoFiltro))
-                      }
+                      onPress={() => setFiltroTipo(selected ? 'todos' : (t.id as TipoFiltro))}
                       style={styles.filterPill}
                     />
                   </View>
@@ -865,9 +854,7 @@ export const IngresoListScreen: React.FC<Props> = ({ navigation }) => {
     if (ingresosFiltrados.length === 0) {
       return (
         <View style={styles.centered}>
-          <Text style={styles.emptyText}>
-            No hay ingresos que coincidan con el filtro.
-          </Text>
+          <Text style={styles.emptyText}>No hay ingresos que coincidan con el filtro.</Text>
         </View>
       );
     }
@@ -877,9 +864,7 @@ export const IngresoListScreen: React.FC<Props> = ({ navigation }) => {
         style={styles.list}
         contentContainerStyle={styles.listContent}
         showsVerticalScrollIndicator={false}
-        refreshControl={
-          <RefreshControl refreshing={refreshing} onRefresh={handleRefresh} />
-        }
+        refreshControl={<RefreshControl refreshing={refreshing} onRefresh={handleRefresh} />}
       >
         {ingresosFiltrados.map((ing) => {
           const titulo = ing.concepto || 'SIN CONCEPTO';
@@ -895,12 +880,7 @@ export const IngresoListScreen: React.FC<Props> = ({ navigation }) => {
               segmentoId="INGRESO"
               inactive={ing.activo === false}
               onOptionsPress={() => abrirMenuIngreso(ing)}
-              onPress={() =>
-                navigation.navigate('IngresoForm', {
-                  ingreso: ing,
-                  readOnly: true,
-                })
-              }
+              onPress={() => navigation.navigate('IngresoForm', { ingreso: ing, readOnly: true })}
               onActionPress={ing.cobrado ? undefined : () => confirmarCobrar(ing)}
             />
           );
@@ -909,6 +889,34 @@ export const IngresoListScreen: React.FC<Props> = ({ navigation }) => {
     );
   };
 
+  // ============================
+  // ✅ NUEVO: regla final para habilitar Reiniciar mes
+  // ============================
+  const effectiveIngresosPendientesCount = useMemo(() => {
+    // Si estás en "pendientes", ya estás viendo EXACTAMENTE los pendientes.
+    if (isPendientes) return ingresos.length;
+
+    // Si estás en "todos", dependemos del count via API.
+    return ingresosPendientesCountApi;
+  }, [isPendientes, ingresos.length, ingresosPendientesCountApi]);
+
+  const canReiniciarMes = useMemo(() => {
+    if (effectiveIngresosPendientesCount == null) return false;
+    return gastosPendientesCount === 0 && effectiveIngresosPendientesCount === 0;
+  }, [gastosPendientesCount, effectiveIngresosPendientesCount]);
+
+  const goReiniciarMes = useCallback(() => {
+    navigation.navigate('MonthTab', {
+      screen: 'ReinciarCierreScreen',
+      params: {
+        returnToTab: 'DayToDayTab',
+        returnToScreen: 'IngresosList',
+      },
+    });
+  }, [navigation]);
+
+  const eligibilityLoading = loadingGastosPendientes || loadingIngresosPendientes;
+
   return (
     <>
       <Header
@@ -916,13 +924,18 @@ export const IngresoListScreen: React.FC<Props> = ({ navigation }) => {
         subtitle="Muestra todos tus ingresos gestionables asi como los extraordinarios."
         showBack
         onBackPress={handleBack}
-        onAddPress={handleAddIngreso}
+        /**
+         * ✅ NUEVO:
+         * - Si se cumplen requisitos: mostramos icono de reinicio (calendar-outline).
+         * - Si no: mantenemos el "+" legacy.
+         */
+        rightIconName={!eligibilityLoading && canReiniciarMes ? 'calendar-outline' : undefined}
+        onRightPress={!eligibilityLoading && canReiniciarMes ? goReiniciarMes : undefined}
+        onAddPress={!eligibilityLoading && canReiniciarMes ? undefined : handleAddIngreso}
       />
 
       <View style={styles.screen}>
         <View style={styles.topArea}>
-          {/* IMPORTANTE: no le pases styles.filterRow aquí porque es legacy (wrap/gaps).
-              FilterRow ya gestiona el layout. */}
           <FilterRow columns={2} style={{ marginTop: 8 }}>
             {filtros.map((f) => (
               <Chip
