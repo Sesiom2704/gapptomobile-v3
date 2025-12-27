@@ -103,24 +103,24 @@ class PostgresAdapter:
 
     def list_fk_edges(self, *, schema: str = "public") -> List[Tuple[str, str]]:
         """
-        NUEVO: Devuelve relaciones FK como aristas:
-            (child_full_name, parent_full_name)
+        Devuelve relaciones FK como aristas (child_full_name, parent_full_name)
+        con nombres SIEMPRE cualificados (schema.table).
 
-        Se usa para:
-          - auto-incluir dependencias
-          - ordenar por topological sort (padres antes que hijos)
-
-        Notas:
-          - Las FKs sólo existen en tablas (no en vistas).
-          - Limitamos por schema (por defecto 'public').
+        Esto evita que regclass::text devuelva nombres sin schema cuando el search_path incluye public.
         """
         q = text(
             """
             SELECT
-              conrelid::regclass::text  AS child,
-              confrelid::regclass::text AS parent
-            FROM pg_constraint
-            WHERE contype = 'f'
+            child_ns.nspname  AS child_schema,
+            child_cl.relname  AS child_name,
+            parent_ns.nspname AS parent_schema,
+            parent_cl.relname AS parent_name
+            FROM pg_constraint con
+            JOIN pg_class child_cl ON child_cl.oid = con.conrelid
+            JOIN pg_namespace child_ns ON child_ns.oid = child_cl.relnamespace
+            JOIN pg_class parent_cl ON parent_cl.oid = con.confrelid
+            JOIN pg_namespace parent_ns ON parent_ns.oid = parent_cl.relnamespace
+            WHERE con.contype = 'f'
             """
         )
         with self.engine.connect() as conn:
@@ -128,15 +128,19 @@ class PostgresAdapter:
 
         edges: List[Tuple[str, str]] = []
         for r in rows:
-            child = str(r.child)
-            parent = str(r.parent)
+            child = f"{r.child_schema}.{r.child_name}"
+            parent = f"{r.parent_schema}.{r.parent_name}"
+
             if schema:
-                if not child.startswith(f"{schema}."):
+                if r.child_schema != schema:
                     continue
-                if not parent.startswith(f"{schema}."):
+                if r.parent_schema != schema:
                     continue
+
             edges.append((child, parent))
+
         return edges
+
 
     # -----------------------------
     # Lectura / Escritura
@@ -202,16 +206,11 @@ class PostgresAdapter:
         """
         Escribe en Postgres.
 
-        Estrategia (Insert + TRUNCATE):
-          - execute=False => no escribe
-          - execute=True:
-              - crea tabla básica si no existe (fallback)
-              - TRUNCATE
-              - INSERT por lotes
-
-        Nota:
-          - La integridad referencial depende del ORDEN de tablas.
-            Por eso el router ahora ordena por FKs.
+        - execute=False => no escribe
+        - execute=True:
+            - crea tabla básica si no existe (fallback)
+            - TRUNCATE (sin CASCADE salvo allow_destructive=True)
+            - INSERT por lotes
         """
         if not execute:
             return
@@ -225,10 +224,21 @@ class PostgresAdapter:
                 self._drop_if_exists(schema, name)
             self._create_text_table(schema, name, headers)
 
-        # Truncar (rápido). CASCADE ayuda cuando hay FKs colgando,
-        # pero el orden correcto es la solución principal.
-        with self.engine.begin() as conn:
-            conn.execute(text(f'TRUNCATE TABLE "{schema}"."{name}" RESTART IDENTITY CASCADE'))
+        # TRUNCATE
+        truncate_sql = f'TRUNCATE TABLE "{schema}"."{name}" RESTART IDENTITY'
+        if allow_destructive:
+            truncate_sql += " CASCADE"
+
+        try:
+            with self.engine.begin() as conn:
+                conn.execute(text(truncate_sql))
+        except SQLAlchemyError as e:
+            # Mensaje más accionable
+            raise RuntimeError(
+                f"TRUNCATE falló en {schema}.{name}. "
+                f"allow_destructive={allow_destructive}. "
+                f"Error: {e}"
+            ) from e
 
         if not rows:
             return
