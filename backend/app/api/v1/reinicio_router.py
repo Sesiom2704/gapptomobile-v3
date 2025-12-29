@@ -516,23 +516,31 @@ def cierre_preview(
 
     start, end = _month_range_dt(anio_val, mes_val)
 
-    # NOTA: aquí asumimos que tus modelos tienen:
-    # - Ingreso.fecha (datetime/date) + Ingreso.importe
-    # - Gasto.fecha (datetime/date) + Gasto.importe
-    # y que ambos tienen user_id.
-    # Si en Ingreso la fecha es "fecha_inicio" o similar, cámbialo aquí.
-    if not hasattr(models, "Ingreso") or not hasattr(models, "Gasto"):
-        raise HTTPException(status_code=500, detail="Faltan models.Ingreso y/o models.Gasto.")
-
     Ingreso = models.Ingreso
     Gasto = models.Gasto
+
+    # -----------------------------
+    # IMPORTANTE: Ingreso NO tiene 'fecha' en tu modelo.
+    # En tu código ya usas 'fecha_inicio'.
+    # -----------------------------
+    if not hasattr(Ingreso, "fecha_inicio"):
+        raise HTTPException(
+            status_code=500,
+            detail="models.Ingreso no tiene 'fecha_inicio'. Indica el nombre real del campo fecha en Ingreso.",
+        )
+    if not hasattr(Gasto, "fecha"):
+        raise HTTPException(
+            status_code=500,
+            detail="models.Gasto no tiene 'fecha'. Indica el nombre real del campo fecha en Gasto.",
+        )
 
     q_ing = (
         db.query(func.coalesce(func.sum(Ingreso.importe), 0.0))
         .filter(Ingreso.user_id == current_user.id)
-        .filter(Ingreso.fecha >= start)
-        .filter(Ingreso.fecha < end)
+        .filter(Ingreso.fecha_inicio >= start)
+        .filter(Ingreso.fecha_inicio < end)
     )
+
     q_gas = (
         db.query(func.coalesce(func.sum(Gasto.importe), 0.0))
         .filter(Gasto.user_id == current_user.id)
@@ -561,5 +569,7 @@ def cierre_preview(
             "range_start": start.isoformat(),
             "range_end": end.isoformat(),
             "note": "Preview what-if: acumulado del mes hasta la fecha (no inserta cierre).",
+            "ingreso_date_field": "fecha_inicio",
+            "gasto_date_field": "fecha",
         },
     )
