@@ -988,6 +988,7 @@ def create_gasto(
         payload["activo"] = False
         payload["pagado"] = True
         payload["kpi"] = False
+        payload["ultimo_pago_on"] = now_expr
     else:
         payload["activo"] = True
         payload["pagado"] = False
@@ -1259,6 +1260,7 @@ def pagar_gasto(
                 adjust_liquidez(db, g.cuenta_id, -per_unit)
 
     g.pagado = True
+    g.ultimo_pago_on = func.now()  
 
     cuotas_total = int(g.cuotas or 0)
     cuotas_pagadas_old = int(g.cuotas_pagadas or 0)

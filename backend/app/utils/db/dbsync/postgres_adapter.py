@@ -141,59 +141,65 @@ class PostgresAdapter:
 
         return edges
 
+    def list_real_tables(self, *, schema: str = "public") -> List[str]:
+        """
+        Devuelve SOLO tablas reales (relkind='r') del schema indicado.
+        """
+        q = text(
+            """
+            SELECT n.nspname AS schema, c.relname AS name
+            FROM pg_class c
+            JOIN pg_namespace n ON n.oid = c.relnamespace
+            WHERE n.nspname = :schema
+            AND c.relkind = 'r'
+            ORDER BY n.nspname, c.relname
+            """
+        )
+        with self.engine.connect() as conn:
+            rows = conn.execute(q, {"schema": schema}).fetchall()
+        return [f"{r.schema}.{r.name}" for r in rows]
+
     def truncate_tables(
-        self,
-        full_names: List[str],
-        *,
-        allow_destructive: bool,
-    ) -> None:
-        """
-        Trunca múltiples tablas en una única sentencia TRUNCATE.
+            self,
+            full_names: List[str],
+            *,
+            allow_destructive: bool,
+        ) -> None:
+            """
+            Trunca múltiples TABLAS en una única sentencia TRUNCATE.
 
-        Motivo:
-        Postgres no permite truncar una tabla referenciada por FK
-        salvo que incluyas también las tablas hijas en el mismo TRUNCATE,
-        o uses CASCADE.
+            Importante:
+            - Solo tablas reales (relkind='r')
+            - Ignora vistas/matviews
+            - Ignora nombres que no existan en destino
+            """
+            if not full_names:
+                return
 
-        - allow_destructive=False:
-            TRUNCATE ... RESTART IDENTITY (sin CASCADE) pero con TODAS las tablas a la vez
-        - allow_destructive=True:
-            añade CASCADE
+            # set de tablas reales existentes en DESTINO
+            existing = set(self.list_real_tables(schema="public"))
 
-        Nota:
-        Ignora views/matviews; solo tablas reales (relkind='r').
-        """
-        if not full_names:
-            return
+            # filtrar solo las que existen y son tablas reales
+            to_truncate = []
+            for full in full_names:
+                if full in existing:
+                    schema, name = self._split(full)
+                    to_truncate.append(f'"{schema}"."{name}"')
 
-        # Filtrar solo tablas reales en destino (evitar vistas/matviews)
-        real_tables: List[str] = []
-        for full in full_names:
+            if not to_truncate:
+                return
+
+            sql = "TRUNCATE TABLE " + ", ".join(to_truncate) + " RESTART IDENTITY"
+            if allow_destructive:
+                sql += " CASCADE"
+
             try:
-                info = self.table_info(full)
-                if info.is_view:
-                    continue
-                schema, name = info.schema, info.name
-                real_tables.append(f'"{schema}"."{name}"')
-            except Exception:
-                # Si algo no se puede inspeccionar, lo saltamos para no bloquear todo el truncate
-                continue
-
-        if not real_tables:
-            return
-
-        sql = "TRUNCATE TABLE " + ", ".join(real_tables) + " RESTART IDENTITY"
-        if allow_destructive:
-            sql += " CASCADE"
-
-        try:
-            with self.engine.begin() as conn:
-                conn.execute(text(sql))
-        except SQLAlchemyError as e:
-            raise RuntimeError(
-                f"TRUNCATE multi-tabla falló. allow_destructive={allow_destructive}. Error: {e}"
-            ) from e
-
+                with self.engine.begin() as conn:
+                    conn.execute(text(sql))
+            except SQLAlchemyError as e:
+                raise RuntimeError(
+                    f"TRUNCATE multi-tabla falló. allow_destructive={allow_destructive}. Error: {e}"
+                ) from e
 
     # -----------------------------
     # Lectura / Escritura

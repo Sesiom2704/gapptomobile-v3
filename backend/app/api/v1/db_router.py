@@ -369,7 +369,7 @@ def _run_job(job: Job):
         src = make_adapter(payload.source)
         dst = make_adapter(payload.dest)
 
-        # 1) Tablas candidatas desde source
+        # 1) Tablas candidatas desde source (puede incluir views/matviews)
         all_tables = src.list_tables()
 
         # 2) Plan blindado (auto deps + topo sort)
@@ -381,12 +381,43 @@ def _run_job(job: Job):
         )
 
         # Logs del plan (muy útiles para depurar FKs)
-        print(f"[order] Selección inicial: {len(target)} tablas.")
+        print(f"[order] Selección inicial (plan): {len(target)} tablas.")
         for line in plan_info:
             print(line)
-        print("[order] Orden final:", " -> ".join(target))
+        print("[order] Orden plan:", " -> ".join(target))
 
-        job.total_tables = len(target)
+        # 2.b) Filtrar views/matviews si vamos a ESCRIBIR a Postgres o truncar
+        # - Pre-truncate: solo tablas reales en destino
+        # - Mirror: solo tablas (no views/matviews) si src es Postgres
+        target_write = list(target)
+
+        if isinstance(src, PostgresAdapter):
+            filtered = []
+            skipped_views = []
+            for t in target:
+                try:
+                    info = src.table_info(t)
+                    if info.is_view:
+                        skipped_views.append(t)
+                        continue
+                except Exception:
+                    # Si no podemos saberlo, mejor no arriesgar en escrituras a Postgres
+                    # pero lo dejamos pasar (source puede ser Sheets)
+                    pass
+                filtered.append(t)
+            target_write = filtered
+            if skipped_views:
+                print(f"[order] Skip views/matviews en mirror: {len(skipped_views)}")
+                print("[order] Views skipped:", " -> ".join(skipped_views))
+
+        # Para truncar: SOLO tablas reales existentes en destino (si destino es Postgres)
+        target_truncate = []
+        if isinstance(dst, PostgresAdapter):
+            real_dest = set(dst.list_real_tables(schema="public"))
+            target_truncate = [t for t in target_write if t in real_dest]
+
+        # Ajustar totales y progreso en base a lo que realmente se va a procesar
+        job.total_tables = len(target_write)
         job.processed_tables = 0
         job.progress = 0.0
 
@@ -403,18 +434,22 @@ def _run_job(job: Job):
 
         job.write_log(
             f"Comienza sync {payload.source} → {payload.dest}. "
-            f"Tablas={job.total_tables}, execute={payload.execute}, destructive={payload.allow_destructive}"
+            f"Tablas(plan)={len(target)}, Tablas(write)={job.total_tables}, "
+            f"execute={payload.execute}, destructive={payload.allow_destructive}"
         )
 
-        # --- PRE-CLEAR DEST (Postgres): truncar todas las tablas a la vez ---
+        # --- PRE-CLEAR DEST (Postgres): truncar todas las TABLAS a la vez ---
         # Esto evita: "cannot truncate a table referenced in a foreign key constraint"
+        # y evita intentar truncar vistas (vw_financiaciones, etc.)
         if payload.execute and isinstance(dst, PostgresAdapter):
-            job.write_log("[pre] Truncating destination tables (single statement) to satisfy FKs...")
-            dst.truncate_tables(target, allow_destructive=payload.allow_destructive)
+            job.write_log(
+                f"[pre] Truncating destination REAL tables: {len(target_truncate)} (single statement) ..."
+            )
+            dst.truncate_tables(target_truncate, allow_destructive=payload.allow_destructive)
             job.write_log("[pre] Destination truncated OK.")
 
-        # 3) Ejecutar tabla a tabla
-        for idx, full in enumerate(target, start=1):
+        # 3) Ejecutar tabla a tabla (solo write list)
+        for idx, full in enumerate(target_write, start=1):
             if job._cancel:
                 job.status = "canceled"
                 job.write_log("Cancelado por el usuario.")
@@ -456,7 +491,6 @@ def _run_job(job: Job):
 
     finally:
         sys.stdout = old_stdout
-
 
 # ------------------------------
 # Endpoints

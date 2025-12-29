@@ -321,7 +321,7 @@ def create_ingreso(
         payload["cobrado"] = True
         payload["kpi"] = False
         payload["inactivatedon"] = func.now()
-
+        payload["ultimo_ingreso_on"] = func.now()
     # Insert (reintenta si colisión de PK)
     for _ in range(5):
         try:
@@ -539,6 +539,7 @@ def cobrar_ingreso(
     ingreso.modifiedon = func.now()
 
     if not was_cobrado:
+        ingreso.ultimo_ingreso_on = func.now()
         adjust_liquidez(
             db,
             extract_cuenta_id(ingreso),
