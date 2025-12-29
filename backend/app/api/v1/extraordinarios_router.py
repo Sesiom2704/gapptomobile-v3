@@ -66,6 +66,7 @@ def get_extraordinarios_mes(
         db.query(Gasto)
         .filter(
             Gasto.user_id == current_user.id,
+            Gasto.periodicidad == "PAGO UNICO",  # <-- AÑADIDO
             Gasto.pagado.is_(True),
             Gasto.kpi.is_(False),
             Gasto.activo.is_(False),
@@ -111,6 +112,7 @@ def get_extraordinarios_mes(
         db.query(Ingreso)
         .filter(
             Ingreso.user_id == current_user.id,
+            Ingreso.periodicidad == "PAGO UNICO",  # <-- AÑADIDO
             Ingreso.cobrado.is_(True),
             Ingreso.kpi.is_(False),
             Ingreso.activo.is_(False),
@@ -120,7 +122,6 @@ def get_extraordinarios_mes(
         )
         .order_by(Ingreso.ultimo_ingreso_on.desc())
     )
-
     ingresos: List[Ingreso] = ingresos_query.all()
 
     ingresos_items: List[ExtraordinarioItem] = []
