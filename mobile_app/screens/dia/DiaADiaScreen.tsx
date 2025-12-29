@@ -31,8 +31,31 @@ const DiaADiaScreen: React.FC = () => {
   };
 
   const irAMovimientos = () => {
-  navigation.navigate('MovimientosScreen');
+    navigation.navigate('MovimientosScreen');
   };
+
+  /**
+   * NUEVO:
+   * Acceso directo al screen de "Reiniciar cierre" (cierre mensual).
+   *
+   * Importante:
+   * - Este screen está en MonthStack (por tu MainTabs.tsx).
+   * - Para entrar desde DayToDayTab, hay que navegar a MonthTab indicando screen.
+   * - Asegúrate de que en MonthStackNavigator exista:
+   *     <MonthStack.Screen name="ReinciarCierreScreen" component={ReinciarCierreScreen} />
+   */
+  const irAReiniciarCierre = () => {
+    navigation.navigate('MonthTab', {
+      screen: 'ReinciarCierreScreen',
+      // params: {} // si en el futuro quieres pasar algo
+    });
+  };
+
+  const irAReiniciarMes = () => {
+  navigation.navigate('MonthTab', {
+    screen: 'ReiniciarMesScreen',
+  });
+};
 
   return (
     <>
@@ -122,7 +145,11 @@ const DiaADiaScreen: React.FC = () => {
               onPress={irAMovimientos}
             >
               <View style={panelStyles.menuIconCircleSecondary}>
-                <Ionicons name="swap-vertical-outline" size={22} color={colors.primary} />
+                <Ionicons
+                  name="swap-vertical-outline"
+                  size={22}
+                  color={colors.primary}
+                />
               </View>
 
               <View style={panelStyles.menuTextContainer}>
@@ -139,27 +166,84 @@ const DiaADiaScreen: React.FC = () => {
               />
             </TouchableOpacity>
 
-
             {/* Análisis día a día */}
             <TouchableOpacity
-            style={panelStyles.menuCard}
-            onPress={() => navigation.navigate('DayToDayAnalysisScreen')}
+              style={panelStyles.menuCard}
+              onPress={() => navigation.navigate('DayToDayAnalysisScreen')}
             >
-            <View style={panelStyles.menuIconCircleSecondary}>
-                <Ionicons name="analytics-outline" size={22} color={colors.primary} />
-            </View>
-            <View style={panelStyles.menuTextContainer}>
+              <View style={panelStyles.menuIconCircleSecondary}>
+                <Ionicons
+                  name="analytics-outline"
+                  size={22}
+                  color={colors.primary}
+                />
+              </View>
+              <View style={panelStyles.menuTextContainer}>
                 <Text style={panelStyles.menuTitle}>Análisis día a día</Text>
                 <Text style={panelStyles.menuSubtitle}>
-                Detalle de gastos cotidianos por día, semana y mes.
+                  Detalle de gastos cotidianos por día, semana y mes.
                 </Text>
-            </View>
-            <Ionicons
+              </View>
+              <Ionicons
                 name="chevron-forward"
                 size={18}
                 color={colors.textSecondary}
-            />
+              />
             </TouchableOpacity>
+
+            {/* NUEVO: Reiniciar / generar cierre mensual */}
+            <TouchableOpacity
+              style={panelStyles.menuCard}
+              onPress={irAReiniciarCierre}
+            >
+              <View style={panelStyles.menuIconCircleSecondary}>
+                <Ionicons
+                  name="calendar-outline"
+                  size={22}
+                  color={colors.primary}
+                />
+              </View>
+
+              <View style={panelStyles.menuTextContainer}>
+                <Text style={panelStyles.menuTitle}>Reiniciar mes (mes)</Text>
+                <Text style={panelStyles.menuSubtitle}>
+                  Genera o reinicia el cierre del mes anterior cuando no haya pendientes.
+                </Text>
+              </View>
+
+              <Ionicons
+                name="chevron-forward"
+                size={18}
+                color={colors.textSecondary}
+              />
+            </TouchableOpacity>
+
+            <TouchableOpacity
+              style={panelStyles.menuCard}
+              onPress={irAReiniciarMes}
+            >
+              <View style={panelStyles.menuIconCircleSecondary}>
+                <Ionicons
+                  name="calendar-outline"
+                  size={22}
+                  color={colors.primary}
+                />
+              </View>
+
+              <View style={panelStyles.menuTextContainer}>
+                <Text style={panelStyles.menuTitle}>Reiniciar mes (cierre)</Text>
+                <Text style={panelStyles.menuSubtitle}>
+                  Genera o reinicia el cierre del mes anterior cuando no haya pendientes.
+                </Text>
+              </View>
+
+              <Ionicons
+                name="chevron-forward"
+                size={18}
+                color={colors.textSecondary}
+              />
+            </TouchableOpacity>
+
           </View>
         </ScrollView>
       </View>

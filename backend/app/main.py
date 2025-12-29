@@ -228,7 +228,8 @@ from backend.app.api.v1 import (
     ubicaciones_router,
     analytics_router,
     cierre_mensual_router,
-    db_router
+    db_router,
+    reinicio_router
 )
 
 API_V1 = "/api/v1"
@@ -256,6 +257,7 @@ app.include_router(tipos_gasto_router.router, prefix=API_V1)
 app.include_router(ubicaciones_router.router, prefix=API_V1)
 app.include_router(analytics_router.router, prefix=API_V1)
 app.include_router(cierre_mensual_router.router, prefix=API_V1)
+app.include_router(reinicio_router.router, prefix=API_V1)
 # Router técnico BD: /api/db/*
 # OJO: db_router.router ya tiene prefix="/db"
 # Al montarlo con prefix="/api" queda: /api/db/...

@@ -1,4 +1,9 @@
-// screens/mes/MesScreen.tsx
+// mobile_app/screens/mes/MesScreen.tsx
+// -----------------------------------------------------------------------------
+// MesScreen (Mes a mes) - añadimos una nueva línea:
+// "Preview reinicio de mes" -> navega a ReiniciarMesPreviewScreen con año/mes actual.
+// -----------------------------------------------------------------------------
+
 import React from 'react';
 import { View, Text, ScrollView, TouchableOpacity } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
@@ -10,6 +15,11 @@ import { colors } from '../../theme/colors';
 
 const MesScreen: React.FC = () => {
   const navigation = useNavigation<any>();
+
+  // Año/mes actual para el preview del mes
+  const now = new Date();
+  const anio = now.getFullYear();
+  const mes = now.getMonth() + 1;
 
   return (
     <>
@@ -78,9 +88,7 @@ const MesScreen: React.FC = () => {
             {/* Extraordinarios */}
             <TouchableOpacity
               style={panelStyles.menuCard}
-              onPress={() =>
-                navigation.navigate('MonthExtraordinariosScreen')
-              }
+              onPress={() => navigation.navigate('MonthExtraordinariosScreen')}
             >
               <View style={panelStyles.menuIconCircleSecondary}>
                 <Ionicons
@@ -121,6 +129,29 @@ const MesScreen: React.FC = () => {
                 <Text style={panelStyles.menuTitle}>Cierres mensuales</Text>
                 <Text style={panelStyles.menuSubtitle}>
                   Evolución de cierres y KPIs por mes.
+                </Text>
+              </View>
+
+              <Ionicons
+                name="chevron-forward"
+                size={18}
+                color={colors.textSecondary}
+              />
+            </TouchableOpacity>
+
+            {/* NUEVO: Preview reinicio (MES) */}
+            <TouchableOpacity
+              style={panelStyles.menuCard}
+              onPress={() => navigation.navigate('ReiniciarMesPreviewScreen', { anio, mes })}
+            >
+              <View style={panelStyles.menuIconCircleSecondary}>
+                <Ionicons name="repeat-outline" size={22} color={colors.primary} />
+              </View>
+
+              <View style={panelStyles.menuTextContainer}>
+                <Text style={panelStyles.menuTitle}>Preview reinicio de mes</Text>
+                <Text style={panelStyles.menuSubtitle}>
+                  Validación (1–5), pendientes KPI y presupuesto total.
                 </Text>
               </View>
 

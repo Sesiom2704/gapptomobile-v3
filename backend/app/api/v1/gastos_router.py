@@ -480,7 +480,7 @@ def _sum_of_avgs_3m(
     user_id: Optional[int] = None,
 ) -> float:
     """
-    Suma de promedios 3M para un grupo de tipos, filtrando por usuario si aplica.
+    Suma de dios 3M para un grupo de tipos, filtrando por usuario si aplica.
     """
     total = 0.0
     for t in (tipo_ids or []):
@@ -1509,283 +1509,79 @@ def inactivar_gasto(
     db.refresh(g)
     return g
 
-
 # =========================
-# REINICIO DE ESTADOS + REINICIAR MES
+# FINANCIACIONES (VIEW) – Mes actual y Previo
 # =========================
 
-def reiniciar_estados_core(
-    db: Session,
-    user_id: int,
-    aplicar_promedios: bool = False,
-) -> dict:
-    """
-    Lógica central de 'reiniciar mes' PARA UN USUARIO:
-    - Resetea estados de gastos e ingresos según periodicidad.
-    - Opcionalmente actualiza promedios 3M para contenedores COTIDIANOS.
-    """
-    today = date.today()
-    counters = {
-        "gastos": {
-            "mensuales_reseteados": 0,
-            "periodicos_reactivados": 0,
-            "periodicos_mantenidos": 0,
-            "cot_forzados_visibles": 0,
-            "promedios_actualizados": 0,
-        },
-        "ingresos": {
-            "mensuales_reseteados": 0,
-            "periodicos_reactivados": 0,
-            "periodicos_mantenidos": 0,
-        },
-    }
-
-    gastos = (
-        db.query(models.Gasto)
-        .filter(
-            models.Gasto.user_id == user_id,
-            models.Gasto.activo == True,
-        )
-        .all()
-    )
-    for g in gastos:
-        changed = False
-        per = (g.periodicidad or "").upper().strip()
-        seg = (g.segmento_id or "").upper().strip()
-
-        if per == "MENSUAL":
-            if g.pagado is not False:
-                g.pagado = False
-                changed = True
-                counters["gastos"]["mensuales_reseteados"] += 1
-
-        elif per not in ("PAGO UNICO", "MENSUAL") and per in PERIOD_MESES:
-            umbral = PERIOD_MESES[per]
-            diff = _months_diff(today, g.fecha)
-            if diff is not None and diff >= umbral:
-                if g.pagado is not False:
-                    g.pagado = False
-                    changed = True
-                if g.kpi is not True:
-                    g.kpi = True
-                    changed = True
-                new_date = _add_months(g.fecha, umbral)
-                if new_date and new_date != g.fecha:
-                    g.fecha = new_date
-                    changed = True
-                counters["gastos"]["periodicos_reactivados"] += 1
-            else:
-                if g.activo is not True:
-                    g.activo = True
-                    changed = True
-                if g.pagado is not True:
-                    g.pagado = True
-                    changed = True
-                if g.kpi is not False:
-                    g.kpi = False
-                    changed = True
-                counters["gastos"]["periodicos_mantenidos"] += 1
-
-        if seg == SEG_COT:
-            bump = False
-            if g.activo is not True:
-                g.activo = True
-                bump = True
-            if g.kpi is not True and per == "MENSUAL":
-                g.kpi = True
-                bump = True
-            if bump:
-                changed = True
-                counters["gastos"]["cot_forzados_visibles"] += 1
-
-        if changed:
-            g.modifiedon = func.now()
-
-    ingresos = (
-        db.query(models.Ingreso)
-        .filter(
-            models.Ingreso.user_id == user_id,
-            models.Ingreso.activo == True,
-        )
-        .all()
-    )
-    for inc in ingresos:
-        changed = False
-        per = (inc.periodicidad or "").upper().strip()
-        base_date = inc.fecha_inicio
-
-        if per == "MENSUAL":
-            if getattr(inc, "cobrado", None) is not False:
-                inc.cobrado = False
-                changed = True
-                counters["ingresos"]["mensuales_reseteados"] += 1
-        elif per not in ("PAGO UNICO", "MENSUAL") and per in PERIOD_MESES:
-            umbral = PERIOD_MESES[per]
-            diff = _months_diff(today, base_date)
-            if diff is not None and diff >= umbral:
-                if getattr(inc, "cobrado", None) is not False:
-                    inc.cobrado = False
-                    changed = True
-                if inc.kpi is not True:
-                    inc.kpi = True
-                    changed = True
-                new_bd = _add_months(base_date, umbral) if base_date else None
-                if new_bd and new_bd != inc.fecha_inicio:
-                    inc.fecha_inicio = new_bd
-                    changed = True
-                counters["ingresos"]["periodicos_reactivados"] += 1
-            else:
-                if inc.activo is not True:
-                    inc.activo = True
-                    changed = True
-                if getattr(inc, "cobrado", None) is not True:
-                    inc.cobrado = True
-                    changed = True
-                if inc.kpi is not False:
-                    inc.kpi = False
-                    changed = True
-                counters["ingresos"]["periodicos_mantenidos"] += 1
-
-        if changed:
-            inc.modifiedon = func.now()
-
-    if aplicar_promedios:
-        try:
-            updated = _apply_promedios_3m_por_tipo(db, user_id=user_id)
-            counters["gastos"]["promedios_actualizados"] = int(updated or 0)
-        except Exception as e:
-            print(f"[PROM-3M] ERROR: {e}")
-
-    db.commit()
-    return {"updated": counters}
-
-
-@router.get("/reiniciar_mes/eligibility")
-def reiniciar_mes_eligibility(
+@router.get("/financiaciones/mes-actual")
+def financiaciones_mes_actual(
     db: Session = Depends(get_db),
     current_user: models.User = Depends(require_user),
 ):
     """
-    Indica si es "seguro" reiniciar mes PARA EL USUARIO ACTUAL:
-    - No debe haber gastos activos+kpi con pagado=False
-    - No debe haber ingresos activos+kpi con cobrado=False
+    Devuelve financiaciones del usuario cuya próxima cuota cae en el mes actual (M).
+    No toca BD, solo lectura.
+
+    Fuente: public.vw_financiaciones (incluye user_id).
     """
-    gastos_pend = (
-        db.query(func.count())
-        .select_from(models.Gasto)
-        .filter(
-            models.Gasto.user_id == current_user.id,
-            models.Gasto.activo == True,
-            models.Gasto.kpi == True,
-            models.Gasto.pagado == False,
-        )
-        .scalar()
-    )
-    ingresos_pend = (
-        db.query(func.count())
-        .select_from(models.Ingreso)
-        .filter(
-            models.Ingreso.user_id == current_user.id,
-            models.Ingreso.activo == True,
-            models.Ingreso.kpi == True,
-            models.Ingreso.cobrado == False,
-        )
-        .scalar()
-    )
-    can = (gastos_pend == 0) and (ingresos_pend == 0)
-    return {
-        "gastos_pendientes": int(gastos_pend or 0),
-        "ingresos_pendientes": int(ingresos_pend or 0),
-        "can_reiniciar": can,
-    }
+    sql = text("""
+        SELECT
+          id,
+          nombre,
+          importe,
+          cuotas,
+          cuotas_restantes,
+          activo,
+          fecha,
+          ultimo_pago_on,
+          proxima_cuota,
+          vence,
+          cae_en_mes_actual,
+          cae_en_mes_siguiente
+        FROM public.vw_financiaciones
+        WHERE user_id = :user_id
+          AND activo = true
+          AND cuotas > 1
+          AND cuotas_restantes > 0
+          AND cae_en_mes_actual = true
+        ORDER BY proxima_cuota, id
+    """)
+    rows = db.execute(sql, {"user_id": current_user.id}).mappings().all()
+    return [dict(r) for r in rows]
 
 
-@router.post("/reiniciar_mes")
-def reiniciar_mes(
-    aplicar_promedios: bool = Query(
-        False,
-        description="Si True, recalcula importe/importe_cuota por PROM-3M.",
-    ),
+@router.get("/financiaciones/previo")
+def financiaciones_previo(
     db: Session = Depends(get_db),
     current_user: models.User = Depends(require_user),
 ):
     """
-    Ejecuta la lógica completa de reinicio de mes PARA EL USUARIO ACTUAL
-    y devuelve un resumen de lo que se ha cambiado (gastos e ingresos).
+    Devuelve financiaciones del usuario cuya próxima cuota cae en el mes siguiente (M+1).
+    No toca BD, solo lectura.
+
+    Fuente: public.vw_financiaciones (incluye user_id).
     """
-    result = reiniciar_estados_core(
-        db,
-        user_id=current_user.id,
-        aplicar_promedios=aplicar_promedios,
-    )
-
-    cot_list = (
-        db.query(models.Gasto)
-        .filter(
-            models.Gasto.user_id == current_user.id,
-            models.Gasto.segmento_id == SEG_COT,
-        )
-        .all()
-    )
-    extra_forzados = 0
-    for g in cot_list:
-        was_inactive = (g.activo is False)
-        if was_inactive or (
-            g.kpi is False and (g.periodicidad or "").upper() == "MENSUAL"
-        ):
-            g.activo = True
-            if (g.periodicidad or "").upper() == "MENSUAL":
-                g.kpi = True
-            if was_inactive:
-                g.inactivatedon = None
-            g.modifiedon = func.now()
-            extra_forzados += 1
-    if extra_forzados:
-        db.commit()
-        result["updated"]["gastos"]["cot_forzados_visibles"] += extra_forzados
-
-    summary = {
-        "Gastos": {
-            "Mensuales reseteados": result["updated"]["gastos"]["mensuales_reseteados"],
-            "Periódicos reactivados": result["updated"]["gastos"]["periodicos_reactivados"],
-            "Periódicos mantenidos": result["updated"]["gastos"]["periodicos_mantenidos"],
-            "COT forzados visibles": result["updated"]["gastos"]["cot_forzados_visibles"],
-            "Promedios actualizados": result["updated"]["gastos"]["promedios_actualizados"],
-        },
-        "Ingresos": {
-            "Mensuales reseteados": result["updated"]["ingresos"]["mensuales_reseteados"],
-            "Periódicos reactivados": result["updated"]["ingresos"]["periodicos_reactivados"],
-            "Periódicos mantenidos": result["updated"]["ingresos"]["periodicos_mantenidos"],
-        },
-    }
-
-    return {"updated": result["updated"], "summary": summary}
-
-
-# =========================
-# COTIDIANOS – presupuesto total
-# =========================
-
-COTIDIANO_SEGMENTO_ID = SEG_COT
-
-
-@router.get("/cotidianos/presupuesto_total")
-def presupuesto_cotidianos_total(
-    db: Session = Depends(get_db),
-    current_user: models.User = Depends(require_user),
-):
-    """
-    Devuelve el presupuesto total mensual de los gastos COTIDIANOS
-    activos+kpi del usuario autenticado.
-    """
-    total = (
-        db.query(func.coalesce(func.sum(models.Gasto.importe_cuota), 0.0))
-        .filter(
-            models.Gasto.user_id == current_user.id,
-            models.Gasto.segmento_id == COTIDIANO_SEGMENTO_ID,
-            models.Gasto.activo == True,
-            models.Gasto.kpi == True,
-        )
-        .scalar()
-    )
-    return {"total": float(total or 0)}
+    sql = text("""
+        SELECT
+          id,
+          nombre,
+          importe,
+          cuotas,
+          cuotas_restantes,
+          activo,
+          fecha,
+          ultimo_pago_on,
+          proxima_cuota,
+          vence,
+          cae_en_mes_actual,
+          cae_en_mes_siguiente
+        FROM public.vw_financiaciones
+        WHERE user_id = :user_id
+          AND activo = true
+          AND cuotas > 1
+          AND cuotas_restantes > 0
+          AND cae_en_mes_siguiente = true
+        ORDER BY proxima_cuota, id
+    """)
+    rows = db.execute(sql, {"user_id": current_user.id}).mappings().all()
+    return [dict(r) for r in rows]

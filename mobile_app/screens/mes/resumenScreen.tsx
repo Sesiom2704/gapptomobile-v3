@@ -1,4 +1,15 @@
-// mobile_app/screens/mes/resumenScreen.tsx
+/**
+ * Archivo: mobile_app/screens/mes/resumenScreen.tsx
+ *
+ * Responsabilidad:
+ *   - Mostrar el resumen mensual (ingresos, gastos, distribución, run-rate y notas).
+ *   - Permitir pull-to-refresh y manejo de estado (loading/error).
+ *
+ * Mejora aplicada:
+ *   - Sistema “i” de información contextual (InfoButton + InfoModal) reutilizable.
+ *   - Fix TypeScript 2322 en colores (bg/border tipados como string) para evitar
+ *     inferencias de tipos literales cuando `colors` está definido como `as const`.
+ */
 
 import React, { useCallback, useEffect, useState } from 'react';
 import {
@@ -18,6 +29,9 @@ import { getMonthlySummary } from '../../services/analyticsApi';
 import type { MonthlySummaryResponse } from '../../types/analytics';
 import { EuroformatEuro } from '../../utils/format';
 
+// NEW: sistema reusable de info “i”
+import { InfoButton, InfoModal, useInfoModal } from '../../components/ui/InfoModal';
+
 // Helpers locales de formato
 function fmtPct(value: number | null | undefined): string {
   if (value === null || value === undefined || isNaN(value)) return '—';
@@ -25,10 +39,24 @@ function fmtPct(value: number | null | undefined): string {
   return `${sign}${value.toFixed(1)}%`;
 }
 
+// Diccionario local de ayudas (si mañana backend devuelve info, se sustituye fácil)
+const INFO: Record<string, string> = {
+  vision_general:
+    'Resumen del mes: ingresos, gastos, ahorro y comparación contra la media de los últimos 12 cierres mensuales.',
+  detalle_ing_gas:
+    'Separación entre importes recurrentes (activos) y extraordinarios (pago único) tanto en ingresos como en gastos.',
+  distrib_ing:
+    'Distribución porcentual de ingresos por categoría para el mes seleccionado. La barra representa % sobre el total.',
+  distrib_gas:
+    'Distribución porcentual de gastos por categoría para el mes seleccionado. La barra representa % sobre el total.',
+  run_rate:
+    'Estimación anualizada basada en la media de cierres mensuales disponibles (hasta 12 meses).',
+  notas:
+    'Alertas rápidas generadas a partir de patrones del mes (warnings, éxitos o informativas).',
+};
+
 // Si NO estás usando monthlySummaryStyles.ts aún, usa estos estilos mínimos
-// y luego ya los refactorizamos juntos si quieres.
 const styles = StyleSheet.create({
-  // Loader centrado
   loaderCard: {
     alignItems: 'center',
     justifyContent: 'center',
@@ -51,6 +79,14 @@ const styles = StyleSheet.create({
     alignItems: 'flex-end',
     marginBottom: 4,
   },
+
+  // NEW: title + info icon
+  sectionTitleLeft: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+
   sectionTitleRight: {
     fontSize: 11,
     color: colors.textSecondary,
@@ -96,7 +132,6 @@ const styles = StyleSheet.create({
     color: colors.textMuted,
   },
 
-  // Barras horizontales de distribución
   distRow: {
     marginTop: 8,
   },
@@ -133,7 +168,6 @@ const styles = StyleSheet.create({
     backgroundColor: colors.primarySoft,
   },
 
-  // Run rate
   kpiGrid: {
     flexDirection: 'row',
     flexWrap: 'wrap',
@@ -145,7 +179,6 @@ const styles = StyleSheet.create({
     marginBottom: 8,
   },
 
-  // Notas
   noteRow: {
     flexDirection: 'row',
     alignItems: 'flex-start',
@@ -184,10 +217,14 @@ const ResumenScreen: React.FC = () => {
   const now = new Date();
   const year = now.getFullYear();
   const month = now.getMonth() + 1;
+
   const [data, setData] = useState<MonthlySummaryResponse | null>(null);
   const [loading, setLoading] = useState<boolean>(false);
   const [refreshing, setRefreshing] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
+
+  // NEW: modal de info reutilizable
+  const info = useInfoModal();
 
   const loadData = useCallback(async () => {
     try {
@@ -242,14 +279,12 @@ const ResumenScreen: React.FC = () => {
             />
           }
         >
-          {/* Error, si lo hay */}
           {error && (
             <View style={panelStyles.section}>
               <Text style={styles.errorText}>{error}</Text>
             </View>
           )}
 
-          {/* Loader inicial */}
           {loading && !data && (
             <View style={panelStyles.section}>
               <View style={[panelStyles.card, styles.loaderCard]}>
@@ -259,13 +294,15 @@ const ResumenScreen: React.FC = () => {
             </View>
           )}
 
-          {/* Si ya tenemos datos, pintamos todas las tarjetas */}
           {data && (
             <>
               {/* 1) VISIÓN GENERAL */}
               <View style={panelStyles.section}>
                 <View style={styles.sectionHeaderRow}>
-                  <Text style={panelStyles.sectionTitle}>Visión general</Text>
+                  <View style={styles.sectionTitleLeft}>
+                    <Text style={panelStyles.sectionTitle}>Visión general</Text>
+                    <InfoButton onPress={() => info.open('Visión general', INFO.vision_general)} />
+                  </View>
                   <Text style={styles.sectionTitleRight}>{data.mes_label}</Text>
                 </View>
 
@@ -303,12 +340,10 @@ const ResumenScreen: React.FC = () => {
                     <View style={styles.col}>
                       <Text style={styles.label}>vs media 12m</Text>
                       <Text style={styles.value}>
-                        Ing:{' '}
-                        {fmtPct(general?.ingresos_vs_media_12m_pct)}
+                        Ing: {fmtPct(general?.ingresos_vs_media_12m_pct)}
                       </Text>
                       <Text style={styles.value}>
-                        Gas:{' '}
-                        {fmtPct(general?.gastos_vs_media_12m_pct)}
+                        Gas: {fmtPct(general?.gastos_vs_media_12m_pct)}
                       </Text>
                     </View>
                   </View>
@@ -322,9 +357,13 @@ const ResumenScreen: React.FC = () => {
 
               {/* 2) DETALLE INGRESOS VS GASTOS */}
               <View style={panelStyles.section}>
-                <Text style={panelStyles.sectionTitle}>
-                  Detalle ingresos vs gastos
-                </Text>
+                <View style={[styles.sectionHeaderRow, { marginBottom: 0 }]}>
+                  <View style={styles.sectionTitleLeft}>
+                    <Text style={panelStyles.sectionTitle}>Detalle ingresos vs gastos</Text>
+                    <InfoButton onPress={() => info.open('Detalle ingresos vs gastos', INFO.detalle_ing_gas)} />
+                  </View>
+                  <View />
+                </View>
 
                 <View style={panelStyles.card}>
                   <View style={styles.rowSpaceBetween}>
@@ -377,9 +416,13 @@ const ResumenScreen: React.FC = () => {
 
               {/* 3) DISTRIBUCIÓN DE INGRESOS */}
               <View style={panelStyles.section}>
-                <Text style={panelStyles.sectionTitle}>
-                  Distribución de ingresos
-                </Text>
+                <View style={[styles.sectionHeaderRow, { marginBottom: 0 }]}>
+                  <View style={styles.sectionTitleLeft}>
+                    <Text style={panelStyles.sectionTitle}>Distribución de ingresos</Text>
+                    <InfoButton onPress={() => info.open('Distribución de ingresos', INFO.distrib_ing)} />
+                  </View>
+                  <View />
+                </View>
 
                 <View style={panelStyles.card}>
                   {data.distribucion_ingresos.map((item, idx) => (
@@ -396,10 +439,7 @@ const ResumenScreen: React.FC = () => {
                           style={[
                             styles.distBarFill,
                             {
-                              width: `${Math.min(
-                                100,
-                                item.porcentaje_sobre_total,
-                              )}%`,
+                              width: `${Math.min(100, item.porcentaje_sobre_total)}%`,
                             },
                           ]}
                         />
@@ -417,9 +457,13 @@ const ResumenScreen: React.FC = () => {
 
               {/* 4) DISTRIBUCIÓN DE GASTOS */}
               <View style={panelStyles.section}>
-                <Text style={panelStyles.sectionTitle}>
-                  Distribución de gastos
-                </Text>
+                <View style={[styles.sectionHeaderRow, { marginBottom: 0 }]}>
+                  <View style={styles.sectionTitleLeft}>
+                    <Text style={panelStyles.sectionTitle}>Distribución de gastos</Text>
+                    <InfoButton onPress={() => info.open('Distribución de gastos', INFO.distrib_gas)} />
+                  </View>
+                  <View />
+                </View>
 
                 <View style={panelStyles.card}>
                   {data.distribucion_gastos.map((item, idx) => (
@@ -436,10 +480,7 @@ const ResumenScreen: React.FC = () => {
                           style={[
                             styles.distBarFillAlt,
                             {
-                              width: `${Math.min(
-                                100,
-                                item.porcentaje_sobre_total,
-                              )}%`,
+                              width: `${Math.min(100, item.porcentaje_sobre_total)}%`,
                             },
                           ]}
                         />
@@ -457,7 +498,13 @@ const ResumenScreen: React.FC = () => {
 
               {/* 5) RUN RATE 12 MESES */}
               <View style={panelStyles.section}>
-                <Text style={panelStyles.sectionTitle}>Run rate 12 meses</Text>
+                <View style={[styles.sectionHeaderRow, { marginBottom: 0 }]}>
+                  <View style={styles.sectionTitleLeft}>
+                    <Text style={panelStyles.sectionTitle}>Run rate 12 meses</Text>
+                    <InfoButton onPress={() => info.open('Run rate 12 meses', INFO.run_rate)} />
+                  </View>
+                  <View />
+                </View>
 
                 <View style={panelStyles.card}>
                   {data.run_rate_12m ? (
@@ -466,19 +513,13 @@ const ResumenScreen: React.FC = () => {
                         <View style={styles.kpiCell}>
                           <Text style={styles.label}>Ingreso medio 12m</Text>
                           <Text style={styles.value}>
-                            {EuroformatEuro(
-                              data.run_rate_12m.ingreso_medio_12m,
-                              'plus',
-                            )}
+                            {EuroformatEuro(data.run_rate_12m.ingreso_medio_12m, 'plus')}
                           </Text>
                         </View>
                         <View style={styles.kpiCell}>
                           <Text style={styles.label}>Gasto medio 12m</Text>
                           <Text style={styles.valueNegative}>
-                            {EuroformatEuro(
-                              data.run_rate_12m.gasto_medio_12m,
-                              'minus',
-                            )}
+                            {EuroformatEuro(data.run_rate_12m.gasto_medio_12m, 'minus')}
                           </Text>
                         </View>
                         <View style={styles.kpiCell}>
@@ -490,10 +531,7 @@ const ResumenScreen: React.FC = () => {
                                 : styles.valueNegative
                             }
                           >
-                            {EuroformatEuro(
-                              data.run_rate_12m.ahorro_medio_12m,
-                              'signed',
-                            )}
+                            {EuroformatEuro(data.run_rate_12m.ahorro_medio_12m, 'signed')}
                           </Text>
                         </View>
                         <View style={styles.kpiCell}>
@@ -505,10 +543,7 @@ const ResumenScreen: React.FC = () => {
                                 : styles.valueNegative
                             }
                           >
-                            {EuroformatEuro(
-                              data.run_rate_12m.proyeccion_ahorro_anual,
-                              'signed',
-                            )}
+                            {EuroformatEuro(data.run_rate_12m.proyeccion_ahorro_anual, 'signed')}
                           </Text>
                         </View>
                       </View>
@@ -530,7 +565,13 @@ const ResumenScreen: React.FC = () => {
 
               {/* 6) NOTAS RÁPIDAS DEL MES */}
               <View style={[panelStyles.section, { marginBottom: 24 }]}>
-                <Text style={panelStyles.sectionTitle}>Notas rápidas</Text>
+                <View style={[styles.sectionHeaderRow, { marginBottom: 0 }]}>
+                  <View style={styles.sectionTitleLeft}>
+                    <Text style={panelStyles.sectionTitle}>Notas rápidas</Text>
+                    <InfoButton onPress={() => info.open('Notas rápidas', INFO.notas)} />
+                  </View>
+                  <View />
+                </View>
 
                 <View style={panelStyles.card}>
                   {data.notas.length === 0 && (
@@ -540,8 +581,9 @@ const ResumenScreen: React.FC = () => {
                   )}
 
                   {data.notas.map((nota, idx) => {
-                    let bg = colors.surface;
-                    let border = colors.border;
+                    // FIX TS2322: tipado explícito para evitar literales estrechos
+                    let bg: string = colors.surface;
+                    let border: string = colors.border;
                     let icon = 'ℹ️';
 
                     if (nota.tipo === 'WARNING') {
@@ -581,6 +623,14 @@ const ResumenScreen: React.FC = () => {
           )}
         </ScrollView>
       </View>
+
+      {/* NEW: modal estándar */}
+      <InfoModal
+        visible={info.visible}
+        title={info.title}
+        text={info.text}
+        onClose={info.close}
+      />
     </>
   );
 };

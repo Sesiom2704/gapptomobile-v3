@@ -286,6 +286,36 @@ export async function eliminarGasto(gastoId: string): Promise<void> {
   await api.delete(url);
 }
 
+// ========================
+// REINICIAR MES (backend ya lo soporta)
+// ========================
+
+export type ReinicioMesEligibility = {
+  gastos_pendientes: number;
+  ingresos_pendientes: number;
+  can_reiniciar: boolean;
+};
+
+export type ReinicioMesResult = {
+  updated: any;
+  summary: {
+    Gastos: Record<string, number>;
+    Ingresos: Record<string, number>;
+  };
+};
+
+export async function fetchReinicioMesEligibility(): Promise<ReinicioMesEligibility> {
+  const url = '/api/v1/gastos/';
+  const res = await api.get<ReinicioMesEligibility>(url);
+  return res.data;
+}
+
+export async function fetchPresupuestoCotidianosTotal(): Promise<number> {
+  const url = '/api/v1/gastos/cotidianos/presupuesto_total';
+  const res = await api.get<{ total: number }>(url);
+  return Number(res.data?.total ?? 0);
+}
+
 // Reexport de tipos y helpers de catálogos para compatibilidad
 export {
   TipoGasto,
