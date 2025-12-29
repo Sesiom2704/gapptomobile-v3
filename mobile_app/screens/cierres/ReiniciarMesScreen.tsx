@@ -1,20 +1,14 @@
-// mobile_app/screens/cierres/ReiniciarMesScreen.tsx
+// mobile_app/screens/cierres/ReinciarCierreScreen.tsx
 // -----------------------------------------------------------------------------
-// ReiniciarMesScreen (ajustes según lo comentado)
-//
-// Requisitos aplicados:
-// 1) En la preview NO mostramos:
-//    - Ventana 1-5 (se muestra en mensaje superior si aplica)
-//    - Gastos pendientes / Ingresos pendientes (eso va en el botón)
-// 2) Botón “Reiniciar mes”:
-//    - Usa OptionCard con state enabled/disabled
-//    - Si disabled y pulsas: mensaje (Alert)
-//    - En description aparecen los motivos (ventana o pendientes)
-// 3) Sin botón “Recomprobar”:
-//    - Pull-to-refresh (deslizar hacia abajo) recarga
-//
-// Nota: El desglose por contenedores se mantiene como placeholder vacío
-// (sin inventar datos) hasta que conectemos el endpoint real.
+// ReinciarCierreScreen
+// - Muestra comparativa (mes actual vs cierre anterior) como tenías
+// - CTA "Generar cierre" (persistente) con OptionCard enabled/disabled
+//   Condiciones (3):
+//     1) Ventana 1-5
+//     2) Sin pendientes (gastos pendientes = 0)
+//     3) Preview cierre disponible (reinicioApi.fetchCierrePreview OK)
+// - Pull-to-refresh
+// - Tras generar cierre -> navega a ReiniciarMesScreen
 // -----------------------------------------------------------------------------
 
 import React, { useCallback, useMemo, useState } from 'react';
@@ -26,41 +20,26 @@ import {
   ActivityIndicator,
   ScrollView,
   RefreshControl,
+  TouchableOpacity,
 } from 'react-native';
-import { useFocusEffect, useNavigation, useRoute } from '@react-navigation/native';
+import { useFocusEffect, useNavigation } from '@react-navigation/native';
+import Ionicons from '@expo/vector-icons/Ionicons';
 
 import { Screen } from '../../components/layout/Screen';
 import { Header } from '../../components/layout/Header';
 import { OptionCard } from '../../components/cards/OptionCard';
 import { colors, spacing } from '../../theme';
 
-import {
-  fetchReinicioMesEligibility,
-  fetchPresupuestoCotidianosTotal,
-  postReiniciarMes
-} from '../../services/reinicioApi';
+import { fetchGastos } from '../../services/gastosApi';
+import { reinicioApi, type CierrePreview } from '../../services/reinicioApi';
 
+import { getMonthlySummary } from '../../services/analyticsApi';
+import type { MonthlySummaryResponse } from '../../types/analytics';
+
+import { cierreMensualApi, type CierreMensual } from '../../services/cierreMensualApi';
 import { EuroformatEuro } from '../../utils/format';
 
-type Estado =
-  | 'LOADING'
-  | 'BLOQUEADO'
-  | 'LISTO'
-  | 'EJECUTANDO'
-  | 'OK'
-  | 'ERROR';
-
-type RouteParams = {
-  anio: number;
-  mes: number;
-  cierreId?: string | null;
-};
-
-type PresupuestoContenedor = {
-  id: string;
-  nombre: string;
-  total: number;
-};
+type CierreState = 'LOADING' | 'OK' | 'ERROR';
 
 function mesNombreES(m: number): string {
   const names = [
@@ -70,67 +49,100 @@ function mesNombreES(m: number): string {
   return names[m - 1] ?? `mes ${m}`;
 }
 
-// Reinicio solo día 1..5
+function getPrevMonthRef(baseDate = new Date()): { anio: number; mes: number } {
+  const d = new Date(baseDate.getFullYear(), baseDate.getMonth(), 1);
+  d.setMonth(d.getMonth() - 1);
+  return { anio: d.getFullYear(), mes: d.getMonth() + 1 };
+}
+
 function isInReinicioWindow(now = new Date()): boolean {
   const d = now.getDate();
   return d >= 1 && d <= 5;
 }
 
-export const ReiniciarMesScreen: React.FC = () => {
+function pctDelta(curr: number, prev: number): number | null {
+  const p = Number(prev);
+  const c = Number(curr);
+  if (!Number.isFinite(c) || !Number.isFinite(p)) return null;
+  if (p === 0) return null;
+  return ((c - p) / Math.abs(p)) * 100;
+}
+
+function fmtPct(value: number | null): string {
+  if (value == null || !Number.isFinite(value)) return '—';
+  const sign = value > 0 ? '+' : '';
+  return `${sign}${value.toFixed(1)}%`;
+}
+
+function moneyColor(value?: number | null): string {
+  const n = typeof value === 'number' && Number.isFinite(value) ? value : 0;
+  const green = (colors as any).success ?? (colors as any).actionSuccess ?? '#16a34a';
+  const red = (colors as any).danger ?? (colors as any).actionDanger ?? '#b91c1c';
+  if (n > 0) return green;
+  if (n < 0) return red;
+  return colors.textPrimary;
+}
+
+export const ReinciarCierreScreen: React.FC = () => {
   const navigation = useNavigation<any>();
-  const route = useRoute<any>();
-  const { anio, mes } = (route.params ?? {}) as RouteParams;
 
-  const subtitleLabel = useMemo(() => `${mesNombreES(mes)} ${anio}`, [mes, anio]);
+  const currentPeriod = useMemo(() => {
+    const now = new Date();
+    return { anio: now.getFullYear(), mes: now.getMonth() + 1 };
+  }, []);
 
-  const [estado, setEstado] = useState<Estado>('LOADING');
-  const [errorMsg, setErrorMsg] = useState<string | null>(null);
-
-  const [gastosPendientesCount, setGastosPendientesCount] = useState<number>(0);
-  const [ingresosPendientesCount, setIngresosPendientesCount] = useState<number>(0);
-  const [canReiniciarBackend, setCanReiniciarBackend] = useState<boolean>(false);
-
-  // Preview total + contenedores
-  const [presupuestoCotTotal, setPresupuestoCotTotal] = useState<number>(0);
-  const [contenedores, setContenedores] = useState<PresupuestoContenedor[]>([]);
-
-  // Summary tras ejecutar
-  const [lastSummary, setLastSummary] = useState<any>(null);
-
-  // Pull-to-refresh
-  const [refreshing, setRefreshing] = useState(false);
+  const prevPeriod = useMemo(() => getPrevMonthRef(new Date()), []);
 
   const reinicioWindowOk = useMemo(() => isInReinicioWindow(new Date()), []);
-  const hasPendientes = (gastosPendientesCount ?? 0) > 0 || (ingresosPendientesCount ?? 0) > 0;
 
-  const canReiniciar = useMemo(() => {
-    return reinicioWindowOk && canReiniciarBackend;
-  }, [reinicioWindowOk, canReiniciarBackend]);
+  const [state, setState] = useState<CierreState>('LOADING');
+  const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const [refreshing, setRefreshing] = useState(false);
+
+  const [pendientesCount, setPendientesCount] = useState<number>(0);
+
+  // Cierre persistido del mes anterior (M-1) para comparativa
+  const [cierrePrev, setCierrePrev] = useState<CierreMensual | null>(null);
+
+  // Summary del mes actual para comparativa
+  const [summaryCurrent, setSummaryCurrent] = useState<MonthlySummaryResponse | null>(null);
+
+  // Preview cierre "what-if" del mes actual (M) para validar condición 3
+  const [cierrePreviewM, setCierrePreviewM] = useState<CierrePreview | null>(null);
 
   const load = useCallback(async () => {
-    setEstado('LOADING');
     setErrorMsg(null);
+    setState('LOADING');
 
     try {
-      const elig = await fetchReinicioMesEligibility();
-      setGastosPendientesCount(Number(elig?.gastos_pendientes ?? 0));
-      setIngresosPendientesCount(Number(elig?.ingresos_pendientes ?? 0));
-      setCanReiniciarBackend(!!elig?.can_reiniciar);
+      // 1) Pendientes
+      const pendientes = await fetchGastos('pendientes');
+      const count = Array.isArray(pendientes) ? pendientes.length : 0;
+      setPendientesCount(count);
 
-      // Preview: presupuesto total de “cotidianos”
-      const totalCot = await fetchPresupuestoCotidianosTotal();
-      setPresupuestoCotTotal(Number(totalCot ?? 0));
+      // 2) Cierre M-1 (persistido) para comparativa (si existe)
+      const cierres = await cierreMensualApi.list();
+      const found =
+        (cierres ?? []).find((c) => c.anio === prevPeriod.anio && c.mes === prevPeriod.mes) ?? null;
+      setCierrePrev(found);
 
-      // Contenedores: aún no conectado (no inventamos)
-      setContenedores([]);
+      // 3) Summary del mes actual para comparativa (ya lo tenías)
+      const current = await getMonthlySummary();
+      setSummaryCurrent(current);
 
-      const blocked = !elig?.can_reiniciar || !reinicioWindowOk;
-      setEstado(blocked ? 'BLOQUEADO' : 'LISTO');
+      // 4) Preview cierre del mes actual (what-if) (condición 3)
+      const prevM = await reinicioApi.fetchCierrePreview({
+        anio: currentPeriod.anio,
+        mes: currentPeriod.mes,
+      });
+      setCierrePreviewM(prevM);
+
+      setState('OK');
     } catch (e: any) {
-      setErrorMsg(e?.message ?? 'No se ha podido cargar el estado del mes.');
-      setEstado('ERROR');
+      setErrorMsg(e?.message ?? 'No se ha podido cargar el estado del cierre.');
+      setState('ERROR');
     }
-  }, [reinicioWindowOk]);
+  }, [prevPeriod.anio, prevPeriod.mes, currentPeriod.anio, currentPeriod.mes]);
 
   useFocusEffect(
     useCallback(() => {
@@ -147,240 +159,225 @@ export const ReiniciarMesScreen: React.FC = () => {
     }
   }, [load]);
 
-  const irAGastosPendientes = () => {
-    navigation.navigate('DayToDayTab', {
-      screen: 'GastosList',
-      params: {
-        initialFiltro: 'pendientes',
-        fromHome: false,
-        returnToTab: 'MonthTab',
-        returnToScreen: 'ReiniciarMesScreen',
-      },
-    });
-  };
+  const irAKpis = () => navigation.navigate('CierreKpiScreen', { cierreId: cierrePrev?.id });
 
-  const irAIngresosPendientes = () => {
-    navigation.navigate('DayToDayTab', {
-      screen: 'IngresosList',
-      params: {
-        fromHome: false,
-        returnToTab: 'MonthTab',
-        returnToScreen: 'ReiniciarMesScreen',
-      },
-    });
-  };
+  const canGenerarCierre = useMemo(() => {
+    const cond1 = reinicioWindowOk;
+    const cond2 = pendientesCount === 0;
+    const cond3 = !!cierrePreviewM; // si el preview no está disponible, bloquea
+    return cond1 && cond2 && cond3;
+  }, [reinicioWindowOk, pendientesCount, cierrePreviewM]);
 
-  const confirmarReiniciarMes = () => {
-    if (!canReiniciar) return;
+  const disabledReason = useMemo(() => {
+    if (canGenerarCierre) return null;
+
+    const parts: string[] = [];
+    if (!reinicioWindowOk) parts.push('Disponible del día 1 al 5');
+    if (pendientesCount > 0) parts.push(`Pendientes: ${pendientesCount}`);
+    if (!cierrePreviewM) parts.push('Preview de cierre no disponible');
+    return parts.join(' · ');
+  }, [canGenerarCierre, reinicioWindowOk, pendientesCount, cierrePreviewM]);
+
+  const confirmarGenerar = () => {
+    if (!canGenerarCierre) return;
 
     Alert.alert(
-      'Reiniciar mes',
-      'Se aplicará el reinicio de estados (gastos e ingresos) para el nuevo mes.\n\n¿Deseas continuar?',
+      'Generar cierre',
+      `Se generará el cierre (persistente) del mes anterior.\n\n¿Deseas continuar?`,
       [
         { text: 'Cancelar', style: 'cancel' },
-        { text: 'Reiniciar', style: 'destructive', onPress: () => void reiniciarMes() },
+        { text: 'Generar', style: 'destructive', onPress: () => void generarCierre() },
       ]
     );
   };
 
-  const reiniciarMes = async () => {
+  const generarCierre = async () => {
     try {
-      setEstado('EJECUTANDO');
+      setState('LOADING');
       setErrorMsg(null);
 
-      const res = await postReiniciarMes({ aplicarPromedios: true });
-      setLastSummary(res?.summary ?? null);
+      // Persistente: genera el cierre (tu backend lo resuelve como corresponda)
+      const res = await reinicioApi.postGenerarCierre({ force: false });
 
-      setEstado('OK');
+      // Tras generar cierre -> abrir ReiniciarMesScreen del mes actual
+      navigation.navigate('ReiniciarMesScreen', {
+        anio: currentPeriod.anio,
+        mes: currentPeriod.mes,
+        cierreId: res?.id ?? null,
+      });
+
+      setState('OK');
     } catch (e: any) {
-      setErrorMsg(e?.message ?? 'No se ha podido reiniciar el mes.');
-      setEstado('ERROR');
+      setErrorMsg(e?.message ?? 'No se ha podido generar el cierre.');
+      setState('ERROR');
     }
   };
 
-  const disabledReason = useMemo(() => {
-    if (canReiniciar) return null;
+  const renderComparativa = () => {
+    const g = summaryCurrent?.general;
 
-    const parts: string[] = [];
-    if (!reinicioWindowOk) parts.push('Disponible del día 1 al 5');
-    if (hasPendientes) parts.push(`Pendientes: ${gastosPendientesCount} gastos · ${ingresosPendientesCount} ingresos`);
-    if (!reinicioWindowOk && !hasPendientes && !canReiniciarBackend) parts.push('Bloqueado por backend');
-    return parts.join(' · ');
-  }, [canReiniciar, reinicioWindowOk, hasPendientes, gastosPendientesCount, ingresosPendientesCount, canReiniciarBackend]);
+    const ingresosCurr = Number(g?.ingresos_mes ?? 0);
+    const gastosCurr = Number(g?.gastos_mes ?? 0);
+    const ahorroCurr = Number(g?.ahorro_mes ?? 0);
 
-  const renderPreview = () => {
+    const ingresosPrev = Number(cierrePrev?.ingresos_reales ?? 0);
+    const gastosPrev = Number(cierrePrev?.gastos_reales_total ?? 0);
+    const ahorroPrev = Number(cierrePrev?.resultado_real ?? 0);
+
+    const dIng = pctDelta(ingresosCurr, ingresosPrev);
+    const dGas = pctDelta(gastosCurr, gastosPrev);
+    const dAho = pctDelta(ahorroCurr, ahorroPrev);
+
     return (
-      <View style={styles.previewBox}>
-        <Text style={styles.previewTitle}>Preview</Text>
+      <View style={styles.summaryCard}>
+        <View style={styles.summaryHeaderRow}>
+          <View>
+            <Text style={styles.summaryTitle}>{`${mesNombreES(currentPeriod.mes)} ${currentPeriod.anio}`}</Text>
+            <Text style={styles.summarySubtitleSmall}>
+              vs {mesNombreES(prevPeriod.mes)} {prevPeriod.anio}
+            </Text>
+          </View>
 
-        {/* Solo presupuesto (renombrado como pediste) */}
-        <View style={styles.previewRow}>
-          <Text style={styles.previewKey}>{`Presupuesto para ${subtitleLabel}`}</Text>
-          <Text style={styles.previewValStrong}>{EuroformatEuro(presupuestoCotTotal, 'normal')}</Text>
+          <TouchableOpacity
+            onPress={irAKpis}
+            hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+            accessibilityRole="button"
+            accessibilityLabel="Ver detalle y KPIs del cierre anterior"
+            style={styles.eyeButton}
+          >
+            <Ionicons name="eye-outline" size={20} color={colors.primary} />
+          </TouchableOpacity>
         </View>
 
-        {/* Contenedores (2 por fila) */}
-        <Text style={[styles.previewSectionTitle, { marginTop: 10 }]}>Contenedores</Text>
-
-        {contenedores.length === 0 ? (
-          <Text style={styles.previewEmpty}>
-            Aún no disponible: falta conectar el endpoint de contenedores y sus presupuestos.
-          </Text>
-        ) : (
-          <View style={styles.grid}>
-            {contenedores.map((c) => (
-              <View key={c.id} style={styles.gridCell}>
-                <Text style={styles.gridLabel} numberOfLines={1}>
-                  {c.nombre}
-                </Text>
-                <Text style={styles.gridValue}>{EuroformatEuro(c.total, 'normal')}</Text>
-              </View>
-            ))}
+        <View style={styles.row}>
+          <Text style={styles.label}>Ingresos</Text>
+          <View style={styles.valueBlock}>
+            <Text style={[styles.value, { color: moneyColor(ingresosCurr) }]}>
+              {EuroformatEuro(ingresosCurr, 'plus')}
+            </Text>
+            <Text style={styles.delta}>{fmtPct(dIng)}</Text>
           </View>
-        )}
+        </View>
+
+        <View style={styles.row}>
+          <Text style={styles.label}>Gastos</Text>
+          <View style={styles.valueBlock}>
+            <Text style={[styles.value, { color: moneyColor(-Math.abs(gastosCurr)) }]}>
+              {EuroformatEuro(gastosCurr, 'minus')}
+            </Text>
+            <Text style={styles.delta}>{fmtPct(dGas)}</Text>
+          </View>
+        </View>
+
+        <View style={styles.row}>
+          <Text style={styles.label}>Ahorro</Text>
+          <View style={styles.valueBlock}>
+            <Text style={[styles.value, { color: moneyColor(ahorroCurr) }]}>
+              {EuroformatEuro(ahorroCurr, 'signed')}
+            </Text>
+            <Text style={styles.delta}>{fmtPct(dAho)}</Text>
+          </View>
+        </View>
+
+        <Text style={styles.helperSmall}>
+          Nota: el % compara el mes actual con el cierre del mes anterior. Si el mes anterior es 0, se muestra “—”.
+        </Text>
       </View>
     );
   };
 
-  const renderTopMessage = () => {
-    // Mensaje superior (sustituye a “Ventana” en preview)
-    if (!reinicioWindowOk) {
+  const renderPreviewWhatIf = () => {
+    if (!cierrePreviewM) {
       return (
-        <View style={styles.infoBox}>
-          <Text style={styles.infoTitle}>Fuera de ventana</Text>
-          <Text style={styles.infoText}>El reinicio solo está disponible del día 1 al 5.</Text>
-        </View>
-      );
-    }
-
-    if (hasPendientes) {
-      return (
-        <View style={styles.infoBox}>
-          <Text style={styles.infoTitle}>Hay pendientes KPI</Text>
-          <Text style={styles.infoText}>
-            Debes dejar a cero los pendientes antes de reiniciar. Se muestran en el botón.
+        <View style={styles.summaryCard}>
+          <Text style={styles.summaryTitle}>Preview cierre (what-if)</Text>
+          <Text style={[styles.helperSmall, { marginTop: 6 }]}>
+            No disponible (no se pudo calcular el preview del mes actual).
           </Text>
         </View>
       );
     }
 
-    return null;
+    return (
+      <View style={styles.summaryCard}>
+        <Text style={styles.summaryTitle}>Preview cierre (what-if)</Text>
+        <Text style={[styles.helperSmall, { marginTop: 6 }]}>
+          Simulación: si cerraras ahora. Corte: {cierrePreviewM.as_of}
+        </Text>
+
+        <View style={[styles.row, { marginTop: 8 }]}>
+          <Text style={styles.label}>Ingresos</Text>
+          <Text style={[styles.value, { color: moneyColor(cierrePreviewM.ingresos_reales) }]}>
+            {EuroformatEuro(cierrePreviewM.ingresos_reales ?? 0, 'signed')}
+          </Text>
+        </View>
+
+        <View style={styles.row}>
+          <Text style={styles.label}>Gastos</Text>
+          <Text style={[styles.value, { color: moneyColor(-Math.abs(cierrePreviewM.gastos_reales_total ?? 0)) }]}>
+            {EuroformatEuro(-Math.abs(cierrePreviewM.gastos_reales_total ?? 0), 'signed')}
+          </Text>
+        </View>
+
+        <View style={styles.row}>
+          <Text style={styles.label}>Resultado</Text>
+          <Text style={[styles.value, { color: moneyColor(cierrePreviewM.resultado_real) }]}>
+            {EuroformatEuro(cierrePreviewM.resultado_real ?? 0, 'signed')}
+          </Text>
+        </View>
+      </View>
+    );
   };
 
   const renderBody = () => {
-    if (estado === 'LOADING' || estado === 'EJECUTANDO') {
+    if (state === 'LOADING') {
       return (
         <View style={styles.center}>
           <ActivityIndicator size="small" color={colors.primary} />
-          <Text style={styles.helperText}>
-            {estado === 'EJECUTANDO' ? 'Aplicando reinicio…' : 'Cargando estado del mes…'}
-          </Text>
+          <Text style={styles.helperText}>Cargando…</Text>
         </View>
       );
     }
 
-    if (estado === 'ERROR') {
+    if (state === 'ERROR') {
       return (
         <View style={styles.content}>
           <Text style={styles.errorText}>{errorMsg ?? 'Error inesperado.'}</Text>
           <OptionCard
             iconName="refresh-outline"
             title="Reintentar"
-            description="Vuelve a cargar el estado del mes."
+            description="Vuelve a cargar el estado."
             onPress={() => void load()}
           />
         </View>
       );
     }
 
-    if (estado === 'OK') {
-      return (
-        <View style={styles.content}>
-          <Text style={styles.h1}>Reinicio aplicado</Text>
-          <Text style={styles.subtitle}>El backend ha ejecutado el reinicio. Resumen:</Text>
-
-          {lastSummary && (
-            <View style={styles.previewBox}>
-              <Text style={styles.previewTitle}>Cambios</Text>
-              <Text style={styles.previewLine}>
-                Gastos · Mensuales reseteados: {lastSummary?.Gastos?.['Mensuales reseteados'] ?? 0}
-              </Text>
-              <Text style={styles.previewLine}>
-                Gastos · Periódicos reactivados: {lastSummary?.Gastos?.['Periódicos reactivados'] ?? 0}
-              </Text>
-              <Text style={styles.previewLine}>
-                Gastos · COT forzados visibles: {lastSummary?.Gastos?.['COT forzados visibles'] ?? 0}
-              </Text>
-              <Text style={styles.previewLine}>
-                Gastos · Promedios actualizados: {lastSummary?.Gastos?.['Promedios actualizados'] ?? 0}
-              </Text>
-              <Text style={styles.previewLine}>
-                Ingresos · Mensuales reseteados: {lastSummary?.Ingresos?.['Mensuales reseteados'] ?? 0}
-              </Text>
-              <Text style={styles.previewLine}>
-                Ingresos · Periódicos reactivados: {lastSummary?.Ingresos?.['Periódicos reactivados'] ?? 0}
-              </Text>
-            </View>
-          )}
-
-          <Text style={styles.pullHint}>Desliza hacia abajo para refrescar el estado.</Text>
-        </View>
-      );
-    }
-
-    // BLOQUEADO o LISTO
-    const isBlocked = !canReiniciar;
-
     return (
       <View style={styles.content}>
-        <Text style={styles.h1}>{isBlocked ? 'No se puede reiniciar aún' : 'Listo para reiniciar'}</Text>
+        <Text style={styles.h1}>Cierre mensual</Text>
         <Text style={styles.subtitle}>
-          {isBlocked
-            ? 'Revisa la ventana y pendientes KPI antes de continuar.'
-            : 'Cumples requisitos. Puedes aplicar el reinicio.'}
+          Previsualización del mes actual (what-if) y comparativa frente al cierre del mes anterior.
         </Text>
 
-        {renderTopMessage()}
-        {renderPreview()}
+        {renderPreviewWhatIf()}
+        {renderComparativa()}
 
-        {/* Botón principal: pendientes y ventana van aquí (no en preview) */}
         <OptionCard
-          iconName="repeat-outline"
-          title="Reiniciar mes"
+          iconName="calendar-outline"
+          title="Generar cierre"
           description={
-            canReiniciar
-              ? 'Ejecuta el reinicio de estados para el nuevo mes (incluye promedios 3M).'
+            canGenerarCierre
+              ? 'Genera el cierre (persistente) y continúa al reinicio de mes.'
               : (disabledReason ?? 'No disponible')
           }
-          onPress={confirmarReiniciarMes}
-          state={canReiniciar ? 'enabled' : 'disabled'}
+          onPress={confirmarGenerar}
+          state={canGenerarCierre ? 'enabled' : 'disabled'}
           onDisabledPress={() =>
-            Alert.alert(
-              'No disponible',
-              disabledReason ?? 'Para reiniciar debes cumplir las condiciones (ventana 1–5 y sin pendientes KPI).'
-            )
+            Alert.alert('No disponible', disabledReason ?? 'No cumples las condiciones para generar el cierre.')
           }
           showChevron={false}
         />
-
-        {/* Accesos directos (opcionales pero útiles) */}
-        {gastosPendientesCount > 0 && (
-          <OptionCard
-            iconName="alert-circle-outline"
-            title="Revisar gastos pendientes"
-            description={`Pendientes KPI: ${gastosPendientesCount}.`}
-            onPress={irAGastosPendientes}
-          />
-        )}
-
-        {ingresosPendientesCount > 0 && (
-          <OptionCard
-            iconName="alert-circle-outline"
-            title="Revisar ingresos pendientes"
-            description={`Pendientes KPI: ${ingresosPendientesCount}.`}
-            onPress={irAIngresosPendientes}
-          />
-        )}
 
         <Text style={styles.pullHint}>Desliza hacia abajo para recomprobar.</Text>
       </View>
@@ -390,15 +387,12 @@ export const ReiniciarMesScreen: React.FC = () => {
   return (
     <Screen withHeaderBackground>
       <View style={styles.topArea}>
-        <Header title="Reiniciar mes" subtitle={subtitleLabel} showBack />
+        <Header title="Cierre mensual" subtitleYear={currentPeriod.anio} subtitleMonth={currentPeriod.mes} showBack />
       </View>
 
       <ScrollView
-        style={styles.body}
-        contentContainerStyle={styles.bodyContent}
-        refreshControl={
-          <RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={colors.primary} />
-        }
+        contentContainerStyle={styles.scrollContent}
+        refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={colors.primary} />}
       >
         {renderBody()}
       </ScrollView>
@@ -414,25 +408,22 @@ const styles = StyleSheet.create({
     paddingBottom: spacing.lg,
   },
 
-  body: {
-    flex: 1,
-    backgroundColor: '#F5F5F7',
-  },
-  bodyContent: {
+  scrollContent: {
     paddingHorizontal: spacing.lg,
     paddingTop: spacing.lg,
     paddingBottom: spacing.xl,
+    backgroundColor: '#F5F5F7',
+    flexGrow: 1,
   },
 
-  content: {
-    gap: spacing.md,
-  },
+  content: { gap: spacing.md },
   center: {
     alignItems: 'center',
     justifyContent: 'center',
     gap: spacing.md,
     paddingTop: spacing.xl,
   },
+
   h1: {
     fontSize: 26,
     fontWeight: '700',
@@ -447,10 +438,7 @@ const styles = StyleSheet.create({
     marginBottom: spacing.md,
     lineHeight: 20,
   },
-  helperText: {
-    fontSize: 13,
-    color: colors.textSecondary,
-  },
+  helperText: { fontSize: 13, color: colors.textSecondary },
   errorText: {
     fontSize: 14,
     color: colors.actionDanger,
@@ -458,107 +446,55 @@ const styles = StyleSheet.create({
     marginBottom: spacing.md,
   },
 
-  // Mensaje superior “ventana/pending”
-  infoBox: {
+  summaryCard: {
     backgroundColor: '#FFFFFF',
     borderRadius: 14,
     padding: spacing.lg,
     borderWidth: 1,
     borderColor: '#E6E6EA',
   },
-  infoTitle: {
-    fontSize: 13,
-    fontWeight: '800',
-    color: colors.textPrimary,
-    marginBottom: 4,
+  summaryHeaderRow: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    justifyContent: 'space-between',
+    marginBottom: spacing.md,
   },
-  infoText: {
-    fontSize: 12,
-    color: colors.textSecondary,
-    lineHeight: 18,
-  },
-
-  previewBox: {
-    backgroundColor: '#FFFFFF',
-    borderRadius: 14,
-    padding: spacing.lg,
-    borderWidth: 1,
-    borderColor: '#E6E6EA',
-  },
-  previewTitle: {
-    fontSize: 14,
+  summaryTitle: {
+    fontSize: 16,
     fontWeight: '700',
     color: colors.textPrimary,
-    marginBottom: 8,
+    textTransform: 'capitalize',
   },
-
-  previewRow: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    gap: 10,
-    paddingVertical: 4,
-  },
-  previewKey: {
+  summarySubtitleSmall: {
+    marginTop: 2,
     fontSize: 12,
     color: colors.textSecondary,
+    textTransform: 'capitalize',
   },
-  previewValStrong: {
-    fontSize: 12,
-    color: colors.textPrimary,
-    fontWeight: '800',
-  },
-
-  previewSectionTitle: {
-    fontSize: 12,
-    fontWeight: '700',
-    color: colors.textPrimary,
-  },
-  previewEmpty: {
-    marginTop: 6,
-    fontSize: 12,
-    color: colors.textSecondary,
-    lineHeight: 16,
-  },
-
-  grid: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    justifyContent: 'space-between',
-    marginTop: 8,
-  },
-  gridCell: {
-    width: '48%',
+  eyeButton: {
+    width: 34,
+    height: 34,
+    borderRadius: 17,
     borderWidth: StyleSheet.hairlineWidth,
     borderColor: '#E6E6EA',
-    borderRadius: 12,
-    paddingVertical: 8,
-    paddingHorizontal: 10,
-    marginBottom: 8,
     backgroundColor: '#FFFFFF',
-  },
-  gridLabel: {
-    fontSize: 11,
-    color: colors.textSecondary,
-  },
-  gridValue: {
-    marginTop: 2,
-    fontSize: 13,
-    fontWeight: '800',
-    color: colors.textPrimary,
+    alignItems: 'center',
+    justifyContent: 'center',
   },
 
-  previewLine: {
-    fontSize: 12,
-    color: colors.textSecondary,
-    lineHeight: 18,
+  row: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    paddingVertical: 6,
+    alignItems: 'baseline',
   },
+  label: { fontSize: 13, color: colors.textSecondary },
+  valueBlock: { alignItems: 'flex-end', gap: 2 },
+  value: { fontSize: 13, fontWeight: '800' },
+  delta: { fontSize: 11, color: colors.textSecondary, fontWeight: '600' },
+  helperSmall: { marginTop: 8, fontSize: 11, color: colors.textSecondary, lineHeight: 16 },
 
-  pullHint: {
-    fontSize: 11,
-    color: colors.textSecondary,
-    textAlign: 'center',
-    marginTop: 2,
-  },
+  pullHint: { fontSize: 11, color: colors.textSecondary, textAlign: 'center', marginTop: 2 },
 });
 
-export default ReiniciarMesScreen;
+export default ReinciarCierreScreen;

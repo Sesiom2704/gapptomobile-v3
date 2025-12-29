@@ -1,25 +1,26 @@
 # backend/app/api/v1/reinicio_router.py
 """
-Router de REINICIO (mes) + PREVIEW + PROMEDIOS 3M.
+Router de REINICIO (mes) + PREVIEW + PROMEDIOS 3M + PREVIEW CIERRE (what-if).
 
 Objetivo:
-- Mover desde gastos_router TODO lo relacionado con "reinicio mes":
+- Consolidar todo lo de reinicio del mes fuera de gastos_router:
   - eligibility
-  - ejecución reiniciar mes
-  - presupuesto total COT (para previews)
-  - promedios 3M (contenedores COT)
+  - preview (sin insertar)
+  - ejecutar reinicio (persistente)
+  - cálculo promedios 3M contenedores COT
+  - presupuesto total COT
 
-Diseño:
-- No usamos capa services/ (según tu preferencia).
-- La lógica se encapsula en helpers internos privados dentro del router.
+Además:
+- Preview cierre mensual (what-if): "si cerráramos el mes ahora",
+  sin insertar cierre en DB.
 
 Nota:
-- Ventana 1..5 se expone como info (UI). Opcionalmente se puede "enforce".
+- No usamos capa services (según tu preferencia).
 """
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import datetime, timezone, date
 from calendar import monthrange
 from typing import Optional, Tuple, Dict, Any
 
@@ -36,13 +37,14 @@ from backend.app.schemas.reinicio import (
     PresupuestoCotidianosTotalResponse,
     ReinicioMesPreviewResponse,
     ReinicioMesExecuteResponse,
+    CierrePreviewOut,
 )
 
 router = APIRouter(prefix="/reinicio", tags=["reinicio"])
 
 
 # =============================================================================
-# Constantes (mantener exactamente lo que ya estabas usando)
+# Constantes (idénticas a lo que ya usabas)
 # =============================================================================
 
 SEG_COT = "COT-12345"
@@ -79,31 +81,24 @@ PROM_GROUPS = {
 
 
 # =============================================================================
-# Helpers (privados) - fechas
+# Helpers - fechas
 # =============================================================================
 
 def _is_in_reinicio_window(now: Optional[date] = None) -> bool:
-    """
-    Ventana operativa: días 1..5 del mes.
-    (UI lo muestra; backend puede bloquear si se pasa enforce_window=True)
-    """
+    """Ventana operativa: días 1..5 del mes."""
     now = now or date.today()
     return 1 <= int(now.day) <= 5
 
 
 def _months_diff(d1: date, d2: date | None) -> int | None:
-    """
-    Diferencia en meses entre d1 y d2 (d1 - d2).
-    """
+    """Diferencia en meses entre d1 y d2 (d1 - d2)."""
     if not d2:
         return None
     return (d1.year - d2.year) * 12 + (d1.month - d2.month)
 
 
 def _add_months(d: date | None, n: int) -> date | None:
-    """
-    Suma n meses a una fecha ajustando día al último del mes si es necesario.
-    """
+    """Suma n meses a una fecha ajustando el día al último del mes si aplica."""
     if not d:
         return None
     y = d.year + (d.month - 1 + n) // 12
@@ -113,15 +108,22 @@ def _add_months(d: date | None, n: int) -> date | None:
 
 
 def _month_bounds(y: int, m: int) -> Tuple[date, date]:
-    """
-    (primer_día, último_día) del mes.
-    """
+    """(primer_día, último_día) del mes."""
     last = monthrange(y, m)[1]
     return date(y, m, 1), date(y, m, last)
 
 
+def _month_range_dt(anio: int, mes: int) -> tuple[datetime, datetime]:
+    """Devuelve [inicio_mes, inicio_mes_siguiente) para filtrar por fecha/datetime."""
+    if mes < 1 or mes > 12:
+        raise ValueError("mes fuera de rango")
+    start = datetime(anio, mes, 1)
+    end = datetime(anio + 1, 1, 1) if mes == 12 else datetime(anio, mes + 1, 1)
+    return start, end
+
+
 # =============================================================================
-# Helpers (privados) - PROM-3M
+# Helpers - PROM-3M
 # =============================================================================
 
 def _sum_gc_tipo_mes(
@@ -131,9 +133,7 @@ def _sum_gc_tipo_mes(
     end: date,
     user_id: Optional[int] = None,
 ) -> float:
-    """
-    Suma importe de GastoCotidiano.pagado en rango start-end.
-    """
+    """Suma importe de GastoCotidiano.pagado en rango start-end."""
     q = (
         db.query(func.coalesce(func.sum(models.GastoCotidiano.importe), 0.0))
         .filter(models.GastoCotidiano.tipo_id == tipo_id)
@@ -143,7 +143,6 @@ def _sum_gc_tipo_mes(
     )
     if user_id is not None:
         q = q.filter(models.GastoCotidiano.user_id == user_id)
-
     return float(q.scalar() or 0.0)
 
 
@@ -155,9 +154,7 @@ def _avg_3m_for_tipo(
     m3: Tuple[date, date],
     user_id: Optional[int] = None,
 ) -> float:
-    """
-    Promedio de últimos 3 meses con gasto > 0.
-    """
+    """Promedio de últimos 3 meses con gasto > 0."""
     (s1, e1), (s2, e2), (s3, e3) = m1, m2, m3
     v3 = _sum_gc_tipo_mes(db, tipo_id, s3, e3, user_id=user_id)
     v2 = _sum_gc_tipo_mes(db, tipo_id, s2, e2, user_id=user_id)
@@ -176,9 +173,7 @@ def _sum_of_avgs_3m(
     m3: Tuple[date, date],
     user_id: Optional[int] = None,
 ) -> float:
-    """
-    Suma de promedios 3M.
-    """
+    """Suma de promedios 3M."""
     total = 0.0
     for t in (tipo_ids or []):
         total += _avg_3m_for_tipo(db, t, m1, m2, m3, user_id=user_id)
@@ -186,31 +181,22 @@ def _sum_of_avgs_3m(
 
 
 def _apply_promedios_3m_por_tipo(db: Session, user_id: Optional[int] = None) -> int:
-    """
-    Recalcula importe/importe_cuota de gastos contenedor de COT
-    según promedio de 3 meses.
-    """
+    """Recalcula importe/importe_cuota de gastos contenedor de COT según promedio 3 meses."""
     today = date.today()
 
-    y1 = today.year
-    m1 = today.month - 1
+    y1, m1 = today.year, today.month - 1
     if m1 == 0:
-        m1 = 12
-        y1 -= 1
+        m1, y1 = 12, y1 - 1
     start1, end1 = _month_bounds(y1, m1)
 
-    y2 = y1
-    m2 = m1 - 1
+    y2, m2 = y1, m1 - 1
     if m2 == 0:
-        m2 = 12
-        y2 -= 1
+        m2, y2 = 12, y2 - 1
     start2, end2 = _month_bounds(y2, m2)
 
-    y3 = y2
-    m3 = m2 - 1
+    y3, m3 = y2, m2 - 1
     if m3 == 0:
-        m3 = 12
-        y3 -= 1
+        m3, y3 = 12, y3 - 1
     start3, end3 = _month_bounds(y3, m3)
 
     m_1 = (start1, end1)
@@ -232,8 +218,7 @@ def _apply_promedios_3m_por_tipo(db: Session, user_id: Optional[int] = None) -> 
         if user_id is not None:
             rows_q = rows_q.filter(models.Gasto.user_id == user_id)
 
-        rows = rows_q.all()
-        for g in rows:
+        for g in rows_q.all():
             g.importe = valor_contenedor
             g.importe_cuota = valor_contenedor
             g.modifiedon = func.now()
@@ -243,14 +228,11 @@ def _apply_promedios_3m_por_tipo(db: Session, user_id: Optional[int] = None) -> 
 
 
 # =============================================================================
-# Helpers (privados) - COT presupuesto
+# Helpers - Presupuesto COT total
 # =============================================================================
 
 def _presupuesto_cotidianos_total(db: Session, user_id: int) -> float:
-    """
-    Presupuesto total mensual de gastos COT activos+kpi.
-    (mismo cálculo que tenías en gastos_router)
-    """
+    """Presupuesto total mensual de gastos COT activos+kpi."""
     total = (
         db.query(func.coalesce(func.sum(models.Gasto.importe_cuota), 0.0))
         .filter(
@@ -265,15 +247,11 @@ def _presupuesto_cotidianos_total(db: Session, user_id: int) -> float:
 
 
 # =============================================================================
-# Core reinicio mes (antes estaba en gastos_router)
+# Core - eligibility y reinicio
 # =============================================================================
 
 def _reiniciar_mes_eligibility_core(db: Session, user_id: int) -> Dict[str, int | bool]:
-    """
-    Igual que tu endpoint anterior:
-    - No gastos activos+kpi con pagado=False
-    - No ingresos activos+kpi con cobrado=False
-    """
+    """Sin cambios respecto a tu lógica anterior."""
     gastos_pend = (
         db.query(func.count())
         .select_from(models.Gasto)
@@ -310,11 +288,7 @@ def _reiniciar_estados_core(
     user_id: int,
     aplicar_promedios: bool = False,
 ) -> dict:
-    """
-    Lógica central del reinicio (copiada 1:1 conceptualmente):
-    - Resetea estados de gastos e ingresos según periodicidad.
-    - Opcional: recalcula promedios 3M (contenedores COT).
-    """
+    """Tu reinicio 1:1 (sin perder funcionalidad)."""
     today = date.today()
     counters: Dict[str, Any] = {
         "gastos": {
@@ -333,12 +307,10 @@ def _reiniciar_estados_core(
 
     gastos = (
         db.query(models.Gasto)
-        .filter(
-            models.Gasto.user_id == user_id,
-            models.Gasto.activo == True,
-        )
+        .filter(models.Gasto.user_id == user_id, models.Gasto.activo == True)
         .all()
     )
+
     for g in gastos:
         changed = False
         per = (g.periodicidad or "").upper().strip()
@@ -377,7 +349,7 @@ def _reiniciar_estados_core(
                     changed = True
                 counters["gastos"]["periodicos_mantenidos"] += 1
 
-        # COT: forzar visibilidad y KPI en mensual
+        # COT: forzar visibilidad + KPI mensual
         if seg == SEG_COT:
             bump = False
             if g.activo is not True:
@@ -395,12 +367,10 @@ def _reiniciar_estados_core(
 
     ingresos = (
         db.query(models.Ingreso)
-        .filter(
-            models.Ingreso.user_id == user_id,
-            models.Ingreso.activo == True,
-        )
+        .filter(models.Ingreso.user_id == user_id, models.Ingreso.activo == True)
         .all()
     )
+
     for inc in ingresos:
         changed = False
         per = (inc.periodicidad or "").upper().strip()
@@ -442,7 +412,6 @@ def _reiniciar_estados_core(
         if changed:
             inc.modifiedon = func.now()
 
-    # PROM-3M (contenedores COT)
     if aplicar_promedios:
         updated = _apply_promedios_3m_por_tipo(db, user_id=user_id)
         counters["gastos"]["promedios_actualizados"] = int(updated or 0)
@@ -452,9 +421,7 @@ def _reiniciar_estados_core(
 
 
 def _build_summary(updated: dict) -> dict:
-    """
-    Mantiene el mismo shape que ya devolvías en gastos_router.
-    """
+    """Mantiene el mismo shape que ya devolvías."""
     return {
         "Gastos": {
             "Mensuales reseteados": updated["gastos"]["mensuales_reseteados"],
@@ -472,7 +439,7 @@ def _build_summary(updated: dict) -> dict:
 
 
 # =============================================================================
-# Endpoints públicos
+# Endpoints - MES (reinicio)
 # =============================================================================
 
 @router.get("/mes/eligibility", response_model=ReinicioMesEligibilityResponse)
@@ -498,12 +465,6 @@ def mes_preview(
     db: Session = Depends(get_db),
     current_user: models.User = Depends(require_user),
 ):
-    """
-    Preview sin insertar:
-    - ventana 1..5 (info)
-    - eligibility (pendientes/can_reiniciar)
-    - presupuesto COT total
-    """
     window_ok = _is_in_reinicio_window()
     elig = _reiniciar_mes_eligibility_core(db, user_id=current_user.id)
     cot_total = _presupuesto_cotidianos_total(db, user_id=current_user.id)
@@ -522,9 +483,6 @@ def mes_ejecutar(
     db: Session = Depends(get_db),
     current_user: models.User = Depends(require_user),
 ):
-    """
-    Ejecuta reinicio (escritura).
-    """
     if enforce_window and not _is_in_reinicio_window():
         raise HTTPException(status_code=409, detail="Fuera de ventana (días 1..5).")
 
@@ -535,3 +493,73 @@ def mes_ejecutar(
     )
     summary = _build_summary(result["updated"])
     return ReinicioMesExecuteResponse(updated=result["updated"], summary=summary)
+
+
+# =============================================================================
+# Endpoints - CIERRE (preview what-if)
+# =============================================================================
+
+@router.get("/cierre/preview", response_model=CierrePreviewOut)
+def cierre_preview(
+    anio: Optional[int] = Query(None, ge=2000, le=2100),
+    mes: Optional[int] = Query(None, ge=1, le=12),
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(require_user),
+):
+    """
+    Preview "what-if": acumulado del mes indicado hasta ahora (sin insertar cierre).
+    Por defecto: mes actual.
+    """
+    now = datetime.now(timezone.utc)
+    anio_val = anio or now.year
+    mes_val = mes or now.month
+
+    start, end = _month_range_dt(anio_val, mes_val)
+
+    # NOTA: aquí asumimos que tus modelos tienen:
+    # - Ingreso.fecha (datetime/date) + Ingreso.importe
+    # - Gasto.fecha (datetime/date) + Gasto.importe
+    # y que ambos tienen user_id.
+    # Si en Ingreso la fecha es "fecha_inicio" o similar, cámbialo aquí.
+    if not hasattr(models, "Ingreso") or not hasattr(models, "Gasto"):
+        raise HTTPException(status_code=500, detail="Faltan models.Ingreso y/o models.Gasto.")
+
+    Ingreso = models.Ingreso
+    Gasto = models.Gasto
+
+    q_ing = (
+        db.query(func.coalesce(func.sum(Ingreso.importe), 0.0))
+        .filter(Ingreso.user_id == current_user.id)
+        .filter(Ingreso.fecha >= start)
+        .filter(Ingreso.fecha < end)
+    )
+    q_gas = (
+        db.query(func.coalesce(func.sum(Gasto.importe), 0.0))
+        .filter(Gasto.user_id == current_user.id)
+        .filter(Gasto.fecha >= start)
+        .filter(Gasto.fecha < end)
+    )
+
+    ingresos_reales = float(q_ing.scalar() or 0.0)
+    gastos_reales_total = float(q_gas.scalar() or 0.0)
+    resultado_real = ingresos_reales - gastos_reales_total
+
+    return CierrePreviewOut(
+        anio=anio_val,
+        mes=mes_val,
+        as_of=now.isoformat(),
+        ingresos_reales=ingresos_reales,
+        gastos_reales_total=gastos_reales_total,
+        resultado_real=resultado_real,
+        ingresos_esperados=None,
+        gastos_esperados_total=None,
+        resultado_esperado=None,
+        desv_resultado=None,
+        desv_ingresos=None,
+        desv_gastos_total=None,
+        extras={
+            "range_start": start.isoformat(),
+            "range_end": end.isoformat(),
+            "note": "Preview what-if: acumulado del mes hasta la fecha (no inserta cierre).",
+        },
+    )

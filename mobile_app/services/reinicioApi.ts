@@ -1,20 +1,20 @@
 // mobile_app/services/reinicioApi.ts
 // -----------------------------------------------------------------------------
 // Servicio unificado "reinicioApi":
-// - Consolida reinicio de mes, previews y cierre mensual en un único dominio:
-//     /api/v1/reinicio/*
-//
-// NOTA IMPORTANTE:
-// - No metas "export function" dentro de un objeto literal. TS lo rompe.
-// - Para compatibilidad, reexportamos funciones con nombres legacy
-//   (fetchReinicioMesEligibility, fetchPresupuestoCotidianosTotal, postReiniciarMes)
-//   para que pantallas antiguas sigan funcionando mientras migras imports.
+// - Endpoints bajo /api/v1/reinicio
+// - Previews (sin insertar):
+//     * GET /mes/preview
+//     * GET /cierre/preview   -> "si cerráramos ahora el mes M"
+// - Acciones (persistentes):
+//     * POST /mes/ejecutar
+//     * POST /cierre/generar
+//     * POST /generar_y_reiniciar
 // -----------------------------------------------------------------------------
 
 import { api } from './api';
 
 // -----------------------------
-// Tipos (alineados con backend/app/schemas/reinicio.py)
+// Tipos (alineados con backend/schemas/reinicio.py)
 // -----------------------------
 
 export type ReinicioMesEligibility = {
@@ -40,7 +40,7 @@ export type ReinicioMesPreview = {
 export type CierrePreview = {
   anio: number;
   mes: number;
-  as_of: string; // ISO date (YYYY-MM-DD)
+  as_of: string; // ISO date YYYY-MM-DD (o timestamp si lo defines así)
 
   ingresos_reales: number;
   gastos_reales_total: number;
@@ -81,23 +81,19 @@ export type GenerarYReiniciarRequest = {
 };
 
 // -----------------------------
-// Endpoints (nuevo dominio /reinicio)
+// Endpoints
 // -----------------------------
 
 const BASE = '/api/v1/reinicio';
 
 export const reinicioApi = {
-  // ---------------------------------------------------------
-  // MES: eligibility (antes vivía en /api/v1/gastos/reiniciar_mes/eligibility)
-  // ---------------------------------------------------------
+  // --- Eligibility (migrado desde gastos) ---
   async fetchMesEligibility(): Promise<ReinicioMesEligibility> {
     const res = await api.get<ReinicioMesEligibility>(`${BASE}/mes/eligibility`);
     return res.data;
   },
 
-  // ---------------------------------------------------------
-  // MES: preview (sin insertar) -> calcula para mes objetivo
-  // ---------------------------------------------------------
+  // --- Preview mes (sin insertar) ---
   async fetchMesPreview(opts?: { anio?: number; mes?: number }): Promise<ReinicioMesPreview> {
     const params: any = {};
     if (opts?.anio != null) params.anio = opts.anio;
@@ -107,20 +103,15 @@ export const reinicioApi = {
     return res.data;
   },
 
-  // ---------------------------------------------------------
-  // MES: ejecutar reinicio (persistente)
-  // ---------------------------------------------------------
+  // --- Ejecutar reinicio (persistente) ---
   async postReiniciarMes(opts?: { aplicarPromedios?: boolean }): Promise<ReinicioMesResult> {
-    // Recomendación: el backend acepte body JSON (más limpio que querystring)
-    // Body mínimo: { aplicar_promedios: boolean }
     const body = { aplicar_promedios: !!opts?.aplicarPromedios };
     const res = await api.post<ReinicioMesResult>(`${BASE}/mes/ejecutar`, body);
     return res.data;
   },
 
-  // ---------------------------------------------------------
-  // CIERRE: preview (sin insertar) -> lo que se insertaría al cerrar ese mes
-  // ---------------------------------------------------------
+  // --- Preview cierre (MES ACTUAL M) (sin insertar) ---
+  // "Si cerráramos ahora el mes M"
   async fetchCierrePreview(opts?: { anio?: number; mes?: number }): Promise<CierrePreview> {
     const params: any = {};
     if (opts?.anio != null) params.anio = opts.anio;
@@ -130,9 +121,7 @@ export const reinicioApi = {
     return res.data;
   },
 
-  // ---------------------------------------------------------
-  // CIERRE: generar (persistente) -> inserta cierre (según regla M-1 o params)
-  // ---------------------------------------------------------
+  // --- Generar cierre (persistente) ---
   async postGenerarCierre(payload?: GenerarCierreRequest): Promise<any> {
     const body = {
       force: !!payload?.force,
@@ -143,9 +132,7 @@ export const reinicioApi = {
     return res.data;
   },
 
-  // ---------------------------------------------------------
-  // CIERRE + REINICIO: operación combinada (persistente)
-  // ---------------------------------------------------------
+  // --- Generar + reiniciar (persistente) ---
   async postGenerarYReiniciar(payload?: GenerarYReiniciarRequest): Promise<any> {
     const body = {
       cierre: {
@@ -154,40 +141,29 @@ export const reinicioApi = {
         version: payload?.cierre?.version ?? undefined,
       },
       reinicio: {
-        // Si no viene, false
         aplicar_promedios: !!payload?.reinicio?.aplicar_promedios,
       },
     };
-
     const res = await api.post<any>(`${BASE}/generar_y_reiniciar`, body);
     return res.data;
-  },
-
-  // ---------------------------------------------------------
-  // MES: presupuesto total (si mantienes endpoint separado)
-  // Si en backend lo has integrado dentro de /mes/preview, puedes NO usar esto.
-  // ---------------------------------------------------------
-  async fetchPresupuestoCotidianosTotal(): Promise<number> {
-    const res = await api.get<{ total: number }>(`${BASE}/mes/presupuesto_total`);
-    return Number(res.data?.total ?? 0);
   },
 };
 
 // -----------------------------------------------------------------------------
-// Compatibilidad (para no romper pantallas existentes mientras migras imports)
+// Compatibilidad (mientras migras imports del resto de la app)
 // -----------------------------------------------------------------------------
 
-// Legacy: antes se importaba desde gastosApi.ts
 export async function fetchReinicioMesEligibility(): Promise<ReinicioMesEligibility> {
   return reinicioApi.fetchMesEligibility();
 }
 
-// Legacy: antes se importaba desde gastosApi.ts
 export async function postReiniciarMes(opts?: { aplicarPromedios?: boolean }): Promise<ReinicioMesResult> {
   return reinicioApi.postReiniciarMes(opts);
 }
 
-// Legacy: antes se importaba desde gastosApi.ts
+// Mantengo esta firma porque tu UI la estaba usando.
+// Si ya migras a fetchMesPreview, puedes dejar de usarla.
 export async function fetchPresupuestoCotidianosTotal(): Promise<number> {
-  return reinicioApi.fetchPresupuestoCotidianosTotal();
+  const prev = await reinicioApi.fetchMesPreview();
+  return Number(prev?.presupuesto_total ?? 0);
 }

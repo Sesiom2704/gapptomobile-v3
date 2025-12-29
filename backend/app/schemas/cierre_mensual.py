@@ -97,3 +97,4 @@ class CierreMensualKpisResponse(BaseModel):
     count: int = Field(..., ge=0)
     cierres: List[CierreMensualOut]
     detalles: List[CierreMensualDetalleOut]
+
