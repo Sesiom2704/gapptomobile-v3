@@ -24,6 +24,9 @@ import {
 } from '../../types/analytics';
 import { analysisStyles } from '../../components/analysis/analysisStyles';
 
+// ✅ NUEVO: Info (botón i + modal reutilizable)
+import { InfoButton, InfoModal, useInfoModal } from '../../components/ui/InfoModal';
+
 // --------------------
 // Tipos y constantes
 // --------------------
@@ -114,6 +117,9 @@ export const DayToDayAnalysisScreen: React.FC = () => {
   // ✅ AQUÍ va fromHome (una sola vez, route ya existe)
   const fromHome: boolean =
     (route?.params as DayToDayAnalysisRouteParams | undefined)?.fromHome ?? false;
+
+  // ✅ Info modal
+  const info = useInfoModal();
 
   // Vista GENERAL / CATEGORIA
   const [selectedView, setSelectedView] =
@@ -256,6 +262,24 @@ export const DayToDayAnalysisScreen: React.FC = () => {
   }
 
   // --------------------
+  // ✅ Header de sección con InfoButton a la derecha del título (NO en filtros)
+  // --------------------
+  const SectionHeader = ({
+    title,
+    onInfo,
+  }: {
+    title: string;
+    onInfo: () => void;
+  }) => {
+    return (
+      <View style={styles.sectionHeaderRow}>
+        <Text style={panelStyles.sectionTitle}>{title}</Text>
+        <InfoButton align="title" onPress={onInfo} />
+      </View>
+    );
+  };
+
+  // --------------------
   // Render
   // --------------------
 
@@ -277,7 +301,7 @@ export const DayToDayAnalysisScreen: React.FC = () => {
 
       <View style={panelStyles.screen}>
         <ScrollView contentContainerStyle={panelStyles.scrollContent}>
-          {/* FILTROS (DESPLEGABLE) */}
+          {/* FILTROS (DESPLEGABLE) - ✅ SIN BOTÓN INFO AQUÍ */}
           <View style={panelStyles.section}>
             <TouchableOpacity
               style={analysisStyles.filterToggle}
@@ -393,7 +417,15 @@ export const DayToDayAnalysisScreen: React.FC = () => {
           {selectedView === 'GENERAL' && data && (
             <>
               <View style={panelStyles.section}>
-                <Text style={panelStyles.sectionTitle}>Hoy</Text>
+                <SectionHeader
+                  title="Hoy"
+                  onInfo={() =>
+                    info.open(
+                      'Hoy',
+                      'Resumen del gasto de hoy (cotidianos) según el filtro de quién paga. Incluye movimientos, ticket medio y comparativa vs ayer.'
+                    )
+                  }
+                />
 
                 <View style={panelStyles.card}>
                   <View style={styles.cardHeaderRow}>
@@ -451,7 +483,15 @@ export const DayToDayAnalysisScreen: React.FC = () => {
               </View>
 
               <View style={panelStyles.section}>
-                <Text style={panelStyles.sectionTitle}>Semana actual</Text>
+                <SectionHeader
+                  title="Semana actual"
+                  onInfo={() =>
+                    info.open(
+                      'Semana actual',
+                      'Gasto acumulado de la semana, límite semanal configurado y proyección al final de semana según el ritmo actual.'
+                    )
+                  }
+                />
 
                 <View style={panelStyles.card}>
                   <View style={styles.weekRowTop}>
@@ -507,13 +547,21 @@ export const DayToDayAnalysisScreen: React.FC = () => {
           {/* MES EN CURSO */}
           {data && (
             <View style={panelStyles.section}>
-              <Text style={panelStyles.sectionTitle}>
-                {selectedView === 'GENERAL'
-                  ? 'Mes en curso'
-                  : effectiveSelectedCategory
-                  ? `Mes en curso · ${effectiveSelectedCategory.label}`
-                  : 'Mes en curso'}
-              </Text>
+              <SectionHeader
+                title={
+                  selectedView === 'GENERAL'
+                    ? 'Mes en curso'
+                    : effectiveSelectedCategory
+                    ? `Mes en curso · ${effectiveSelectedCategory.label}`
+                    : 'Mes en curso'
+                }
+                onInfo={() =>
+                  info.open(
+                    'Mes en curso',
+                    'Presupuesto mensual estimado y gasto acumulado del mes hasta hoy. La barra muestra el porcentaje usado.'
+                  )
+                }
+              />
 
               <View style={panelStyles.card}>
                 <View style={styles.monthRow}>
@@ -563,9 +611,15 @@ export const DayToDayAnalysisScreen: React.FC = () => {
           {/* DISTRIBUCIÓN POR CATEGORÍA */}
           {data && (
             <View style={panelStyles.section}>
-              <Text style={panelStyles.sectionTitle}>
-                Distribución por categoría (mes)
-              </Text>
+              <SectionHeader
+                title="Distribución por categoría (mes)"
+                onInfo={() =>
+                  info.open(
+                    'Distribución por categoría',
+                    'Listado de categorías (contenedores) del mes con importe total y porcentaje sobre el gasto del mes. Al tocar una, se carga su detalle.'
+                  )
+                }
+              />
 
               <View style={panelStyles.card}>
                 <Text style={analysisStyles.cardSubtitle}>
@@ -641,9 +695,15 @@ export const DayToDayAnalysisScreen: React.FC = () => {
           {/* DETALLE CATEGORÍA + SUBGASTOS */}
           {data && effectiveSelectedCategory && (
             <View style={panelStyles.section}>
-              <Text style={panelStyles.sectionTitle}>
-                Detalle categoría: {effectiveSelectedCategory.label}
-              </Text>
+              <SectionHeader
+                title={`Detalle categoría: ${effectiveSelectedCategory.label}`}
+                onInfo={() =>
+                  info.open(
+                    'Detalle de categoría',
+                    'KPIs del contenedor seleccionado (importe, tickets, ticket medio, peso) y variaciones vs mes anterior. Puedes aplicar un subgasto para refinar el análisis.'
+                  )
+                }
+              />
 
               <View style={panelStyles.card}>
                 {subtipoOptions.length > 0 && (
@@ -735,7 +795,15 @@ export const DayToDayAnalysisScreen: React.FC = () => {
           {/* PROVEEDORES DESTACADOS */}
           {data && (
             <View style={panelStyles.section}>
-              <Text style={panelStyles.sectionTitle}>Proveedores destacados</Text>
+              <SectionHeader
+                title="Proveedores destacados"
+                onInfo={() =>
+                  info.open(
+                    'Proveedores destacados',
+                    'Top proveedores del contenedor seleccionado (según quién paga). Al tocar un proveedor se abre GastosList en modo cotidianos filtrando por ese nombre.'
+                  )
+                }
+              />
 
               <View style={panelStyles.card}>
                 {selectedProveedores.map((p, idx) => (
@@ -810,7 +878,15 @@ export const DayToDayAnalysisScreen: React.FC = () => {
           {selectedView === 'GENERAL' && data && (
             <>
               <View style={panelStyles.section}>
-                <Text style={panelStyles.sectionTitle}>Tendencia últimos 7 días</Text>
+                <SectionHeader
+                  title="Tendencia últimos 7 días"
+                  onInfo={() =>
+                    info.open(
+                      'Tendencia últimos 7 días',
+                      'Evolución del gasto diario (cotidianos) en los últimos 7 días. Las barras se escalan al máximo de la semana.'
+                    )
+                  }
+                />
 
                 <View style={panelStyles.card}>
                   <Text style={analysisStyles.cardSubtitle}>
@@ -838,7 +914,15 @@ export const DayToDayAnalysisScreen: React.FC = () => {
               </View>
 
               <View style={[panelStyles.section, { marginBottom: 24 }]}>
-                <Text style={panelStyles.sectionTitle}>Alertas e insights</Text>
+                <SectionHeader
+                  title="Alertas e insights"
+                  onInfo={() =>
+                    info.open(
+                      'Alertas e insights',
+                      'Mensajes automáticos generados por el sistema con patrones detectados en tus gastos cotidianos para el filtro actual.'
+                    )
+                  }
+                />
 
                 <View style={panelStyles.card}>
                   {alertas.map((texto, idx) => (
@@ -864,6 +948,14 @@ export const DayToDayAnalysisScreen: React.FC = () => {
             </>
           )}
         </ScrollView>
+
+        {/* ✅ Modal Info (uno global para toda la pantalla) */}
+        <InfoModal
+          visible={info.visible}
+          title={info.title}
+          text={info.text}
+          onClose={info.close}
+        />
       </View>
     </>
   );
@@ -876,6 +968,13 @@ export default DayToDayAnalysisScreen;
 // --------------------
 
 const styles = StyleSheet.create({
+  // ✅ NUEVO: Header de sección (título + info a la derecha)
+  sectionHeaderRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
+
   cardHeaderRow: {
     flexDirection: 'row',
     justifyContent: 'space-between',

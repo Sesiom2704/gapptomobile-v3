@@ -266,21 +266,8 @@ const ExtraordinariosScreen: React.FC = () => {
                 <Text style={styles.errorText}>{error}</Text>
               </View>
             ) : null}
-
+            
             <View style={panelStyles.section}>
-              <Text style={panelStyles.sectionTitle}>
-                Gastos extraordinarios
-              </Text>
-              {gastos.length === 0 ? (
-                <Text style={styles.emptyText}>
-                  No hay gastos extraordinarios en este mes.
-                </Text>
-              ) : (
-                gastos.map(renderGastoCard)
-              )}
-            </View>
-
-            <View style={[panelStyles.section, { marginBottom: 24 }]}>
               <Text style={panelStyles.sectionTitle}>
                 Ingresos extraordinarios
               </Text>
@@ -290,6 +277,19 @@ const ExtraordinariosScreen: React.FC = () => {
                 </Text>
               ) : (
                 ingresos.map(renderIngresoCard)
+              )}
+            </View>
+
+            <View style={[panelStyles.section, { marginBottom: 24 }]}>
+              <Text style={panelStyles.sectionTitle}>
+                Gastos extraordinarios
+              </Text>
+              {gastos.length === 0 ? (
+                <Text style={styles.emptyText}>
+                  No hay gastos extraordinarios en este mes.
+                </Text>
+              ) : (
+                gastos.map(renderGastoCard)
               )}
             </View>
           </ScrollView>

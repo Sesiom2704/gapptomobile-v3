@@ -16,9 +16,12 @@
  * - Gastos pendientes: se obtienen con un useGastos('pendientes') adicional (no afecta al listado actual).
  * - Ingresos pendientes: se consulta /api/v1/ingresos/pendientes (misma ruta ya usada en IngresoListScreen).
  * - El botón navega a MonthTab -> ReinciarCierreScreen (tu ruta nueva).
+ *
+ * EXTRA (para navegación desde DayToDayAnalysisScreen sin perder UX):
+ * - Soporta params.initialSearchText para precargar el buscador.
  */
 
-import React, { useMemo, useState, useEffect, useCallback } from 'react';
+import React, { useMemo, useState, useEffect, useCallback, useRef } from 'react';
 import {
   View,
   Text,
@@ -85,10 +88,12 @@ type FiltroTipoGasto = 'todos' | string;
 // filtro de quién paga en cotidianos
 type FiltroQuienPaga = 'todos' | 'yo' | 'otro';
 
-// ✅ Params para “volver” perfecto
+// ✅ Params para “volver” perfecto + precarga de búsqueda
 type RouteParams = {
   fromHome?: boolean;
+  fromDiaADia?: boolean;
   initialFiltro?: 'pendientes' | 'todos' | 'cotidiano';
+  initialSearchText?: string;
   returnToTab?: 'HomeTab' | 'DayToDayTab' | 'MonthTab' | 'PatrimonyTab';
   returnToScreen?: string;
 };
@@ -184,6 +189,8 @@ export const GastosListScreen: React.FC<{ navigation: any; route: any }> = ({
 
   const [buscadorAbierto, setBuscadorAbierto] = useState(false);
   const [searchText, setSearchText] = useState('');
+  const appliedInitialSearchRef = useRef(false);
+
   const [filtroActivo, setFiltroActivo] = useState<ActivoFiltro>('todos');
   const [filtroKpi, setFiltroKpi] = useState<KpiFiltro>('todos');
   const [filtroPagado, setFiltroPagado] = useState<FiltroPagado>('todos');
@@ -309,16 +316,26 @@ export const GastosListScreen: React.FC<{ navigation: any; route: any }> = ({
 
   const isPendientesGestionables = filtro === 'pendientes';
 
-  // ======= Plegar buscador al salir de la pantalla =======
+  // ======= Plegar buscador al salir de la pantalla + checks =======
   useFocusEffect(
     useCallback(() => {
       // Al entrar: refrescamos check de ingresos pendientes (y dejamos gastos pendientes al hook).
       void fetchIngresosPendientesCount();
 
+      // Precargar búsqueda si viene desde otra pantalla (ej. DayToDayAnalysis)
+      if (!appliedInitialSearchRef.current) {
+        const initialSearch = (params.initialSearchText ?? '').trim();
+        if (initialSearch) {
+          setSearchText(initialSearch);
+          setBuscadorAbierto(true);
+        }
+        appliedInitialSearchRef.current = true;
+      }
+
       return () => {
         setBuscadorAbierto(false);
       };
-    }, [fetchIngresosPendientesCount])
+    }, [fetchIngresosPendientesCount, params.initialSearchText])
   );
 
   // ======= Cargar tipos de gasto y proveedores =======

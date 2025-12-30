@@ -1,3 +1,20 @@
+// screens/balance/BalanceScreen.tsx
+/**
+ * RESPONSABILIDAD (sin romper nada):
+ * - Mostrar balance del mes, saldos por cuentas, pendientes, últimos movimientos y KPIs de liquidez.
+ * - Permitir "Nuevo movimiento entre cuentas" (panel plegable).
+ * - Permitir "Info/Ajuste liquidez" por cuenta (modal).
+ *
+ * NUEVO (requisito):
+ * - Añadir botón de información (InfoButton) al COMIENZO (cabecera) de cada tarjeta/sección,
+ *   igual que en Resumen: el icono "i" abre InfoModal con contexto.
+ *
+ * NOTAS:
+ * - No se modifica la navegación existente.
+ * - No se altera la lógica de negocio; solo UI + estado del modal info.
+ */
+
+// mobile_app/screens/mes/BalanceScreen.tsx
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   View,
@@ -19,19 +36,23 @@ import { panelStyles } from '../../components/panels/panelStyles';
 import { colors } from '../../theme/colors';
 import { AccountPill } from '../../components/ui/AccountPill';
 
+import { EuroformatEuro } from '../../utils/format';
+
 import {
   fetchBalanceMes,
-  BalanceMesResponse,
-  SaldoCuentaItem,
+  type BalanceMesResponse,
+  type SaldoCuentaItem,
 } from '../../services/balanceApi';
+
 import {
   crearMovimientoCuenta,
   fetchMovimientosCuenta,
-  MovimientoCuentaListItem,
   ajustarLiquidezCuenta,
+  type MovimientoCuentaListItem,
 } from '../../services/movimientosCuentaApi';
 
-import { EuroformatEuro } from '../../utils/format';
+// ✅ Info modal reutilizable
+import { InfoButton, InfoModal, useInfoModal } from '../../components/ui/InfoModal';
 
 const todayISO = (): string => {
   const d = new Date();
@@ -57,9 +78,7 @@ const BalanceScreen: React.FC = () => {
       navigation.navigate(returnToTab, { screen: returnToScreen });
       return;
     }
-    if (navigation.canGoBack()) {
-      navigation.goBack();
-    }
+    if (navigation.canGoBack()) navigation.goBack();
   }, [navigation, returnToTab, returnToScreen]);
 
   const now = useMemo(() => new Date(), []);
@@ -67,10 +86,11 @@ const BalanceScreen: React.FC = () => {
   const [month] = useState(now.getMonth() + 1);
 
   const [balance, setBalance] = useState<BalanceMesResponse | null>(null);
-  const [movimientos, setMovimientos] = useState<MovimientoCuentaListItem[]>(
-    []
-  );
+  const [movimientos, setMovimientos] = useState<MovimientoCuentaListItem[]>([]);
   const [refreshing, setRefreshing] = useState(false);
+
+  // ✅ Info modal (único por pantalla)
+  const info = useInfoModal();
 
   // -------------------------
   // Estado "Nuevo movimiento"
@@ -79,16 +99,13 @@ const BalanceScreen: React.FC = () => {
   const [origenId, setOrigenId] = useState<string | null>(null);
   const [destinoId, setDestinoId] = useState<string | null>(null);
   const [importeMovimiento, setImporteMovimiento] = useState<string>('');
-  const [comentariosMovimiento, setComentariosMovimiento] =
-    useState<string>('');
+  const [comentariosMovimiento, setComentariosMovimiento] = useState<string>('');
 
   // -------------------------
   // Estado "Info / Ajuste liquidez"
   // -------------------------
   const [showAdjustBox, setShowAdjustBox] = useState(false);
-  const [cuentaSeleccionadaId, setCuentaSeleccionadaId] = useState<
-    string | null
-  >(null);
+  const [cuentaSeleccionadaId, setCuentaSeleccionadaId] = useState<string | null>(null);
   const [showNuevoSaldoInput, setShowNuevoSaldoInput] = useState(false);
   const [nuevoSaldo, setNuevoSaldo] = useState<string>('');
 
@@ -114,14 +131,8 @@ const BalanceScreen: React.FC = () => {
   const resumenMes = useMemo(() => {
     if (!balance) return null;
 
-    const entradasTotales = cuentas.reduce(
-      (acc, c) => acc + (c.entradas ?? 0),
-      0
-    );
-    const salidasTotales = cuentas.reduce(
-      (acc, c) => acc + (c.salidas ?? 0),
-      0
-    );
+    const entradasTotales = cuentas.reduce((acc, c) => acc + (c.entradas ?? 0), 0);
+    const salidasTotales = cuentas.reduce((acc, c) => acc + (c.salidas ?? 0), 0);
     const resultadoMes = entradasTotales - salidasTotales;
 
     return {
@@ -137,32 +148,20 @@ const BalanceScreen: React.FC = () => {
 
   const ingresosPendientesTotal = balance?.ingresos_pendientes_total ?? 0;
   const gastosPendientesTotal = balance?.gastos_pendientes_total ?? 0;
-  const impactoNetoPendiente =
-    ingresosPendientesTotal - gastosPendientesTotal;
+  const impactoNetoPendiente = ingresosPendientesTotal - gastosPendientesTotal;
 
-  // Indicadores simples de liquidez (derivados de las cuentas)
   const indicadoresLiquidez = useMemo(() => {
     if (!cuentas.length) {
-      return {
-        cuentasNegativas: 0,
-        cuentasConPocoSaldo: 0,
-        liquidezDisponible: 0,
-      };
+      return { cuentasNegativas: 0, cuentasConPocoSaldo: 0, liquidezDisponible: 0 };
     }
 
     const cuentasNegativas = cuentas.filter((c) => c.fin < 0).length;
-    const cuentasConPocoSaldo = cuentas.filter(
-      (c) => c.fin >= 0 && c.fin < 150
-    ).length; // < 150 €
+    const cuentasConPocoSaldo = cuentas.filter((c) => c.fin >= 0 && c.fin < 150).length;
     const liquidezDisponible = cuentas
       .filter((c) => c.fin > 0)
       .reduce((acc, c) => acc + c.fin, 0);
 
-    return {
-      cuentasNegativas,
-      cuentasConPocoSaldo,
-      liquidezDisponible,
-    };
+    return { cuentasNegativas, cuentasConPocoSaldo, liquidezDisponible };
   }, [cuentas]);
 
   // -------------------------
@@ -180,10 +179,7 @@ const BalanceScreen: React.FC = () => {
       setMovimientos(movimientosResp);
     } catch (error) {
       console.error('[BalanceScreen] Error al cargar datos', error);
-      Alert.alert(
-        'Error',
-        'No se han podido cargar los datos del balance. Inténtalo de nuevo.'
-      );
+      Alert.alert('Error', 'No se han podido cargar los datos del balance. Inténtalo de nuevo.');
     } finally {
       setRefreshing(false);
     }
@@ -201,11 +197,7 @@ const BalanceScreen: React.FC = () => {
   // Navegación a Movimientos de cuentas
   // -------------------------
   const handleVerMovimientos = (cuentaId?: string | null) => {
-    navigation.navigate('MovimientosCuentasScreen', {
-      year,
-      month,
-      cuentaId: cuentaId ?? null,
-    });
+    navigation.navigate('MovimientosCuentasScreen', { year, month, cuentaId: cuentaId ?? null });
   };
 
   // -------------------------
@@ -213,6 +205,7 @@ const BalanceScreen: React.FC = () => {
   // -------------------------
   const handleOpenTransfer = () => {
     setShowTransferBox((prev) => !prev);
+
     // Al abrir nuevo movimiento, ocultamos el panel de ajuste
     if (!showTransferBox) {
       setShowAdjustBox(false);
@@ -232,17 +225,11 @@ const BalanceScreen: React.FC = () => {
 
   const handleSaveTransfer = async () => {
     if (!origenId || !destinoId) {
-      Alert.alert(
-        'Datos incompletos',
-        'Debes seleccionar cuenta de origen y destino.'
-      );
+      Alert.alert('Datos incompletos', 'Debes seleccionar cuenta de origen y destino.');
       return;
     }
     if (origenId === destinoId) {
-      Alert.alert(
-        'Movimiento inválido',
-        'La cuenta de origen y la de destino no pueden ser la misma.'
-      );
+      Alert.alert('Movimiento inválido', 'La cuenta de origen y la de destino no pueden ser la misma.');
       return;
     }
     if (!importeMovimiento.trim()) {
@@ -266,10 +253,7 @@ const BalanceScreen: React.FC = () => {
       await loadData();
     } catch (error) {
       console.error('[BalanceScreen] Error al guardar movimiento', error);
-      Alert.alert(
-        'Error',
-        'No se ha podido guardar el movimiento. Revisa los datos e inténtalo de nuevo.'
-      );
+      Alert.alert('Error', 'No se ha podido guardar el movimiento. Revisa los datos e inténtalo de nuevo.');
     }
   };
 
@@ -313,18 +297,12 @@ const BalanceScreen: React.FC = () => {
 
       Alert.alert('Saldo actualizado', 'Liquidez ajustada correctamente.');
       handleCancelAdjust();
-      await loadData(); // recarga balance + últimos movimientos
+      await loadData();
     } catch (error) {
       console.error('[BalanceScreen] Error al ajustar liquidez', error);
-      Alert.alert(
-        'Error',
-        'No se ha podido ajustar la liquidez. Revisa los datos e inténtalo de nuevo.'
-      );
+      Alert.alert('Error', 'No se ha podido ajustar la liquidez. Revisa los datos e inténtalo de nuevo.');
     }
   };
-
-  const tituloMes = `${String(month).padStart(2, '0')}/${year}`;
-  const mensajeBalance = 'Balance de cuentas y liquidez';
 
   // -------------------------
   // Render
@@ -335,7 +313,7 @@ const BalanceScreen: React.FC = () => {
         title="Balance del mes"
         subtitleYear={year}
         subtitleMonth={month}
-        subtitleMessage={mensajeBalance}
+        subtitleMessage="Balance de cuentas y liquidez"
         showBack
         onBackPress={handleBack}
         onAddPress={handleOpenTransfer}
@@ -344,28 +322,31 @@ const BalanceScreen: React.FC = () => {
       <View style={panelStyles.screen}>
         <ScrollView
           contentContainerStyle={panelStyles.scrollContent}
-          refreshControl={
-            <RefreshControl refreshing={refreshing} onRefresh={handleRefresh} />
-          }
+          refreshControl={<RefreshControl refreshing={refreshing} onRefresh={handleRefresh} />}
         >
-          {/* 🧾 Cuadro "Nuevo movimiento entre cuentas" */}
+          {/* 🧾 Nuevo movimiento entre cuentas */}
           {showTransferBox && (
             <View style={panelStyles.section}>
               <View style={styles.sectionTitleRow}>
-                <Text style={panelStyles.sectionTitle}>
-                  Nuevo movimiento entre cuentas
-                </Text>
+                <View style={styles.titleWithInfo}>
+                  <Text style={panelStyles.sectionTitle}>Nuevo movimiento entre cuentas</Text>
+                  <InfoButton
+                    align="title"
+                    onPress={() =>
+                      info.open(
+                        'Nuevo movimiento entre cuentas',
+                        'Registra un traspaso entre dos cuentas (origen y destino). El movimiento se guarda dentro del mes.'
+                      )
+                    }
+                  />
+                </View>
 
                 <TouchableOpacity
                   style={styles.sectionTitleCloseButton}
                   onPress={handleCancelTransfer}
                   hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
                 >
-                  <Ionicons
-                    name="close"
-                    size={20}
-                    color={colors.textSecondary}
-                  />
+                  <Ionicons name="close" size={20} color={colors.textSecondary} />
                 </TouchableOpacity>
               </View>
 
@@ -378,13 +359,7 @@ const BalanceScreen: React.FC = () => {
                       const bloqueada = destinoId === cta.cuenta_id;
 
                       return (
-                        <View
-                          key={cta.cuenta_id}
-                          style={[
-                            styles.accountPillWrapper,
-                            bloqueada && { opacity: 0.3 },
-                          ]}
-                        >
+                        <View key={cta.cuenta_id} style={[styles.accountPillWrapper, bloqueada && { opacity: 0.3 }]}>
                           <AccountPill
                             label={cta.anagrama ?? cta.cuenta_id}
                             subLabel={EuroformatEuro(cta.fin, 'normal')}
@@ -409,13 +384,7 @@ const BalanceScreen: React.FC = () => {
                       const bloqueada = origenId === cta.cuenta_id;
 
                       return (
-                        <View
-                          key={cta.cuenta_id}
-                          style={[
-                            styles.accountPillWrapper,
-                            bloqueada && { opacity: 0.3 },
-                          ]}
-                        >
+                        <View key={cta.cuenta_id} style={[styles.accountPillWrapper, bloqueada && { opacity: 0.3 }]}>
                           <AccountPill
                             label={cta.anagrama ?? cta.cuenta_id}
                             subLabel={EuroformatEuro(cta.fin, 'normal')}
@@ -448,10 +417,7 @@ const BalanceScreen: React.FC = () => {
                 <View style={styles.transferField}>
                   <Text style={styles.transferLabel}>Comentarios (opcional)</Text>
                   <TextInput
-                    style={[
-                      styles.transferInput,
-                      styles.transferInputMultiline,
-                    ]}
+                    style={[styles.transferInput, styles.transferInputMultiline]}
                     placeholder="Ej. Traspaso mensual al ahorro"
                     value={comentariosMovimiento}
                     onChangeText={setComentariosMovimiento}
@@ -459,126 +425,75 @@ const BalanceScreen: React.FC = () => {
                   />
                 </View>
 
-                {/* Botón Guardar */}
+                {/* Guardar */}
                 <View style={styles.transferButtonsRow}>
-                  <TouchableOpacity
-                    style={styles.transferSaveButton}
-                    onPress={handleSaveTransfer}
-                  >
-                    <Ionicons
-                      name="swap-horizontal-outline"
-                      size={16}
-                      color="#fff"
-                      style={{ marginRight: 6 }}
-                    />
-                    <Text style={styles.transferSaveButtonText}>
-                      Guardar movimiento
-                    </Text>
+                  <TouchableOpacity style={styles.transferSaveButton} onPress={handleSaveTransfer}>
+                    <Ionicons name="swap-horizontal-outline" size={16} color="#fff" style={{ marginRight: 6 }} />
+                    <Text style={styles.transferSaveButtonText}>Guardar movimiento</Text>
                   </TouchableOpacity>
                 </View>
               </View>
             </View>
           )}
 
-          {/* 🔹 RESUMEN GENERAL DEL MES */}
+          {/* 🔹 Resumen del mes */}
           <View style={panelStyles.section}>
-            <Text style={panelStyles.sectionTitle}>Resumen del mes</Text>
+            <View style={styles.sectionHeaderRow}>
+              <Text style={panelStyles.sectionTitle}>Resumen del mes</Text>
+              <InfoButton
+                align="title"
+                onPress={() =>
+                  info.open(
+                    'Resumen del mes',
+                    'Liquidez total del mes: saldo actual, inicio, previsión fin de mes y ahorro. A la derecha: entradas, salidas y resultado neto.'
+                  )
+                }
+              />
+            </View>
 
             <View style={panelStyles.card}>
               <View style={styles.resumenRowTop}>
                 <View style={styles.resumenLeft}>
                   <Text style={panelStyles.cardTitle}>Liquidez actual</Text>
                   <Text style={styles.liquidezValue}>
-                    {resumenMes
-                      ? EuroformatEuro(resumenMes.liquidezActual, 'normal')
-                      : '–'}
+                    {resumenMes ? EuroformatEuro(resumenMes.liquidezActual, 'normal') : '–'}
                   </Text>
 
-                  <Text
-                    style={[
-                      panelStyles.cardSubtitle,
-                      styles.resumenSubtitleCompact,
-                    ]}
-                  >
-                    Inicio de mes:{' '}
-                    {resumenMes
-                      ? EuroformatEuro(resumenMes.liquidezInicio, 'normal')
-                      : '–'}
+                  <Text style={[panelStyles.cardSubtitle, styles.resumenSubtitleCompact]}>
+                    Inicio de mes: {resumenMes ? EuroformatEuro(resumenMes.liquidezInicio, 'normal') : '–'}
                   </Text>
-
-                  <Text
-                    style={[
-                      panelStyles.cardSubtitle,
-                      styles.resumenSubtitleCompact,
-                    ]}
-                  >
-                    Prev. fin de mes:{' '}
-                    {resumenMes
-                      ? EuroformatEuro(resumenMes.liquidezPrevista, 'normal')
-                      : '–'}
+                  <Text style={[panelStyles.cardSubtitle, styles.resumenSubtitleCompact]}>
+                    Prev. fin de mes: {resumenMes ? EuroformatEuro(resumenMes.liquidezPrevista, 'normal') : '–'}
                   </Text>
-
-                  <Text
-                    style={[
-                      panelStyles.cardSubtitle,
-                      styles.resumenSubtitleCompact,
-                    ]}
-                  >
-                    Ahorrado:{' '}
-                    {resumenMes
-                      ? EuroformatEuro(resumenMes.ahorroMes, 'plus')
-                      : '–'}
+                  <Text style={[panelStyles.cardSubtitle, styles.resumenSubtitleCompact]}>
+                    Ahorrado: {resumenMes ? EuroformatEuro(resumenMes.ahorroMes, 'plus') : '–'}
                   </Text>
                 </View>
 
                 <View style={styles.resumenRight}>
-                  {/* Entradas */}
                   <View style={styles.chipRow}>
                     <View style={styles.chipPositive}>
-                      <Ionicons
-                        name="arrow-down-circle-outline"
-                        size={14}
-                        color={colors.success}
-                      />
+                      <Ionicons name="arrow-down-circle-outline" size={14} color={colors.success} />
                       <Text style={styles.chipPositiveText}>
-                        Entradas{' '}
-                        {resumenMes
-                          ? EuroformatEuro(resumenMes.entradas, 'plus')
-                          : '–'}
+                        Entradas {resumenMes ? EuroformatEuro(resumenMes.entradas, 'plus') : '–'}
                       </Text>
                     </View>
                   </View>
 
-                  {/* Salidas */}
                   <View style={styles.chipRow}>
                     <View style={styles.chipNegative}>
-                      <Ionicons
-                        name="arrow-up-circle-outline"
-                        size={14}
-                        color={colors.danger}
-                      />
+                      <Ionicons name="arrow-up-circle-outline" size={14} color={colors.danger} />
                       <Text style={styles.chipNegativeText}>
-                        Salidas{' '}
-                        {resumenMes
-                          ? EuroformatEuro(resumenMes.salidas, 'minus')
-                          : '–'}
+                        Salidas {resumenMes ? EuroformatEuro(resumenMes.salidas, 'minus') : '–'}
                       </Text>
                     </View>
                   </View>
 
-                  {/* Resultado */}
                   <View style={styles.chipRow}>
                     <View style={styles.chipNeutral}>
-                      <Ionicons
-                        name="speedometer-outline"
-                        size={14}
-                        color={colors.primary}
-                      />
+                      <Ionicons name="speedometer-outline" size={14} color={colors.primary} />
                       <Text style={styles.chipNeutralText}>
-                        Resultado{' '}
-                        {resumenMes
-                          ? EuroformatEuro(resumenMes.resultadoMes, 'signed')
-                          : '–'}
+                        Resultado {resumenMes ? EuroformatEuro(resumenMes.resultadoMes, 'signed') : '–'}
                       </Text>
                     </View>
                   </View>
@@ -587,21 +502,24 @@ const BalanceScreen: React.FC = () => {
             </View>
           </View>
 
-          {/* 🔹 BALANCE POR CUENTAS */}
+          {/* 🔹 Saldo por cuentas */}
           <View style={panelStyles.section}>
-            <Text style={panelStyles.sectionTitle}>Saldo por cuentas</Text>
+            <View style={styles.sectionHeaderRow}>
+              <Text style={panelStyles.sectionTitle}>Saldo por cuentas</Text>
+              <InfoButton
+                align="title"
+                onPress={() =>
+                  info.open(
+                    'Saldo por cuentas',
+                    'Desglose por cuenta: inicio, entradas, salidas y saldo actual. Toca una fila para ver el detalle y ajustar liquidez si lo necesitas.'
+                  )
+                }
+              />
+            </View>
 
             <View style={panelStyles.card}>
               <View style={styles.tableHeaderRow}>
-                <Text
-                  style={[
-                    styles.tableHeaderText,
-                    styles.tableHeaderCuenta,
-                    { flex: 2 },
-                  ]}
-                >
-                  Cuenta
-                </Text>
+                <Text style={[styles.tableHeaderText, styles.tableHeaderCuenta, { flex: 2 }]}>Cuenta</Text>
                 <Text style={styles.tableHeaderText}>Inicio</Text>
                 <Text style={styles.tableHeaderText}>Entradas</Text>
                 <Text style={styles.tableHeaderText}>Salidas</Text>
@@ -615,30 +533,31 @@ const BalanceScreen: React.FC = () => {
                   activeOpacity={0.7}
                 >
                   <View style={styles.tableRow}>
-                    <Text style={[styles.tableCellCuenta, { flex: 2 }]}>
-                      {c.anagrama ?? c.cuenta_id}
-                    </Text>
-                    <Text style={styles.tableCell}>
-                      {EuroformatEuro(c.inicio, 'normal')}
-                    </Text>
-                    <Text style={styles.tableCell}>
-                      {EuroformatEuro(c.entradas, 'normal')}
-                    </Text>
-                    <Text style={styles.tableCell}>
-                      {EuroformatEuro(c.salidas, 'normal')}
-                    </Text>
-                    <Text style={styles.tableCell}>
-                      {EuroformatEuro(c.fin, 'normal')}
-                    </Text>
+                    <Text style={[styles.tableCellCuenta, { flex: 2 }]}>{c.anagrama ?? c.cuenta_id}</Text>
+                    <Text style={styles.tableCell}>{EuroformatEuro(c.inicio, 'normal')}</Text>
+                    <Text style={styles.tableCell}>{EuroformatEuro(c.entradas, 'normal')}</Text>
+                    <Text style={styles.tableCell}>{EuroformatEuro(c.salidas, 'normal')}</Text>
+                    <Text style={styles.tableCell}>{EuroformatEuro(c.fin, 'normal')}</Text>
                   </View>
                 </TouchableOpacity>
               ))}
             </View>
           </View>
 
-          {/* 🔹 PENDIENTE DE COBRO / PAGO */}
+          {/* 🔹 Pendiente de cobro/pago */}
           <View style={panelStyles.section}>
-            <Text style={panelStyles.sectionTitle}>Pendiente de cobro/pago</Text>
+            <View style={styles.sectionHeaderRow}>
+              <Text style={panelStyles.sectionTitle}>Pendiente de cobro/pago</Text>
+              <InfoButton
+                align="title"
+                onPress={() =>
+                  info.open(
+                    'Pendiente de cobro/pago',
+                    'Ingresos pendientes: cobros no recibidos. Gastos pendientes: pagos aún no cargados. Impacto neto: efecto estimado si se cobrara y pagara todo.'
+                  )
+                }
+              />
+            </View>
 
             <View style={panelStyles.card}>
               <View style={styles.pendientesRow}>
@@ -647,9 +566,7 @@ const BalanceScreen: React.FC = () => {
                   <Text style={styles.pendientePositiveValue}>
                     {EuroformatEuro(ingresosPendientesTotal, 'plus')}
                   </Text>
-                  <Text style={panelStyles.cardSubtitle}>
-                    Nóminas, alquileres y otros cobros no recibidos.
-                  </Text>
+                  <Text style={panelStyles.cardSubtitle}>Nóminas, alquileres y otros cobros no recibidos.</Text>
                 </View>
 
                 <View style={styles.pendienteCol}>
@@ -657,37 +574,39 @@ const BalanceScreen: React.FC = () => {
                   <Text style={styles.pendienteNegativeValue}>
                     {EuroformatEuro(gastosPendientesTotal, 'minus')}
                   </Text>
-                  <Text style={panelStyles.cardSubtitle}>
-                    Recibos, préstamos y cargos aún no cobrados.
-                  </Text>
+                  <Text style={panelStyles.cardSubtitle}>Recibos, préstamos y cargos aún no cobrados.</Text>
                 </View>
               </View>
 
               <View style={styles.pendienteResumenRow}>
                 <Text style={styles.pendienteResumenLabel}>Impacto neto</Text>
                 <Text style={styles.pendienteResumenValue}>
-                  {EuroformatEuro(impactoNetoPendiente, 'signed')} (si se cobra
-                  todo y se pagan todos)
+                  {EuroformatEuro(impactoNetoPendiente, 'signed')} (si se cobra todo y se pagan todos)
                 </Text>
               </View>
             </View>
           </View>
 
-          {/* 🔹 ÚLTIMOS MOVIMIENTOS ENTRE CUENTAS */}
+          {/* 🔹 Últimos movimientos */}
           <View style={panelStyles.section}>
-            <Text style={panelStyles.sectionTitle}>
-              Últimos movimientos de cuentas
-            </Text>
+            <View style={styles.sectionHeaderRow}>
+              <Text style={panelStyles.sectionTitle}>Últimos movimientos de cuentas</Text>
+              <InfoButton
+                align="title"
+                onPress={() =>
+                  info.open(
+                    'Últimos movimientos de cuentas',
+                    'Últimos traspasos registrados entre cuentas durante el mes. Puedes abrir el listado completo desde el botón inferior.'
+                  )
+                }
+              />
+            </View>
 
             <View style={panelStyles.card}>
               {movimientos.map((mov) => (
                 <View key={mov.id} style={styles.movRow}>
                   <View style={styles.movIconCircle}>
-                    <Ionicons
-                      name="swap-horizontal-outline"
-                      size={16}
-                      color={colors.primary}
-                    />
+                    <Ionicons name="swap-horizontal-outline" size={16} color={colors.primary} />
                   </View>
 
                   <View style={styles.movTextContainer}>
@@ -699,85 +618,66 @@ const BalanceScreen: React.FC = () => {
                     </Text>
                   </View>
 
-                  <Text style={styles.movAmount}>
-                    {EuroformatEuro(mov.importe, 'signed')}
-                  </Text>
+                  <Text style={styles.movAmount}>{EuroformatEuro(mov.importe, 'signed')}</Text>
                 </View>
               ))}
 
-              <TouchableOpacity
-                style={panelStyles.cardButton}
-                onPress={() => handleVerMovimientos(null)}
-              >
-                <Text style={panelStyles.cardButtonText}>
-                  Ver todos los movimientos
-                </Text>
-                <Ionicons
-                  name="chevron-forward"
-                  size={16}
-                  color={colors.primary}
-                />
+              <TouchableOpacity style={panelStyles.cardButton} onPress={() => handleVerMovimientos(null)}>
+                <Text style={panelStyles.cardButtonText}>Ver todos los movimientos</Text>
+                <Ionicons name="chevron-forward" size={16} color={colors.primary} />
               </TouchableOpacity>
             </View>
           </View>
 
-          {/* 🔹 INDICADORES DE LIQUIDEZ */}
+          {/* 🔹 Indicadores */}
           <View style={[panelStyles.section, { marginBottom: 24 }]}>
-            <Text style={panelStyles.sectionTitle}>Indicadores de liquidez</Text>
+            <View style={styles.sectionHeaderRow}>
+              <Text style={panelStyles.sectionTitle}>Indicadores de liquidez</Text>
+              <InfoButton
+                align="title"
+                onPress={() =>
+                  info.open(
+                    'Indicadores de liquidez',
+                    'Alertas rápidas: número de cuentas en negativo, cuentas con poco saldo y liquidez disponible (suma de saldos positivos).'
+                  )
+                }
+              />
+            </View>
 
             <View style={panelStyles.card}>
               <View style={styles.indicatorRow}>
                 <View style={styles.indicatorIconCircle}>
-                  <Ionicons
-                    name="warning-outline"
-                    size={18}
-                    color={colors.danger}
-                  />
+                  <Ionicons name="warning-outline" size={18} color={colors.danger} />
                 </View>
                 <View style={styles.indicatorTextContainer}>
                   <Text style={styles.indicatorTitle}>Cuentas en negativo</Text>
                   <Text style={styles.indicatorSubtitle}>
-                    {indicadoresLiquidez.cuentasNegativas} cuenta(s) con saldo
-                    negativo.
+                    {indicadoresLiquidez.cuentasNegativas} cuenta(s) con saldo negativo.
                   </Text>
                 </View>
               </View>
 
               <View style={styles.indicatorRow}>
                 <View style={styles.indicatorIconCircle}>
-                  <Ionicons
-                    name="alert-circle-outline"
-                    size={18}
-                    color={colors.warning}
-                  />
+                  <Ionicons name="alert-circle-outline" size={18} color={colors.warning} />
                 </View>
                 <View style={styles.indicatorTextContainer}>
-                  <Text style={styles.indicatorTitle}>
-                    Cuentas con poco saldo
-                  </Text>
+                  <Text style={styles.indicatorTitle}>Cuentas con poco saldo</Text>
                   <Text style={styles.indicatorSubtitle}>
-                    {indicadoresLiquidez.cuentasConPocoSaldo} cuenta(s) por
-                    debajo de 150 €.
+                    {indicadoresLiquidez.cuentasConPocoSaldo} cuenta(s) por debajo de 150 €.
                   </Text>
                 </View>
               </View>
 
               <View style={styles.indicatorRow}>
                 <View style={styles.indicatorIconCircle}>
-                  <Ionicons
-                    name="wallet-outline"
-                    size={18}
-                    color={colors.primary}
-                  />
+                  <Ionicons name="wallet-outline" size={18} color={colors.primary} />
                 </View>
                 <View style={styles.indicatorTextContainer}>
                   <Text style={styles.indicatorTitle}>Liquidez disponible</Text>
                   <Text style={styles.indicatorSubtitle}>
-                    {EuroformatEuro(
-                      indicadoresLiquidez.liquidezDisponible,
-                      'normal'
-                    )}{' '}
-                    entre todas las cuentas con saldo positivo.
+                    {EuroformatEuro(indicadoresLiquidez.liquidezDisponible, 'normal')} entre todas las cuentas con saldo
+                    positivo.
                   </Text>
                 </View>
               </View>
@@ -785,7 +685,7 @@ const BalanceScreen: React.FC = () => {
           </View>
         </ScrollView>
 
-        {/* ⚡️ Información y ajuste de liquidez de cuenta (modal centrado y scrollable) */}
+        {/* Modal de ajuste */}
         <Modal
           visible={showAdjustBox && !!cuentaSeleccionada}
           transparent
@@ -796,10 +696,7 @@ const BalanceScreen: React.FC = () => {
             <View style={styles.adjustOverlay}>
               <TouchableWithoutFeedback onPress={() => {}}>
                 <View style={styles.adjustModalCardWrapper}>
-                  <ScrollView
-                    keyboardShouldPersistTaps="handled"
-                    contentContainerStyle={styles.adjustModalScrollContent}
-                  >
+                  <ScrollView keyboardShouldPersistTaps="handled" contentContainerStyle={styles.adjustModalScrollContent}>
                     <View style={panelStyles.card}>
                       <View style={styles.cardHeaderRow}>
                         <TouchableOpacity
@@ -807,26 +704,16 @@ const BalanceScreen: React.FC = () => {
                           onPress={handleCancelAdjust}
                           hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
                         >
-                          <Ionicons
-                            name="close"
-                            size={18}
-                            color={colors.textSecondary}
-                          />
+                          <Ionicons name="close" size={18} color={colors.textSecondary} />
                         </TouchableOpacity>
                       </View>
 
                       <View style={styles.transferField}>
                         <Text style={styles.transferLabel}>Cuenta</Text>
                         <View style={styles.cuentaSeleccionadaBox}>
-                          <Ionicons
-                            name="wallet-outline"
-                            size={18}
-                            color={colors.primary}
-                            style={{ marginRight: 6 }}
-                          />
+                          <Ionicons name="wallet-outline" size={18} color={colors.primary} style={{ marginRight: 6 }} />
                           <Text style={styles.cuentaSeleccionadaText}>
-                            {cuentaSeleccionada?.anagrama ??
-                              cuentaSeleccionada?.cuenta_id}
+                            {cuentaSeleccionada?.anagrama ?? cuentaSeleccionada?.cuenta_id}
                           </Text>
                         </View>
                       </View>
@@ -834,38 +721,25 @@ const BalanceScreen: React.FC = () => {
                       <View style={styles.transferField}>
                         <View style={styles.adjustRow}>
                           <View style={styles.adjustSaldoCol}>
-                            <Text style={styles.adjustSaldoLabel}>
-                              Saldo actual
-                            </Text>
+                            <Text style={styles.adjustSaldoLabel}>Saldo actual</Text>
                             <Text style={styles.adjustSaldoValue}>
-                              {EuroformatEuro(
-                                cuentaSeleccionadaSaldoFin,
-                                'normal'
-                              )}
+                              {EuroformatEuro(cuentaSeleccionadaSaldoFin, 'normal')}
                             </Text>
                           </View>
 
                           <View style={styles.adjustSaldoCol}>
                             <TouchableOpacity
                               style={styles.botonNuevoSaldo}
-                              onPress={() =>
-                                setShowNuevoSaldoInput((prev) => !prev)
-                              }
+                              onPress={() => setShowNuevoSaldoInput((prev) => !prev)}
                             >
                               <Ionicons
-                                name={
-                                  showNuevoSaldoInput
-                                    ? 'close'
-                                    : 'create-outline'
-                                }
+                                name={showNuevoSaldoInput ? 'close' : 'create-outline'}
                                 size={16}
                                 color="#fff"
                                 style={{ marginRight: 6 }}
                               />
                               <Text style={styles.botonNuevoSaldoText}>
-                                {showNuevoSaldoInput
-                                  ? 'Cancelar'
-                                  : 'Nuevo saldo'}
+                                {showNuevoSaldoInput ? 'Cancelar' : 'Nuevo saldo'}
                               </Text>
                             </TouchableOpacity>
                           </View>
@@ -873,55 +747,43 @@ const BalanceScreen: React.FC = () => {
                       </View>
 
                       <View style={styles.transferField}>
-                        <Text style={styles.transferLabel}>
-                          Pendiente en esta cuenta
-                        </Text>
+                        <Text style={styles.transferLabel}>Pendiente en esta cuenta</Text>
 
                         <View style={styles.pendientesCuentaList}>
                           <View style={styles.pendientesCuentaRow}>
-                            <Text style={styles.pendientesCuentaLabel}>
-                              Gest. pendientes
-                            </Text>
+                            <Text style={styles.pendientesCuentaLabel}>Gest. pendientes</Text>
                             <Text style={styles.pendientesCuentaValueNeg}>
-                              {EuroformatEuro(
-                                cuentaSeleccionada
-                                  ?.gastos_gestionables_pendientes ?? 0,
-                                'minus'
-                              )}
+                              {EuroformatEuro(cuentaSeleccionada?.gastos_gestionables_pendientes ?? 0, 'minus')}
                             </Text>
                           </View>
                           <View style={styles.pendientesCuentaRow}>
-                            <Text style={styles.pendientesCuentaLabel}>
-                              Cotid. pendientes
-                            </Text>
+                            <Text style={styles.pendientesCuentaLabel}>Cotid. pendientes</Text>
                             <Text style={styles.pendientesCuentaValueNeg}>
-                              {EuroformatEuro(
-                                cuentaSeleccionada
-                                  ?.gastos_cotidianos_pendientes ?? 0,
-                                'minus'
-                              )}
+                              {EuroformatEuro(cuentaSeleccionada?.gastos_cotidianos_pendientes ?? 0, 'minus')}
                             </Text>
                           </View>
                           <View style={styles.pendientesCuentaRow}>
-                            <Text style={styles.pendientesCuentaLabel}>
-                              Ing. pendientes
-                            </Text>
+                            <Text style={styles.pendientesCuentaLabel}>Ing. pendientes</Text>
                             <Text style={styles.pendientesCuentaValuePos}>
-                              {EuroformatEuro(
-                                cuentaSeleccionada?.ingresos_pendientes ?? 0,
-                                'plus'
-                              )}
+                              {EuroformatEuro(cuentaSeleccionada?.ingresos_pendientes ?? 0, 'plus')}
                             </Text>
                           </View>
                         </View>
                       </View>
 
+                      <View style={{ marginBottom: 12 }}>
+                        <Text style={[panelStyles.cardSubtitle, { marginTop: 2 }]}>
+                          Previsión en esta cuenta:{' '}
+                          <Text style={{ fontWeight: '700', color: colors.textPrimary }}>
+                            {EuroformatEuro(previsionCuentaSeleccionada, 'signed')}
+                          </Text>
+                        </Text>
+                      </View>
+
                       {showNuevoSaldoInput && (
                         <>
                           <View style={styles.transferField}>
-                            <Text style={styles.adjustSaldoLabel}>
-                              Nuevo saldo
-                            </Text>
+                            <Text style={styles.adjustSaldoLabel}>Nuevo saldo</Text>
                             <TextInput
                               style={styles.adjustSaldoInput}
                               keyboardType="decimal-pad"
@@ -939,24 +801,12 @@ const BalanceScreen: React.FC = () => {
                                 setNuevoSaldo('');
                               }}
                             >
-                              <Text style={styles.transferCancelButtonText}>
-                                Cancelar
-                              </Text>
+                              <Text style={styles.transferCancelButtonText}>Cancelar</Text>
                             </TouchableOpacity>
 
-                            <TouchableOpacity
-                              style={styles.transferSaveButton}
-                              onPress={handleSaveAdjust}
-                            >
-                              <Ionicons
-                                name="save-outline"
-                                size={16}
-                                color="#fff"
-                                style={{ marginRight: 6 }}
-                              />
-                              <Text style={styles.transferSaveButtonText}>
-                                Guardar saldo
-                              </Text>
+                            <TouchableOpacity style={styles.transferSaveButton} onPress={handleSaveAdjust}>
+                              <Ionicons name="save-outline" size={16} color="#fff" style={{ marginRight: 6 }} />
+                              <Text style={styles.transferSaveButtonText}>Guardar saldo</Text>
                             </TouchableOpacity>
                           </View>
                         </>
@@ -968,6 +818,9 @@ const BalanceScreen: React.FC = () => {
             </View>
           </TouchableWithoutFeedback>
         </Modal>
+
+        {/* ✅ Modal global de info */}
+        <InfoModal visible={info.visible} title={info.title} text={info.text} onClose={info.close} />
       </View>
     </>
   );
@@ -976,19 +829,35 @@ const BalanceScreen: React.FC = () => {
 export default BalanceScreen;
 
 const styles = StyleSheet.create({
+  // Header por sección: título a la izquierda, "i" al final a la derecha
+  sectionHeaderRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
+
+  sectionTitleRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
+  titleWithInfo: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  sectionTitleCloseButton: {
+    padding: 4,
+    marginTop: 0,
+  },
+
   resumenRowTop: {
     flexDirection: 'row',
     alignItems: 'flex-start',
     justifyContent: 'space-between',
   },
-  resumenLeft: {
-    flex: 1,
-    paddingRight: 8,
-  },
-  resumenRight: {
-    flex: 1,
-    paddingLeft: 8,
-  },
+  resumenLeft: { flex: 1, paddingRight: 8 },
+  resumenRight: { flex: 1, paddingLeft: 8 },
   liquidezValue: {
     fontSize: 24,
     fontWeight: '700',
@@ -996,7 +865,6 @@ const styles = StyleSheet.create({
     marginTop: 4,
     marginBottom: 2,
   },
-
   resumenSubtitleCompact: {
     marginTop: 0,
     marginBottom: 0,
@@ -1004,9 +872,7 @@ const styles = StyleSheet.create({
     lineHeight: 14,
   },
 
-  chipRow: {
-    marginBottom: 4,
-  },
+  chipRow: { marginBottom: 4 },
   chipPositive: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -1067,9 +933,7 @@ const styles = StyleSheet.create({
     color: colors.textSecondary,
     textAlign: 'right',
   },
-  tableHeaderCuenta: {
-    textAlign: 'left',
-  },
+  tableHeaderCuenta: { textAlign: 'left' },
   tableRow: {
     flexDirection: 'row',
     paddingVertical: 6,
@@ -1095,9 +959,7 @@ const styles = StyleSheet.create({
     gap: 12,
     marginBottom: 8,
   },
-  pendienteCol: {
-    flex: 1,
-  },
+  pendienteCol: { flex: 1 },
   pendientePositiveValue: {
     fontSize: 20,
     fontWeight: '700',
@@ -1120,21 +982,10 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     justifyContent: 'space-between',
   },
-  pendienteResumenLabel: {
-    fontSize: 11,
-    color: colors.textSecondary,
-  },
-  pendienteResumenValue: {
-    fontSize: 12,
-    fontWeight: '600',
-    color: colors.textPrimary,
-  },
+  pendienteResumenLabel: { fontSize: 11, color: colors.textSecondary },
+  pendienteResumenValue: { fontSize: 12, fontWeight: '600', color: colors.textPrimary },
 
-  indicatorRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    paddingVertical: 6,
-  },
+  indicatorRow: { flexDirection: 'row', alignItems: 'center', paddingVertical: 6 },
   indicatorIconCircle: {
     width: 28,
     height: 28,
@@ -1144,29 +995,12 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     marginRight: 8,
   },
-  indicatorTextContainer: {
-    flex: 1,
-  },
-  indicatorTitle: {
-    fontSize: 13,
-    fontWeight: '600',
-    color: colors.textPrimary,
-  },
-  indicatorSubtitle: {
-    fontSize: 11,
-    color: colors.textSecondary,
-    marginTop: 2,
-  },
+  indicatorTextContainer: { flex: 1 },
+  indicatorTitle: { fontSize: 13, fontWeight: '600', color: colors.textPrimary },
+  indicatorSubtitle: { fontSize: 11, color: colors.textSecondary, marginTop: 2 },
 
-  transferField: {
-    marginBottom: 12,
-  },
-  transferLabel: {
-    fontSize: 12,
-    fontWeight: '600',
-    color: colors.textPrimary,
-    marginBottom: 4,
-  },
+  transferField: { marginBottom: 12 },
+  transferLabel: { fontSize: 12, fontWeight: '600', color: colors.textPrimary, marginBottom: 4 },
   transferInput: {
     borderWidth: 1,
     borderColor: colors.border,
@@ -1177,10 +1011,8 @@ const styles = StyleSheet.create({
     color: colors.textPrimary,
     backgroundColor: colors.surface,
   },
-  transferInputMultiline: {
-    minHeight: 60,
-    textAlignVertical: 'top',
-  },
+  transferInputMultiline: { minHeight: 60, textAlignVertical: 'top' },
+
   transferButtonsRow: {
     marginTop: 8,
     flexDirection: 'row',
@@ -1196,10 +1028,7 @@ const styles = StyleSheet.create({
     borderColor: colors.border,
     backgroundColor: colors.surface,
   },
-  transferCancelButtonText: {
-    fontSize: 12,
-    color: colors.textSecondary,
-  },
+  transferCancelButtonText: { fontSize: 12, color: colors.textSecondary },
   transferSaveButton: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -1208,26 +1037,13 @@ const styles = StyleSheet.create({
     borderRadius: 999,
     backgroundColor: colors.primary,
   },
-  transferSaveButtonText: {
-    fontSize: 12,
-    fontWeight: '600',
-    color: '#fff',
-  },
+  transferSaveButtonText: { fontSize: 12, fontWeight: '600', color: '#fff' },
 
-  cardHeaderRowLeft: {
-    flexDirection: 'row',
-    justifyContent: 'flex-start',
-    marginBottom: 6,
-  },
+  cardHeaderRow: { flexDirection: 'row', justifyContent: 'flex-end', marginBottom: 4 },
+  closeIconButton: { padding: 4 },
 
-  adjustRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 8,
-  },
-  adjustSaldoCol: {
-    flex: 1,
-  },
+  adjustRow: { flexDirection: 'row', alignItems: 'center', gap: 8 },
+  adjustSaldoCol: { flex: 1 },
   cuentaSeleccionadaBox: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -1238,21 +1054,9 @@ const styles = StyleSheet.create({
     paddingVertical: 8,
     backgroundColor: colors.surface,
   },
-  cuentaSeleccionadaText: {
-    fontSize: 13,
-    fontWeight: '600',
-    color: colors.textPrimary,
-  },
-  adjustSaldoLabel: {
-    fontSize: 11,
-    color: colors.textSecondary,
-    marginBottom: 2,
-  },
-  adjustSaldoValue: {
-    fontSize: 13,
-    fontWeight: '600',
-    color: colors.textPrimary,
-  },
+  cuentaSeleccionadaText: { fontSize: 13, fontWeight: '600', color: colors.textPrimary },
+  adjustSaldoLabel: { fontSize: 11, color: colors.textSecondary, marginBottom: 2 },
+  adjustSaldoValue: { fontSize: 13, fontWeight: '600', color: colors.textPrimary },
   adjustSaldoInput: {
     borderWidth: 1,
     borderColor: colors.border,
@@ -1279,11 +1083,7 @@ const styles = StyleSheet.create({
     borderRadius: 999,
     backgroundColor: colors.primary,
   },
-  botonNuevoSaldoText: {
-    fontSize: 12,
-    fontWeight: '600',
-    color: '#fff',
-  },
+  botonNuevoSaldoText: { fontSize: 12, fontWeight: '600', color: '#fff' },
 
   adjustOverlay: {
     flex: 1,
@@ -1292,19 +1092,10 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     padding: 16,
   },
-  adjustModalCardWrapper: {
-    width: '100%',
-    maxWidth: 420,
-  },
-  adjustModalScrollContent: {
-    flexGrow: 0,
-  },
+  adjustModalCardWrapper: { width: '100%', maxWidth: 420 },
+  adjustModalScrollContent: { flexGrow: 0 },
 
-  movRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    paddingVertical: 6,
-  },
+  movRow: { flexDirection: 'row', alignItems: 'center', paddingVertical: 6 },
   movIconCircle: {
     width: 26,
     height: 26,
@@ -1314,75 +1105,17 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     marginRight: 8,
   },
-  movTextContainer: {
-    flex: 1,
-  },
-  movTitle: {
-    fontSize: 13,
-    fontWeight: '600',
-    color: colors.textPrimary,
-  },
-  movSubtitle: {
-    fontSize: 11,
-    color: colors.textSecondary,
-    marginTop: 2,
-  },
-  movAmount: {
-    fontSize: 13,
-    fontWeight: '600',
-    color: colors.textPrimary,
-    marginLeft: 8,
-  },
+  movTextContainer: { flex: 1 },
+  movTitle: { fontSize: 13, fontWeight: '600', color: colors.textPrimary },
+  movSubtitle: { fontSize: 11, color: colors.textSecondary, marginTop: 2 },
+  movAmount: { fontSize: 13, fontWeight: '600', color: colors.textPrimary, marginLeft: 8 },
 
-  accountsRow: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    justifyContent: 'space-between',
-  },
-  accountPillWrapper: {
-    width: '48%',
-    marginBottom: 6,
-  },
+  accountsRow: { flexDirection: 'row', flexWrap: 'wrap', justifyContent: 'space-between' },
+  accountPillWrapper: { width: '48%', marginBottom: 6 },
 
-  pendientesCuentaList: {
-    marginTop: 4,
-  },
-  pendientesCuentaRow: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    marginBottom: 2,
-  },
-  pendientesCuentaLabel: {
-    fontSize: 11,
-    color: colors.textSecondary,
-  },
-  pendientesCuentaValueNeg: {
-    fontSize: 12,
-    fontWeight: '600',
-    color: colors.danger,
-  },
-  pendientesCuentaValuePos: {
-    fontSize: 12,
-    fontWeight: '600',
-    color: colors.success,
-  },
-
-  cardHeaderRow: {
-    flexDirection: 'row',
-    justifyContent: 'flex-end',
-    marginBottom: 4,
-  },
-  closeIconButton: {
-    padding: 4,
-  },
-
-  sectionTitleRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-  },
-  sectionTitleCloseButton: {
-    padding: 4,
-    marginTop: 0,
-  },
+  pendientesCuentaList: { marginTop: 4 },
+  pendientesCuentaRow: { flexDirection: 'row', justifyContent: 'space-between', marginBottom: 2 },
+  pendientesCuentaLabel: { fontSize: 11, color: colors.textSecondary },
+  pendientesCuentaValueNeg: { fontSize: 12, fontWeight: '600', color: colors.danger },
+  pendientesCuentaValuePos: { fontSize: 12, fontWeight: '600', color: colors.success },
 });

@@ -2,11 +2,14 @@
 // -----------------------------------------------------------------------------
 // Objetivo del cambio (simple y sin romper nada):
 // - Mantener tu navegación tal cual.
-// - Home: conectar la tarjeta "Patrimonio" a datos reales del dashboard.
-// - Añadir indicadores extra "pro":
-//     * NOI/VM (%): NOI total anual / Valor Mercado total
-//     * LTV aprox (%): Total inversión / Valor Mercado total
-// - Botón "Ver propiedades": navegar directo al ranking (PropiedadesStack).
+// - FIXES (fase fixed - MAIN):
+//     1) Barra "Cotidianos" -> GastosListScreen con chip "Cotidianos" seleccionado (ya existía el param).
+//     2) "Liquidez total" (tarjeta) -> Balance (MonthBalanceScreen).
+//     3) Barra "Total gasto" -> Análisis día a día (DayToDayAnalysisScreen).
+// - Back/volver: pasamos returnToTab/returnToScreen a destinos para que puedan volver a Home.
+// - Botones "i" de información:
+//     - En Home: el InfoButton va A LA DERECHA del título (alineado al final del header de sección).
+//     - Además, dejamos los "i" contextuales dentro de tarjetas donde ya los tenías (Liquidez total, Presupuesto vs real).
 // - NO se elimina ninguna funcionalidad existente.
 // -----------------------------------------------------------------------------
 
@@ -72,6 +75,8 @@ import ReinciarCierreScreen from '../screens/cierres/ReinciarCierreScreen';
 import ReiniciarMesScreen from '../screens/cierres/ReiniciarMesScreen';
 import ReiniciarMesPreviewScreen from '../screens/cierres/ReiniciarMesPreviewScreen';
 
+// ✅ Sistema reusable de info “i”
+import { InfoButton, InfoModal, useInfoModal } from '../components/ui/InfoModal';
 
 // --------------------
 // Tipos de navegación
@@ -147,9 +152,12 @@ export type DayToDayStackParamList = {
       }
     | undefined;
 
+  // ✅ ampliamos params para “volver perfecto”
   DayToDayAnalysisScreen:
     | {
         fromHome?: boolean;
+        returnToTab?: keyof MainTabsParamList;
+        returnToScreen?: string;
       }
     | undefined;
 
@@ -261,7 +269,6 @@ export type MonthStackParamList = {
 
   ReiniciarMesScreen: { anio: number; mes: number; cierreId: string | null };
   ReiniciarMesPreviewScreen: { anio: number; mes: number };
-
 };
 
 export type PatrimonyStackParamList = {
@@ -384,7 +391,7 @@ function getMovimientoTipoLabel(m: any): string {
 }
 
 // --------------------
-// HEADER especial para Home
+// Header especial para Home
 // --------------------
 
 const HomeHeader: React.FC<{
@@ -444,14 +451,35 @@ const HomeHeader: React.FC<{
               {saldoPrevisto == null
                 ? '–'
                 : hideAmounts
-                  ? masked
-                  : EuroformatEuro(saldoPrevisto, 'signed')}
+                ? masked
+                : EuroformatEuro(saldoPrevisto, 'signed')}
             </Text>
           </View>
         </View>
       </View>
     </SafeAreaView>
   );
+};
+
+// --------------------
+// INFO TEXTOS HOME (reutilizable)
+// --------------------
+
+const HOME_INFO: Record<string, string> = {
+  resumen_rapido:
+    'Tarjetas de acceso rápido a indicadores clave del mes: liquidez, ingresos cobrados y gastos (gestionables y cotidianos).',
+  acciones_rapidas:
+    'Accesos directos para crear movimientos sin navegar por menús: gasto extra, gasto cotidiano e ingreso extra.',
+  presupuesto_mensual:
+    'Comparación entre real y presupuesto. Cada barra muestra cuánto llevas consumido/cobrado frente a lo previsto.',
+  actividad_reciente:
+    'Últimos movimientos registrados. Útil para validar que lo reciente está bien categorizado y fechado.',
+  patrimonio:
+    'Resumen de tus propiedades: valor de mercado, NOI anual, equity y métricas derivadas (NOI/VM y LTV aproximado).',
+  liquidez_total:
+    'Liquidez total: saldo actual agregado de cuentas. Pulsar te lleva a Balance para ver el detalle.',
+  total_gasto:
+    'Total gasto: barra agregada del gasto del mes. Pulsar te lleva a Análisis día a día.',
 };
 
 // --------------------
@@ -467,6 +495,9 @@ const HomeScreen: React.FC = () => {
   // Estado local para ocultar/mostrar importes en HOME
   const [hideAmounts, setHideAmounts] = useState(false);
   const masked = '***********';
+
+  // ✅ modal de info reutilizable (mismo patrón que ResumenScreen)
+  const info = useInfoModal();
 
   const fmt = (value: number | null | undefined, mode: any) => {
     if (value == null) return '–';
@@ -521,11 +552,27 @@ const HomeScreen: React.FC = () => {
     navigation.navigate('PatrimonyTab', { screen: 'PropiedadesStack' });
   };
 
-  // Navegación desde barras (con retorno explícito a Home)
-  const goBarTotalGasto = () => {
+  // -------------------------
+  // FIX #2: “Liquidez total” -> Balance
+  // -------------------------
+  const goLiquidezToBalance = () => {
     navigation.navigate('MonthTab', {
       screen: 'MonthBalanceScreen',
       params: { returnToTab: 'HomeTab', returnToScreen: 'HomeScreen' },
+    });
+  };
+
+  // -------------------------
+  // FIX #3: “Total gasto” -> Análisis día a día
+  // -------------------------
+  const goBarTotalGasto = () => {
+    navigation.navigate('DayToDayTab', {
+      screen: 'DayToDayAnalysisScreen',
+      params: {
+        fromHome: true,
+        returnToTab: 'HomeTab',
+        returnToScreen: 'HomeScreen',
+      },
     });
   };
 
@@ -548,6 +595,7 @@ const HomeScreen: React.FC = () => {
     });
   };
 
+  // FIX #1: barra “Cotidianos” -> GastosList con initialFiltro 'cotidiano'
   const goBarCotidianos = () => {
     navigation.navigate('DayToDayTab', {
       screen: 'GastosList',
@@ -562,6 +610,7 @@ const HomeScreen: React.FC = () => {
 
   const goBarExtras = () => {
     navigation.navigate('MonthTab', {
+      // Nota: mantenemos tu payload como estaba para no romper nada.
       initialFiltro: 'cotidiano',
       screen: 'MonthExtraordinariosScreen',
       params: { returnToTab: 'HomeTab', returnToScreen: 'HomeScreen' },
@@ -588,9 +637,7 @@ const HomeScreen: React.FC = () => {
   const cotidianosConsumidos = data?.cotidianosReal ?? 0;
   const cotidianosPresupuestados = data?.cotidianosPresupuestado ?? 0;
 
-  // -------------------------
   // Patrimonio (Home)
-  // -------------------------
   const patPropsCount = data?.patrimonioPropiedadesCount ?? 0;
   const patValorMercadoTotal = data?.patrimonioValorMercadoTotal ?? null;
   const patNoiTotal = data?.patrimonioNoiTotal ?? null;
@@ -602,336 +649,475 @@ const HomeScreen: React.FC = () => {
   const patLtvAproxPct = data?.patrimonioLtvAproxPct ?? null;
 
   return (
-    <View style={panelStyles.screen}>
-      <HomeHeader
-        monthLabel={monthLabel}
-        saldoPrevisto={data?.saldoPrevistoFinMes ?? null}
-        hideAmounts={hideAmounts}
-        onToggleHide={() => setHideAmounts((v) => !v)}
-      />
+    <>
+      <View style={panelStyles.screen}>
+        <HomeHeader
+          monthLabel={monthLabel}
+          saldoPrevisto={data?.saldoPrevistoFinMes ?? null}
+          hideAmounts={hideAmounts}
+          onToggleHide={() => setHideAmounts((v) => !v)}
+        />
 
-      <ScrollView
-        contentContainerStyle={panelStyles.scrollContent}
-        refreshControl={<RefreshControl refreshing={refreshing} onRefresh={refresh} />}
-      >
-        {error && (
+        <ScrollView
+          contentContainerStyle={panelStyles.scrollContent}
+          refreshControl={<RefreshControl refreshing={refreshing} onRefresh={refresh} />}
+        >
+          {error && (
+            <View style={panelStyles.section}>
+              <Text style={{ color: colors.danger, fontSize: 13 }}>{error}</Text>
+            </View>
+          )}
+
+          {loading && !data && (
+            <View style={panelStyles.section}>
+              <View style={[panelStyles.card, { alignItems: 'center', paddingVertical: 16 }]}>
+                <ActivityIndicator size="small" color={colors.primary} />
+                <Text style={{ marginTop: 8, fontSize: 12, color: colors.textSecondary }}>
+                  Cargando panel...
+                </Text>
+              </View>
+            </View>
+          )}
+
+          {/* ============================================================
+              RESUMEN RÁPIDO
+              - ✅ Cambio: header de sección con icono a la izquierda
+                + InfoButton alineado a la derecha (fin de la tarjeta/sección).
+             ============================================================ */}
           <View style={panelStyles.section}>
-            <Text style={{ color: colors.danger, fontSize: 13 }}>{error}</Text>
-          </View>
-        )}
+            <View style={styles.sectionHeaderRow}>
+              <View style={styles.sectionHeaderLeft}>
+                <Ionicons name="sparkles-outline" size={18} color={colors.primary} />
+                <Text style={panelStyles.sectionTitle}>Resumen rápido</Text>
+              </View>
 
-        {loading && !data && (
+              <InfoButton
+                align="title"
+                onPress={() => info.open('Resumen rápido', HOME_INFO.resumen_rapido)}
+              />
+            </View>
+
+            <View style={styles.summaryRowTop}>
+              {/* ✅ FIX #2: Liquidez total pulsable -> Balance */}
+              <TouchableOpacity
+                style={styles.summaryTopCard}
+                onPress={goLiquidezToBalance}
+                activeOpacity={0.9}
+                accessibilityRole="button"
+                accessibilityLabel="Ver balance de liquidez"
+              >
+                <View style={styles.summaryIconCircle}>
+                  <Ionicons name="wallet-outline" size={22} color={colors.primary} />
+                </View>
+                <View style={styles.summaryTextBlock}>
+                  {/* Mantenemos info contextual específico de la tarjeta */}
+                  <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+                    <Text style={styles.summaryLabel}>Liquidez total</Text>
+                    <TouchableOpacity
+                      onPress={() => info.open('Liquidez total', HOME_INFO.liquidez_total)}
+                      style={{ paddingHorizontal: 2, paddingVertical: 2 }}
+                      accessibilityRole="button"
+                      accessibilityLabel="Información sobre liquidez total"
+                    >
+                      <Ionicons
+                        name="information-circle-outline"
+                        size={14}
+                        color={colors.textSecondary}
+                      />
+                    </TouchableOpacity>
+                  </View>
+
+                  <Text style={styles.summaryValue}>{fmt(liquidezTotal, 'normal')}</Text>
+                  <Text style={styles.summaryDelta}>Saldo actual entre cuentas</Text>
+                </View>
+              </TouchableOpacity>
+
+              <View style={styles.summaryTopCard}>
+                <View style={styles.summaryIconCircle}>
+                  <Ionicons name="arrow-down-circle-outline" size={22} color={colors.primary} />
+                </View>
+                <View style={styles.summaryTextBlock}>
+                  <Text style={styles.summaryLabel}>Ingresos del mes</Text>
+                  <Text style={styles.summaryValue}>{fmt(ingresosMes, 'plus')}</Text>
+                  <Text style={styles.summaryDelta}>Cobrado este mes</Text>
+                </View>
+              </View>
+            </View>
+
+            <View style={styles.summaryRowSmall}>
+              <View style={styles.summaryCardSmall}>
+                <View style={styles.summaryIconCircleSmall}>
+                  <Ionicons name="file-tray-full-outline" size={20} color={colors.primary} />
+                </View>
+                <View style={styles.summaryTextBlockSmall}>
+                  <Text style={styles.summaryLabel}>Gastos gestionables</Text>
+                  <Text style={styles.summaryValue}>{fmt(gastosGestionablesMes, 'minus')}</Text>
+                  <Text style={styles.summaryDelta}>Pagados este mes</Text>
+                </View>
+              </View>
+
+              <View style={styles.summaryCardSmall}>
+                <View style={styles.summaryIconCircleSmall}>
+                  <Ionicons name="fast-food-outline" size={20} color={colors.primary} />
+                </View>
+                <View style={styles.summaryTextBlockSmall}>
+                  <Text style={styles.summaryLabel}>Gastos cotidianos</Text>
+                  <Text style={styles.summaryValue}>{fmt(gastosCotidianosMes, 'minus')}</Text>
+                  <Text style={styles.summaryDelta}>Consumidos este mes</Text>
+                </View>
+              </View>
+            </View>
+          </View>
+
+          {/* ============================================================
+              ACCIONES RÁPIDAS
+              - ✅ Header con icono izquierda + InfoButton derecha
+             ============================================================ */}
           <View style={panelStyles.section}>
-            <View style={[panelStyles.card, { alignItems: 'center', paddingVertical: 16 }]}>
-              <ActivityIndicator size="small" color={colors.primary} />
-              <Text style={{ marginTop: 8, fontSize: 12, color: colors.textSecondary }}>
-                Cargando panel...
-              </Text>
+            <View style={styles.sectionHeaderRow}>
+              <View style={styles.sectionHeaderLeft}>
+                <Ionicons name="flash-outline" size={18} color={colors.primary} />
+                <Text style={panelStyles.sectionTitle}>Acciones rápidas</Text>
+              </View>
+
+              <InfoButton
+                align="title"
+                onPress={() => info.open('Acciones rápidas', HOME_INFO.acciones_rapidas)}
+              />
+            </View>
+
+            <View style={styles.quickActionsRow}>
+              <TouchableOpacity
+                style={styles.secondaryActionTall}
+                onPress={goGastoExtra}
+                activeOpacity={0.9}
+              >
+                <Ionicons name="add-outline" size={26} color={colors.primary} />
+                <Text style={styles.secondaryActionTextTall}>Añadir gasto extra</Text>
+              </TouchableOpacity>
+
+              <TouchableOpacity
+                style={styles.primaryActionTall}
+                onPress={goCotidiano}
+                activeOpacity={0.9}
+              >
+                <Ionicons name="fast-food-outline" size={26} color="#fff" />
+                <Text style={styles.primaryActionTextTall}>Añadir cotidiano</Text>
+              </TouchableOpacity>
+
+              <TouchableOpacity
+                style={styles.secondaryActionTall}
+                onPress={goIngresoExtra}
+                activeOpacity={0.9}
+              >
+                <Ionicons name="cash-outline" size={26} color={colors.primary} />
+                <Text style={styles.secondaryActionTextTall}>Añadir ingreso extra</Text>
+              </TouchableOpacity>
             </View>
           </View>
-        )}
 
-        {/* RESUMEN RÁPIDO */}
-        <View style={panelStyles.section}>
-          <Text style={panelStyles.sectionTitle}>Resumen rápido</Text>
+          {/* ============================================================
+              PRESUPUESTO MENSUAL
+              - ✅ Header con icono izquierda + InfoButton derecha
+             ============================================================ */}
+          <View style={panelStyles.section}>
+            <View style={styles.sectionHeaderRow}>
+              <View style={styles.sectionHeaderLeft}>
+                <Ionicons name="bar-chart-outline" size={18} color={colors.primary} />
+                <Text style={panelStyles.sectionTitle}>Presupuesto mensual</Text>
+              </View>
 
-          <View style={styles.summaryRowTop}>
-            <View style={styles.summaryTopCard}>
-              <View style={styles.summaryIconCircle}>
-                <Ionicons name="wallet-outline" size={22} color={colors.primary} />
-              </View>
-              <View style={styles.summaryTextBlock}>
-                <Text style={styles.summaryLabel}>Liquidez total</Text>
-                <Text style={styles.summaryValue}>{fmt(liquidezTotal, 'normal')}</Text>
-                <Text style={styles.summaryDelta}>Saldo actual entre cuentas</Text>
-              </View>
+              <InfoButton
+                align="title"
+                onPress={() => info.open('Presupuesto mensual', HOME_INFO.presupuesto_mensual)}
+              />
             </View>
 
-            <View style={styles.summaryTopCard}>
-              <View style={styles.summaryIconCircle}>
-                <Ionicons name="arrow-down-circle-outline" size={22} color={colors.primary} />
-              </View>
-              <View style={styles.summaryTextBlock}>
-                <Text style={styles.summaryLabel}>Ingresos del mes</Text>
-                <Text style={styles.summaryValue}>{fmt(ingresosMes, 'plus')}</Text>
-                <Text style={styles.summaryDelta}>Cobrado este mes</Text>
-              </View>
-            </View>
-          </View>
+            <View style={panelStyles.card}>
+              <View style={styles.cardTitleRow}>
+                <Text style={panelStyles.cardTitle}>Presupuesto vs real</Text>
 
-          <View style={styles.summaryRowSmall}>
-            <View style={styles.summaryCardSmall}>
-              <View style={styles.summaryIconCircleSmall}>
-                <Ionicons name="file-tray-full-outline" size={20} color={colors.primary} />
-              </View>
-              <View style={styles.summaryTextBlockSmall}>
-                <Text style={styles.summaryLabel}>Gastos gestionables</Text>
-                <Text style={styles.summaryValue}>{fmt(gastosGestionablesMes, 'minus')}</Text>
-                <Text style={styles.summaryDelta}>Pagados este mes</Text>
-              </View>
-            </View>
-
-            <View style={styles.summaryCardSmall}>
-              <View style={styles.summaryIconCircleSmall}>
-                <Ionicons name="fast-food-outline" size={20} color={colors.primary} />
-              </View>
-              <View style={styles.summaryTextBlockSmall}>
-                <Text style={styles.summaryLabel}>Gastos cotidianos</Text>
-                <Text style={styles.summaryValue}>{fmt(gastosCotidianosMes, 'minus')}</Text>
-                <Text style={styles.summaryDelta}>Consumidos este mes</Text>
-              </View>
-            </View>
-          </View>
-        </View>
-
-        {/* ACCIONES RÁPIDAS */}
-        <View style={panelStyles.section}>
-          <Text style={panelStyles.sectionTitle}>Acciones rápidas</Text>
-
-          <View style={styles.quickActionsRow}>
-            <TouchableOpacity style={styles.secondaryActionTall} onPress={goGastoExtra} activeOpacity={0.9}>
-              <Ionicons name="add-outline" size={26} color={colors.primary} />
-              <Text style={styles.secondaryActionTextTall}>Añadir gasto extra</Text>
-            </TouchableOpacity>
-
-            <TouchableOpacity style={styles.primaryActionTall} onPress={goCotidiano} activeOpacity={0.9}>
-              <Ionicons name="fast-food-outline" size={26} color="#fff" />
-              <Text style={styles.primaryActionTextTall}>Añadir cotidiano</Text>
-            </TouchableOpacity>
-
-            <TouchableOpacity style={styles.secondaryActionTall} onPress={goIngresoExtra} activeOpacity={0.9}>
-              <Ionicons name="cash-outline" size={26} color={colors.primary} />
-              <Text style={styles.secondaryActionTextTall}>Añadir ingreso extra</Text>
-            </TouchableOpacity>
-          </View>
-        </View>
-
-        {/* PRESUPUESTO MENSUAL */}
-        <View style={panelStyles.section}>
-          <Text style={panelStyles.sectionTitle}>Presupuesto mensual</Text>
-
-          <View style={panelStyles.card}>
-            <Text style={panelStyles.cardTitle}>Presupuesto vs real</Text>
-
-            <TouchableOpacity style={styles.budgetRowPressable} onPress={goBarTotalGasto} activeOpacity={0.85}>
-              <View style={styles.budgetRow}>
-                <View style={styles.budgetRowHeader}>
-                  <Text style={styles.budgetRowLabel}>Total gasto</Text>
-                  <Text style={styles.budgetRowValue}>
-                    {fmt(totalGastoActual, 'minus')} / {fmt(totalGastoPresupuesto, 'minus')}
-                  </Text>
-                </View>
-                <View style={styles.progressBarBackground}>
-                  <View
-                    style={[
-                      styles.progressBarFill,
-                      { width: `${safeRatio(totalGastoActual, totalGastoPresupuesto) * 100}%` } as any,
-                    ]}
+                {/* Info contextual adicional (lo mantenemos) */}
+                <TouchableOpacity
+                  onPress={() => info.open('Total gasto', HOME_INFO.total_gasto)}
+                  style={{ paddingHorizontal: 4, paddingVertical: 2 }}
+                  accessibilityRole="button"
+                  accessibilityLabel="Información sobre Total gasto"
+                >
+                  <Ionicons
+                    name="information-circle-outline"
+                    size={16}
+                    color={colors.textSecondary}
                   />
-                </View>
+                </TouchableOpacity>
               </View>
-            </TouchableOpacity>
 
-            <TouchableOpacity style={styles.budgetRowPressable} onPress={goBarIngresos} activeOpacity={0.85}>
-              <View style={styles.budgetRow}>
-                <View style={styles.budgetRowHeader}>
-                  <Text style={styles.budgetRowLabel}>Ingresos</Text>
-                  <Text style={styles.budgetRowValue}>
-                    {fmt(ingresosRecibidos, 'plus')} / {fmt(ingresosPrevistos, 'plus')}
-                  </Text>
+              {/* ✅ FIX #3: Total gasto -> Análisis día a día */}
+              <TouchableOpacity
+                style={styles.budgetRowPressable}
+                onPress={goBarTotalGasto}
+                activeOpacity={0.85}
+              >
+                <View style={styles.budgetRow}>
+                  <View style={styles.budgetRowHeader}>
+                    <Text style={styles.budgetRowLabel}>Total gasto</Text>
+                    <Text style={styles.budgetRowValue}>
+                      {fmt(totalGastoActual, 'minus')} / {fmt(totalGastoPresupuesto, 'minus')}
+                    </Text>
+                  </View>
+                  <View style={styles.progressBarBackground}>
+                    <View
+                      style={[
+                        styles.progressBarFill,
+                        { width: `${safeRatio(totalGastoActual, totalGastoPresupuesto) * 100}%` } as any,
+                      ]}
+                    />
+                  </View>
                 </View>
-                <View style={styles.progressBarBackground}>
-                  <View
-                    style={[
-                      styles.progressBarFillIncome,
-                      { width: `${safeRatio(ingresosRecibidos, ingresosPrevistos) * 100}%` } as any,
-                    ]}
-                  />
+              </TouchableOpacity>
+
+              <TouchableOpacity
+                style={styles.budgetRowPressable}
+                onPress={goBarIngresos}
+                activeOpacity={0.85}
+              >
+                <View style={styles.budgetRow}>
+                  <View style={styles.budgetRowHeader}>
+                    <Text style={styles.budgetRowLabel}>Ingresos</Text>
+                    <Text style={styles.budgetRowValue}>
+                      {fmt(ingresosRecibidos, 'plus')} / {fmt(ingresosPrevistos, 'plus')}
+                    </Text>
+                  </View>
+                  <View style={styles.progressBarBackground}>
+                    <View
+                      style={[
+                        styles.progressBarFillIncome,
+                        { width: `${safeRatio(ingresosRecibidos, ingresosPrevistos) * 100}%` } as any,
+                      ]}
+                    />
+                  </View>
                 </View>
-              </View>
-            </TouchableOpacity>
+              </TouchableOpacity>
 
-            <TouchableOpacity style={styles.budgetRowPressable} onPress={goBarGestionables} activeOpacity={0.85}>
-              <View style={styles.budgetRow}>
-                <View style={styles.budgetRowHeader}>
-                  <Text style={styles.budgetRowLabel}>Gestionables</Text>
-                  <Text style={styles.budgetRowValue}>
-                    {fmt(gestionablesPagados, 'minus')} / {fmt(gestionablesPresupuestados, 'minus')}
-                  </Text>
+              <TouchableOpacity
+                style={styles.budgetRowPressable}
+                onPress={goBarGestionables}
+                activeOpacity={0.85}
+              >
+                <View style={styles.budgetRow}>
+                  <View style={styles.budgetRowHeader}>
+                    <Text style={styles.budgetRowLabel}>Gestionables</Text>
+                    <Text style={styles.budgetRowValue}>
+                      {fmt(gestionablesPagados, 'minus')} / {fmt(gestionablesPresupuestados, 'minus')}
+                    </Text>
+                  </View>
+                  <View style={styles.progressBarBackground}>
+                    <View
+                      style={[
+                        styles.progressBarFill,
+                        { width: `${safeRatio(gestionablesPagados, gestionablesPresupuestados) * 100}%` } as any,
+                      ]}
+                    />
+                  </View>
                 </View>
-                <View style={styles.progressBarBackground}>
-                  <View
-                    style={[
-                      styles.progressBarFill,
-                      { width: `${safeRatio(gestionablesPagados, gestionablesPresupuestados) * 100}%` } as any,
-                    ]}
-                  />
+              </TouchableOpacity>
+
+              <TouchableOpacity
+                style={styles.budgetRowPressable}
+                onPress={goBarCotidianos}
+                activeOpacity={0.85}
+              >
+                <View style={styles.budgetRow}>
+                  <View style={styles.budgetRowHeader}>
+                    <Text style={styles.budgetRowLabel}>Cotidianos</Text>
+                    <Text style={styles.budgetRowValue}>
+                      {fmt(cotidianosConsumidos, 'minus')} / {fmt(cotidianosPresupuestados, 'minus')}
+                    </Text>
+                  </View>
+                  <View style={styles.progressBarBackground}>
+                    <View
+                      style={[
+                        styles.progressBarFill,
+                        { width: `${safeRatio(cotidianosConsumidos, cotidianosPresupuestados) * 100}%` } as any,
+                      ]}
+                    />
+                  </View>
                 </View>
-              </View>
-            </TouchableOpacity>
+              </TouchableOpacity>
 
-            <TouchableOpacity style={styles.budgetRowPressable} onPress={goBarCotidianos} activeOpacity={0.85}>
-              <View style={styles.budgetRow}>
-                <View style={styles.budgetRowHeader}>
-                  <Text style={styles.budgetRowLabel}>Cotidianos</Text>
-                  <Text style={styles.budgetRowValue}>
-                    {fmt(cotidianosConsumidos, 'minus')} / {fmt(cotidianosPresupuestados, 'minus')}
-                  </Text>
-                </View>
-                <View style={styles.progressBarBackground}>
-                  <View
-                    style={[
-                      styles.progressBarFill,
-                      { width: `${safeRatio(cotidianosConsumidos, cotidianosPresupuestados) * 100}%` } as any,
-                    ]}
-                  />
-                </View>
-              </View>
-            </TouchableOpacity>
-
-            <TouchableOpacity
-              style={[styles.budgetRowPressable, { marginBottom: 0 }]}
-              onPress={goBarExtras}
-              activeOpacity={0.85}
-            >
-              <View style={[styles.budgetRow, { marginBottom: 0 }]}>
-                <View style={styles.budgetRowHeader}>
-                  <Text style={styles.budgetRowLabel}>Extras</Text>
-                  <Text style={styles.budgetRowValue}>
-                    Ing {fmt(data?.extrasIngresosMes ?? 0, 'plus')} · Gas {fmt(data?.extrasGastosMes ?? 0, 'minus')}
-                  </Text>
-                </View>
-
-                {(() => {
-                  const EXTRAS_RANGE = 2000;
-                  const extraIngRaw = Math.max(0, Number(data?.extrasIngresosMes ?? 0));
-                  const extraGasRaw = Math.max(0, Math.abs(Number(data?.extrasGastosMes ?? 0)));
-
-                  const extraIng = Math.min(EXTRAS_RANGE, extraIngRaw);
-                  const extraGas = Math.min(EXTRAS_RANGE, extraGasRaw);
-
-                  const leftPct = (extraIng / EXTRAS_RANGE) * 50;
-                  const rightPct = (extraGas / EXTRAS_RANGE) * 50;
-
-                  return (
-                    <View style={styles.extrasBarBg}>
-                      <View style={styles.extrasBarCenterLine} />
-                      <View style={[styles.extrasBarLeft, { width: `${leftPct}%` }]} />
-                      <View style={[styles.extrasBarRight, { width: `${rightPct}%` }]} />
-                    </View>
-                  );
-                })()}
-
-                <View style={{ flexDirection: 'row', justifyContent: 'space-between', marginTop: 4 }}>
-                  <Text style={{ fontSize: 10, color: colors.textSecondary }}>
-                    {hideAmounts ? masked : '+2.000 €'}
-                  </Text>
-                  <Text style={{ fontSize: 10, color: colors.textSecondary }}>
-                    {hideAmounts ? masked : '0 €'}
-                  </Text>
-                  <Text style={{ fontSize: 10, color: colors.textSecondary }}>
-                    {hideAmounts ? masked : '-2.000 €'}
-                  </Text>
-                </View>
-              </View>
-            </TouchableOpacity>
-          </View>
-        </View>
-
-        {/* ACTIVIDAD RECIENTE */}
-        <View style={panelStyles.section}>
-          <Text style={panelStyles.sectionTitle}>Actividad reciente</Text>
-
-          <View style={panelStyles.card}>
-            {(data?.ultimosMovimientos ?? []).slice(0, 4).map((m) => {
-              const isIngreso = m.es_ingreso;
-              const dotStyle = isIngreso ? styles.activityDotPositive : styles.activityDot;
-              const amountStyle = isIngreso ? styles.activityAmountPositive : styles.activityAmountNegative;
-
-              return (
-                <View key={m.id} style={styles.activityRow}>
-                  <View style={dotStyle} />
-                  <View style={styles.activityTextContainer}>
-                    <Text style={styles.activityTitle}>{m.descripcion}</Text>
-                    <Text style={styles.activitySubtitle}>
-                      {getMovimientoTipoLabel(m as any)} · {formatMovDateTime(m.fecha)}
+              <TouchableOpacity
+                style={[styles.budgetRowPressable, { marginBottom: 0 }]}
+                onPress={goBarExtras}
+                activeOpacity={0.85}
+              >
+                <View style={[styles.budgetRow, { marginBottom: 0 }]}>
+                  <View style={styles.budgetRowHeader}>
+                    <Text style={styles.budgetRowLabel}>Extras</Text>
+                    <Text style={styles.budgetRowValue}>
+                      Ing {fmt(data?.extrasIngresosMes ?? 0, 'plus')} · Gas {fmt(data?.extrasGastosMes ?? 0, 'minus')}
                     </Text>
                   </View>
 
-                  <Text style={amountStyle}>
-                    {hideAmounts ? masked : EuroformatEuro(m.importe, isIngreso ? 'plus' : 'minus')}
+                  {(() => {
+                    const EXTRAS_RANGE = 2000;
+                    const extraIngRaw = Math.max(0, Number(data?.extrasIngresosMes ?? 0));
+                    const extraGasRaw = Math.max(0, Math.abs(Number(data?.extrasGastosMes ?? 0)));
+
+                    const extraIng = Math.min(EXTRAS_RANGE, extraIngRaw);
+                    const extraGas = Math.min(EXTRAS_RANGE, extraGasRaw);
+
+                    const leftPct = (extraIng / EXTRAS_RANGE) * 50;
+                    const rightPct = (extraGas / EXTRAS_RANGE) * 50;
+
+                    return (
+                      <View style={styles.extrasBarBg}>
+                        <View style={styles.extrasBarCenterLine} />
+                        <View style={[styles.extrasBarLeft, { width: `${leftPct}%` }]} />
+                        <View style={[styles.extrasBarRight, { width: `${rightPct}%` }]} />
+                      </View>
+                    );
+                  })()}
+
+                  <View style={{ flexDirection: 'row', justifyContent: 'space-between', marginTop: 4 }}>
+                    <Text style={{ fontSize: 10, color: colors.textSecondary }}>
+                      {hideAmounts ? masked : '+2.000 €'}
+                    </Text>
+                    <Text style={{ fontSize: 10, color: colors.textSecondary }}>
+                      {hideAmounts ? masked : '0 €'}
+                    </Text>
+                    <Text style={{ fontSize: 10, color: colors.textSecondary }}>
+                      {hideAmounts ? masked : '-2.000 €'}
+                    </Text>
+                  </View>
+                </View>
+              </TouchableOpacity>
+            </View>
+          </View>
+
+          {/* ============================================================
+              ACTIVIDAD RECIENTE
+              - ✅ Header con icono izquierda + InfoButton derecha
+             ============================================================ */}
+          <View style={panelStyles.section}>
+            <View style={styles.sectionHeaderRow}>
+              <View style={styles.sectionHeaderLeft}>
+                <Ionicons name="time-outline" size={18} color={colors.primary} />
+                <Text style={panelStyles.sectionTitle}>Actividad reciente</Text>
+              </View>
+
+              <InfoButton
+                align="title"
+                onPress={() => info.open('Actividad reciente', HOME_INFO.actividad_reciente)}
+              />
+            </View>
+
+            <View style={panelStyles.card}>
+              {(data?.ultimosMovimientos ?? []).slice(0, 4).map((m) => {
+                const isIngreso = m.es_ingreso;
+                const dotStyle = isIngreso ? styles.activityDotPositive : styles.activityDot;
+                const amountStyle = isIngreso ? styles.activityAmountPositive : styles.activityAmountNegative;
+
+                return (
+                  <View key={m.id} style={styles.activityRow}>
+                    <View style={dotStyle} />
+                    <View style={styles.activityTextContainer}>
+                      <Text style={styles.activityTitle}>{m.descripcion}</Text>
+                      <Text style={styles.activitySubtitle}>
+                        {getMovimientoTipoLabel(m as any)} · {formatMovDateTime(m.fecha)}
+                      </Text>
+                    </View>
+
+                    <Text style={amountStyle}>
+                      {hideAmounts ? masked : EuroformatEuro(m.importe, isIngreso ? 'plus' : 'minus')}
+                    </Text>
+                  </View>
+                );
+              })}
+
+              {(data?.ultimosMovimientos ?? []).length === 0 && (
+                <Text style={[styles.activitySubtitle, { textAlign: 'center', paddingVertical: 8 }]}>
+                  No hay movimientos recientes.
+                </Text>
+              )}
+
+              <TouchableOpacity style={panelStyles.cardButton} onPress={goVerMovimientos}>
+                <Text style={panelStyles.cardButtonText}>Ver todos los movimientos</Text>
+                <Ionicons name="chevron-forward" size={16} color={colors.primary} />
+              </TouchableOpacity>
+            </View>
+          </View>
+
+          {/* ============================================================
+              PATRIMONIO
+              - ✅ Header con icono izquierda + InfoButton derecha
+             ============================================================ */}
+          <View style={[panelStyles.section, { marginBottom: 24 }]}>
+            <View style={styles.sectionHeaderRow}>
+              <View style={styles.sectionHeaderLeft}>
+                <Ionicons name="business-outline" size={18} color={colors.primary} />
+                <Text style={panelStyles.sectionTitle}>Patrimonio</Text>
+              </View>
+
+              <InfoButton
+                align="title"
+                onPress={() => info.open('Patrimonio', HOME_INFO.patrimonio)}
+              />
+            </View>
+
+            <View style={panelStyles.card}>
+              <View style={styles.cardHeaderRow}>
+                <View>
+                  <Text style={panelStyles.cardTitle}>Resumen de propiedades</Text>
+                  <Text style={panelStyles.cardSubtitle}>
+                    {patPropsCount > 0
+                      ? `${patPropsCount} activa${patPropsCount === 1 ? '' : 's'}`
+                      : 'Sin propiedades activas'}
                   </Text>
                 </View>
-              );
-            })}
 
-            {(data?.ultimosMovimientos ?? []).length === 0 && (
-              <Text style={[styles.activitySubtitle, { textAlign: 'center', paddingVertical: 8 }]}>
-                No hay movimientos recientes.
-              </Text>
-            )}
+                {/* Chip: Equity */}
+                <Text style={styles.cardChipHighlight}>Equity {fmt(patEquityTotal, 'signed')}</Text>
+              </View>
 
-            <TouchableOpacity style={panelStyles.cardButton} onPress={goVerMovimientos}>
-              <Text style={panelStyles.cardButtonText}>Ver todos los movimientos</Text>
-              <Ionicons name="chevron-forward" size={16} color={colors.primary} />
-            </TouchableOpacity>
+              <View style={styles.patrimonioTopRow}>
+                <View style={styles.patrimonioColLeft}>
+                  <Text style={panelStyles.cardValue}>{fmt(patValorMercadoTotal, 'normal')}</Text>
+                  <Text style={panelStyles.cardSubtitleSmall}>Valor mercado total</Text>
+                </View>
+
+                <View style={styles.patrimonioColRight}>
+                  <Text style={styles.patrimonioRentLabel}>Rentabilidad bruta media</Text>
+                  <Text style={styles.patrimonioRentValue}>{fmtPct(patBrutoMedioPct)}</Text>
+                </View>
+              </View>
+
+              {/* Segunda fila: NOI total + indicadores PRO */}
+              <View style={styles.patrimonioMetaRow}>
+                <View style={styles.patrimonioMetaItem}>
+                  <Text style={styles.patrimonioMetaLabel}>NOI total (anual)</Text>
+                  <Text style={styles.patrimonioMetaValue}>{fmt(patNoiTotal, 'signed')}</Text>
+                </View>
+
+                <View style={styles.patrimonioMetaItemRight}>
+                  <Text style={styles.patrimonioMetaLabel}>Indicadores</Text>
+                  <Text style={styles.patrimonioMetaValueSmall}>
+                    NOI/VM {fmtPct(patNoiSobreVmPct)} · LTV aprox {fmtPct(patLtvAproxPct)}
+                  </Text>
+                </View>
+              </View>
+
+              <TouchableOpacity style={panelStyles.cardButton} onPress={goVerPropiedades}>
+                <Text style={panelStyles.cardButtonText}>Ver propiedades</Text>
+                <Ionicons name="chevron-forward" size={16} color={colors.primary} />
+              </TouchableOpacity>
+            </View>
           </View>
-        </View>
+        </ScrollView>
+      </View>
 
-        {/* PATRIMONIO */}
-        <View style={[panelStyles.section, { marginBottom: 24 }]}>
-          <Text style={panelStyles.sectionTitle}>Patrimonio</Text>
-
-          <View style={panelStyles.card}>
-            <View style={styles.cardHeaderRow}>
-              <View>
-                <Text style={panelStyles.cardTitle}>Resumen de propiedades</Text>
-                <Text style={panelStyles.cardSubtitle}>
-                  {patPropsCount > 0 ? `${patPropsCount} activa${patPropsCount === 1 ? '' : 's'}` : 'Sin propiedades activas'}
-                </Text>
-              </View>
-
-              {/* Chip: Equity */}
-              <Text style={styles.cardChipHighlight}>
-                Equity {fmt(patEquityTotal, 'signed')}
-              </Text>
-            </View>
-
-            <View style={styles.patrimonioTopRow}>
-              <View style={styles.patrimonioColLeft}>
-                <Text style={panelStyles.cardValue}>{fmt(patValorMercadoTotal, 'normal')}</Text>
-                <Text style={panelStyles.cardSubtitleSmall}>Valor mercado total</Text>
-              </View>
-
-              <View style={styles.patrimonioColRight}>
-                <Text style={styles.patrimonioRentLabel}>Rentabilidad bruta media</Text>
-                <Text style={styles.patrimonioRentValue}>{fmtPct(patBrutoMedioPct)}</Text>
-              </View>
-            </View>
-
-            {/* Segunda fila: NOI total + indicadores PRO */}
-            <View style={styles.patrimonioMetaRow}>
-              <View style={styles.patrimonioMetaItem}>
-                <Text style={styles.patrimonioMetaLabel}>NOI total (anual)</Text>
-                <Text style={styles.patrimonioMetaValue}>{fmt(patNoiTotal, 'signed')}</Text>
-              </View>
-
-              <View style={styles.patrimonioMetaItemRight}>
-                <Text style={styles.patrimonioMetaLabel}>Indicadores</Text>
-                <Text style={styles.patrimonioMetaValueSmall}>
-                  NOI/VM {fmtPct(patNoiSobreVmPct)} · LTV aprox {fmtPct(patLtvAproxPct)}
-                </Text>
-              </View>
-            </View>
-
-            <TouchableOpacity style={panelStyles.cardButton} onPress={goVerPropiedades}>
-              <Text style={panelStyles.cardButtonText}>Ver propiedades</Text>
-              <Ionicons name="chevron-forward" size={16} color={colors.primary} />
-            </TouchableOpacity>
-          </View>
-        </View>
-      </ScrollView>
-    </View>
+      {/* ✅ Modal estándar info reutilizable */}
+      <InfoModal visible={info.visible} title={info.title} text={info.text} onClose={info.close} />
+    </>
   );
 };
 
@@ -996,7 +1182,6 @@ function MonthStackNavigator() {
       <MonthStack.Screen name="ReinciarCierreScreen" component={ReinciarCierreScreen} />
       <MonthStack.Screen name="ReiniciarMesScreen" component={ReiniciarMesScreen} />
       <MonthStack.Screen name="ReiniciarMesPreviewScreen" component={ReiniciarMesPreviewScreen} />
-
     </MonthStack.Navigator>
   );
 }
@@ -1063,7 +1248,11 @@ const MainTabs: React.FC = () => {
       />
 
       <Tab.Screen name="MonthTab" component={MonthStackNavigator} options={{ title: 'Mes a mes' }} />
-      <Tab.Screen name="PatrimonyTab" component={PatrimonyStackNavigator} options={{ title: 'Patrimonio' }} />
+      <Tab.Screen
+        name="PatrimonyTab"
+        component={PatrimonyStackNavigator}
+        options={{ title: 'Patrimonio' }}
+      />
     </Tab.Navigator>
   );
 };
@@ -1150,6 +1339,31 @@ const styles = StyleSheet.create({
     backgroundColor: colors.surface,
     alignItems: 'center',
     justifyContent: 'center',
+  },
+
+  // ✅ Header de sección:
+  // - Izquierda: icono + título
+  // - Derecha: InfoButton pegado al borde derecho
+  sectionHeaderRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: 4,
+  },
+  sectionHeaderLeft: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    flex: 1,
+    paddingRight: 8,
+  },
+
+  // Title row dentro de card (ej. Presupuesto vs real)
+  cardTitleRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: 8,
   },
 
   summaryRowTop: {
@@ -1395,7 +1609,7 @@ const styles = StyleSheet.create({
     marginTop: 2,
   },
 
-  // NUEVO: fila meta (NOI + indicadores)
+  // fila meta (NOI + indicadores)
   patrimonioMetaRow: {
     flexDirection: 'row',
     justifyContent: 'space-between',
