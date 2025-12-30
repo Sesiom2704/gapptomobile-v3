@@ -1,4 +1,15 @@
 // mobile_app/screens/inversiones/InversionesRankingScreen.tsx
+//
+// Cambios clave (depuración):
+// 1) Eliminamos navegación a "InversionDetalle" (no existe).
+//    - Tap en la card => abre InversionForm en modo SOLO LECTURA (readOnly).
+//    - ActionSheet "Ver detalle" => idem (InversionForm readOnly).
+// 2) ActionSheet "Editar" => abre InversionForm editable.
+// 3) Eliminación se mantiene (borra y recarga listado).
+//
+// Nota: Para evitar refetch innecesario en el form, pasamos también el objeto "inversion" además del inversionId.
+// El form puede usar "route.params.inversion" como fuente inicial y, si quiere, refrescar por id.
+
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { View, Text, ScrollView, ActivityIndicator, RefreshControl, Alert } from 'react-native';
 
@@ -29,6 +40,7 @@ const METRIC_BTNS: { label: string; value: Metric }[] = [
   { label: 'Capital', value: 'capital' },
 ];
 
+// Helpers: safe number + formateo para UI
 function safeNum(n: any): number | null {
   const x = typeof n === 'number' ? n : n == null ? null : Number(n);
   return x == null || Number.isNaN(x) ? null : x;
@@ -52,6 +64,7 @@ function fmtEur(n: number | null | undefined): string {
   return EuroformatEuro(v, 'signed');
 }
 
+// KPI por inversión (si falla, no bloquea ranking)
 async function fetchKpis(invId: string): Promise<InversionKpisOut | null> {
   try {
     return await inversionesApi.getInversionKpis(invId);
@@ -82,10 +95,12 @@ export default function InversionesRankingScreen({ navigation }: Props) {
     if (navigation?.canGoBack?.()) navigation.goBack();
   }, [navigation]);
 
+  // Alta de inversión => abre formulario en modo create
   const handleAdd = useCallback(() => {
     navigation.navigate('InversionForm', { mode: 'create' });
   }, [navigation]);
 
+  // Carga inversiones + KPIs (en paralelo por inversión)
   const load = useCallback(async () => {
     setError(null);
     setLoading(true);
@@ -119,6 +134,7 @@ export default function InversionesRankingScreen({ navigation }: Props) {
     await load();
   }, [load]);
 
+  // Ordenación: primero activas; dentro, por métrica elegida (desc)
   const ranked = useMemo(() => {
     const isActive = (p: RowVM) => (p.estado ?? 'ACTIVA') === 'ACTIVA';
 
@@ -143,11 +159,13 @@ export default function InversionesRankingScreen({ navigation }: Props) {
     });
   }, [rows, metric]);
 
+  // Abre ActionSheet para la inversión seleccionada
   const openOptions = useCallback((row: RowVM) => {
     setSelectedRow(row);
     setSheetVisible(true);
   }, []);
 
+  // Eliminar inversión (confirmación + delete + reload)
   const confirmarEliminar = useCallback(
     (row: RowVM) => {
       Alert.alert('Eliminar inversión', `¿Eliminar "${row.nombre}"?`, [
@@ -172,6 +190,8 @@ export default function InversionesRankingScreen({ navigation }: Props) {
     [load]
   );
 
+  // ActionSheet: ver (readOnly), editar, eliminar
+  // IMPORTANTE: NO navegar a InversionDetalle (no existe). Todo va a InversionForm.
   const accionesSheet: ActionSheetAction[] = useMemo(() => {
     if (!selectedRow) return [];
 
@@ -183,8 +203,19 @@ export default function InversionesRankingScreen({ navigation }: Props) {
       {
         label: 'Ver detalle',
         onPress: () => {
+          // Cierra sheet antes de navegar
           setSheetVisible(false);
-          navigation.navigate('InversionDetalle', { inversionId: selectedRow.id });
+
+          // Abre el form en modo SOLO LECTURA (sin editar)
+          navigation.navigate('InversionForm', {
+            mode: 'view',
+            readOnly: true,
+
+            // Pasamos el objeto completo para precargar datos sin refetch,
+            // y el id por si el form quiere refrescar en background.
+            inversion: selectedRow,
+            inversionId: selectedRow.id,
+          });
         },
         iconName: 'information-circle-outline',
         color: gris,
@@ -193,14 +224,25 @@ export default function InversionesRankingScreen({ navigation }: Props) {
         label: 'Editar',
         onPress: () => {
           setSheetVisible(false);
-          navigation.navigate('InversionForm', { mode: 'edit', inversionId: selectedRow.id });
+
+          // Abre el form editable
+          navigation.navigate('InversionForm', {
+            mode: 'edit',
+            readOnly: false,
+            inversion: selectedRow,
+            inversionId: selectedRow.id,
+          });
         },
         iconName: 'create-outline',
         color: amarillo,
       },
       {
         label: 'Eliminar',
-        onPress: () => confirmarEliminar(selectedRow),
+        onPress: () => {
+          // Opcional: cerrar sheet antes del alert
+          setSheetVisible(false);
+          confirmarEliminar(selectedRow);
+        },
         iconName: 'trash-outline',
         color: rojo,
         destructive: true,
@@ -256,9 +298,9 @@ export default function InversionesRankingScreen({ navigation }: Props) {
                   ? fmtPct(esperado?.roi_pct ?? null)
                   : fmtX(esperado?.moic ?? null);
 
-          // Reutilizo PropertyRankingCard para no crear componente nuevo:
-          // - title = nombre
-          // - direccion = tipo + proveedor/dealer (texto)
+          // Reutilizo PropertyRankingCard:
+          // - title: nombre inversión
+          // - direccion: meta de tipo/proveedor/dealer
           const tipo = inv.tipo_gasto?.nombre ?? '—';
           const prov = inv.proveedor?.nombre ?? '—';
           const deal = inv.dealer?.nombre ?? '—';
@@ -278,7 +320,16 @@ export default function InversionesRankingScreen({ navigation }: Props) {
               supUtilValue={inv.fecha_objetivo_salida ?? '—'}
               valorMercadoValue={fmtEur(inv.retorno_esperado_total ?? null)}
               direccion={meta}
-              onPress={() => navigation.navigate('InversionDetalle', { inversionId: inv.id })}
+              // ✅ Tap en la tarjeta => abre el Form en readOnly (consulta)
+              onPress={() =>
+                navigation.navigate('InversionForm', {
+                  mode: 'view',
+                  readOnly: true,
+                  inversion: inv,
+                  inversionId: inv.id,
+                })
+              }
+              // Opciones => abre ActionSheet
               onOptionsPress={() => openOptions(inv)}
             />
           );

@@ -22,8 +22,13 @@ const PatrimonioScreen: React.FC<Props> = ({ navigation }) => {
   };
 
   const goInversiones = () => {
-  navigation.navigate('InversionesStack');
-};
+    // Navega a la pestaña Patrimony y dentro al stack de Inversiones
+    // y dentro al screen "InversionesRanking" (o el nombre que uses en el stack).
+    navigation.navigate('PatrimonyTab', {
+      screen: 'InversionesStack',
+      params: { screen: 'InversionesRanking' },
+    });
+  };
 
   return (
     <>

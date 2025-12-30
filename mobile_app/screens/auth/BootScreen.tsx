@@ -27,6 +27,9 @@ import { getApiBaseUrl } from "../../services/api";
  * Objetivo:
  * - No entrar en Main hasta que backend esté listo.
  * - No entrar en Main con token inválido (evita “entra en main y luego te tira a login”).
+ *
+ * Nota (importante para el fix aplicado):
+ * - Con el fix, tras hacer login, reseteamos a Boot para que este mismo flujo decida Main/Login.
  */
 export const BootScreen: React.FC<{ navigation: any }> = ({ navigation }) => {
   console.log("[BOOT] BootScreen mounted");

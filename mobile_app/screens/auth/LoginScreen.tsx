@@ -13,6 +13,7 @@ import {
   ScrollView,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import { useNavigation } from '@react-navigation/native'; // ✅ FIX: poder resetear navegación tras login
 
 import { Screen } from '../../components/layout/Screen';
 import { colors, spacing, radius } from '../../theme';
@@ -21,6 +22,10 @@ import { useAuth } from '../../context/AuthContext';
 export const LoginScreen: React.FC = () => {
   const { login } = useAuth();
   const insets = useSafeAreaInsets();
+
+  // ✅ FIX: navegación para resetear el stack después del login
+  // Usamos `any` para no romper tipado si no tienes el RootStackParamList tipado.
+  const navigation = useNavigation<any>();
 
   // ✅ Credenciales por defecto SOLO en desarrollo
   // Sustituye por tus valores
@@ -37,6 +42,24 @@ export const LoginScreen: React.FC = () => {
     return '#F3FBFA';
   }, []);
 
+  /**
+   * handleSubmit
+   * ------------
+   * 1) Valida inputs
+   * 2) Ejecuta login() (AuthContext):
+   *    - llama backend
+   *    - guarda token en SecureStore
+   *    - aplica token en axios
+   *    - setea user en memoria
+   * 3) ✅ FIX: al terminar login OK, resetea navegación a Boot
+   *    BootScreen ya hace el "arranque robusto":
+   *    - /health
+   *    - /ready o /api/health
+   *    - si token: /api/v1/auth/me (si existe)
+   *    - finalmente decide Main vs Login
+   *
+   * Esto evita el bug de "me logeo y no entra al Main hasta que reinicio la app".
+   */
   const handleSubmit = async () => {
     setError(null);
 
@@ -51,7 +74,19 @@ export const LoginScreen: React.FC = () => {
 
     try {
       setSubmitting(true);
+
+      // 1) Login (guarda token + aplica token + set user)
       await login(finalEmail, finalPassword);
+
+      // ✅ FIX CLAVE:
+      // Tras login OK, forzamos pasar por BootScreen para que:
+      // - despierte backend (Render/lo que sea)
+      // - valide BD
+      // - valide token (si aplica)
+      // - redirija con navigation.reset() a Main o Login
+      //
+      // Nota: el nombre "Boot" debe coincidir EXACTAMENTE con tu ruta en el Navigator.
+      navigation.reset({ index: 0, routes: [{ name: 'Boot' }] });
     } catch (err) {
       console.error(err);
       setError('No se ha podido iniciar sesión. Revisa tus datos.');

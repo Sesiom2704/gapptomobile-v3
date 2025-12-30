@@ -5,17 +5,23 @@
  *   - Que Rama proveedor, Localidad, Comunidad/Región y País usen el MISMO patrón de desplegable
  *     que "Proveedor" en GastoCotidiano/Gestionable: InlineSearchSelect.
  *
- * Nota técnica (por tus errores TS):
+ * Nota técnica:
  *   - InlineSearchSelect requiere onAddPress y onClear OBLIGATORIOS.
  *   - Por tanto, SIEMPRE pasamos:
  *       - onAddPress: no-op cuando no aplique
  *       - onClear: no-op cuando esté bloqueado (ramaBloqueada), o clear real cuando aplique
+ *
+ * Corrección clave (backend):
+ *   - Tu backend /api/v1/proveedores NO acepta localidad_id.
+ *   - Por tanto: NO enviamos localidad_id en create/update de proveedor.
+ *   - Guardamos texto: localidad / comunidad / pais (como define ProveedorCreate/Update en backend).
  */
 
 import React, { useEffect, useMemo, useState } from 'react';
 import { View, Text, TextInput, TouchableOpacity, Alert, StyleSheet } from 'react-native';
 import { CommonActions } from '@react-navigation/native';
 import { Ionicons } from '@expo/vector-icons';
+import axios from 'axios';
 
 import FormScreen from '../../components/forms/FormScreen';
 import { FormSection } from '../../components/forms/FormSection';
@@ -261,9 +267,9 @@ export const AuxEntityFormScreen: React.FC<Props> = ({ navigation, route }) => {
       setLocalidad(editingProveedor.localidad ?? '');
       setComunidad(editingProveedor.comunidad ?? '');
       setPais(editingProveedor.pais ?? '');
-      setLocalidadId(editingProveedor.localidad_id ?? null);
+      setLocalidadId((editingProveedor as any).localidad_id ?? null);
 
-      const locRel = editingProveedor.localidad_rel;
+      const locRel = (editingProveedor as any).localidad_rel;
       if (locRel) {
         setRegionId(locRel.region?.id ?? null);
         setPaisId(locRel.region?.pais?.id ?? null);
@@ -307,13 +313,13 @@ export const AuxEntityFormScreen: React.FC<Props> = ({ navigation, route }) => {
   }, [isTipoGasto]);
 
   // =========================
-  // Precargar ramas proveedor para que el listado aparezca al abrir el selector
+  // Precargar ramas proveedor
   // =========================
   useEffect(() => {
     if (!isProveedor) return;
     void ensureRamasProveedorLoaded();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isProveedor]);
-
 
   // =========================
   // Cargas catálogo proveedor/ubicaciones
@@ -428,7 +434,7 @@ export const AuxEntityFormScreen: React.FC<Props> = ({ navigation, route }) => {
   // =========================
   const ramasProveedorFiltradas = useMemo(() => {
     const term = busquedaRamaProveedor.trim().toLowerCase();
-    if (!term) return ramaOptions.slice(0, 50); // top 50 sin búsqueda
+    if (!term) return ramaOptions.slice(0, 50);
     return ramaOptions.filter((r) => (r.nombre ?? '').toLowerCase().includes(term)).slice(0, 50);
   }, [ramaOptions, busquedaRamaProveedor]);
 
@@ -769,20 +775,23 @@ export const AuxEntityFormScreen: React.FC<Props> = ({ navigation, route }) => {
     }
 
     try {
+      // Si el usuario ha escrito algo para localidad (o está en modo creación), intentamos materializarla
       const hasLocalidadText = (creatingLocalidad ? newLocalidadText : localidad).trim().length > 0;
       const finalLocalidadId = hasLocalidadText ? await ensureLocalidadCreatedIfNeeded() : null;
 
-      const payloadCommon = {
+      // Backend proveedores acepta TEXTOS, no localidad_id:
+      // - localidad / comunidad / pais
+      // Aun así, mantener finalLocalidadId en estado sirve a la UI (selección), pero NO se envía.
+      const payloadForBackend = {
         nombre: nombreFinal,
-        rama_id: ramaId ?? undefined,
-        localidad_id: finalLocalidadId ?? undefined,
+        rama_id: ramaId,
         localidad: (localidad || null) as string | null,
         comunidad: (comunidad || null) as string | null,
         pais: (pais || null) as string | null,
       };
 
       if (isEditMode && editingProveedor) {
-        const actualizado = await updateProveedor(editingProveedor.id, payloadCommon as any);
+        const actualizado = await updateProveedor(editingProveedor.id, payloadForBackend);
         sendResultAndClose({ type: auxType, item: actualizado, key: returnKey ?? null, mode: 'updated' });
         return;
       }
@@ -790,22 +799,38 @@ export const AuxEntityFormScreen: React.FC<Props> = ({ navigation, route }) => {
       const creado = await createProveedorFromAuxForm({
         nombre: nombreFinal,
         ramaId,
-        localidadId: finalLocalidadId,
-        localidadTexto: payloadCommon.localidad,
-        comunidadTexto: payloadCommon.comunidad,
-        paisTexto: payloadCommon.pais,
+        localidadId: finalLocalidadId, // se mantiene por compatibilidad, pero el helper NO lo envía
+        localidadTexto: payloadForBackend.localidad,
+        comunidadTexto: payloadForBackend.comunidad,
+        paisTexto: payloadForBackend.pais,
       });
 
       sendResultAndClose({ type: auxType, item: creado, key: returnKey ?? null, mode: 'created' });
     } catch (err: any) {
-      const status = err?.response?.status;
-      const detail = err?.response?.data?.detail;
+      // Logging robusto: aquí es donde necesitas ver si es 422 (validación), 401, 400, etc.
+      if (axios.isAxiosError(err)) {
+        const status = err.response?.status;
+        const data = err.response?.data;
+        const detail = (data as any)?.detail;
 
-      console.error('[AuxEntityForm] Error al guardar', { status, data: err?.response?.data });
+        console.error('[AuxEntityForm] Error al guardar (axios)', {
+          status,
+          data,
+          message: err.message,
+        });
 
-      if (status === 400 && typeof detail === 'string') {
-        Alert.alert('No se ha podido guardar', detail);
-        return;
+        if (status === 400 && typeof detail === 'string') {
+          Alert.alert('No se ha podido guardar', detail);
+          return;
+        }
+
+        // Si fuese 422, normalmente te vendrá un array con errores de validación
+        if (status === 422) {
+          Alert.alert('Datos inválidos', 'Revisa los campos requeridos para esa rama (localidad/país/comunidad).');
+          return;
+        }
+      } else {
+        console.error('[AuxEntityForm] Error al guardar (non-axios)', err);
       }
 
       Alert.alert('Error', 'No se ha podido guardar el registro.');
