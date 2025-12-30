@@ -84,6 +84,9 @@ class TipoGasto(Base):
     segmento_rel        = relationship("TipoSegmentoGasto", back_populates="tipos_gasto")
     gastos              = relationship("Gasto", back_populates="tipo_rel")
     gastos_cotidianos   = relationship("GastoCotidiano", back_populates="tipo_rel")
+    # En class TipoGasto(...)
+    inversiones = relationship("Inversion", back_populates="tipo_gasto")
+
 
 
 # =============================================
@@ -570,6 +573,12 @@ class User(Base):
     prestamos         = relationship("Prestamo", back_populates="user")
     proveedores       = relationship("Proveedor", back_populates="user")
     movimientos_cuenta = relationship("MovimientoCuenta", back_populates="user")
+    inversiones = relationship(
+    "Inversion",
+    back_populates="user",
+    cascade="all, delete-orphan",
+    passive_deletes=True,
+)
 
 # =============================================
 # 5. CIERRES MENSUALES (cabecera + detalle)
