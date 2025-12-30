@@ -279,6 +279,17 @@ class Proveedor(Base):
 
     # Relación con Localidad (normalizada)
     localidad_rel = relationship("Localidad", back_populates="proveedores")
+    inversiones_como_proveedor = relationship(
+        "Inversion",
+        foreign_keys="Inversion.proveedor_id",
+        back_populates="proveedor",
+    )
+    inversiones_como_dealer = relationship(
+        "Inversion",
+        foreign_keys="Inversion.dealer_id",
+        back_populates="dealer",
+    )
+
 
 class CuentaBancaria(Base):
     __tablename__ = "cuentas_bancarias"
@@ -796,3 +807,111 @@ class PrestamoCuota(Base):
         Index("ix_prestamo_cuota_prestamo_num", "prestamo_id", "num_cuota"),
     )
 
+# =============================================
+# 6. INVERSIONES (nuevo módulo v3)
+# =============================================
+
+def gen_inversion_id() -> str:
+    # INV- + UUID corto
+    return "INV-" + uuid4().hex[:10].upper()
+
+
+class Inversion(Base):
+    __tablename__ = "inversion"
+    __table_args__ = {"extend_existing": True}
+
+    id = Column(String, primary_key=True, index=True, default=gen_inversion_id)
+
+    # Ownership
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+
+    # Reutiliza TipoGasto como "tipo de inversión" (JV/NPL/etc.)
+    tipo_gasto_id = Column(String, ForeignKey("tipo_gasto.id", ondelete="RESTRICT"), nullable=False, index=True)
+
+    # Un proveedor y un dealer (ambos en proveedores)
+    proveedor_id = Column(String, ForeignKey("proveedores.id", ondelete="SET NULL"), nullable=True, index=True)
+    dealer_id = Column(String, ForeignKey("proveedores.id", ondelete="SET NULL"), nullable=True, index=True)
+
+    nombre = Column(String, nullable=False)
+    descripcion = Column(sa.Text, nullable=True)
+
+    estado = Column(String, nullable=False, server_default=text("'ACTIVA'"))
+    fase = Column(String, nullable=True)  # futuro
+
+    fecha_creacion = Column(Date, nullable=False, server_default=func.current_date())
+    fecha_inicio = Column(Date, nullable=True)
+    fecha_objetivo_salida = Column(Date, nullable=True)
+    fecha_cierre_real = Column(Date, nullable=True)
+
+    moneda = Column(String, nullable=False, server_default=text("'EUR'"))
+
+    # Importes (sin caja real)
+    aporte_estimado = Column(Numeric(14, 2), nullable=True)
+    aporte_final = Column(Numeric(14, 2), nullable=True)
+    retorno_esperado_total = Column(Numeric(14, 2), nullable=True)
+    retorno_final_total = Column(Numeric(14, 2), nullable=True)
+
+    # Rentabilidad esperada
+    roi_esperado_pct = Column(Numeric(6, 2), nullable=True)
+    moic_esperado = Column(Numeric(10, 4), nullable=True)
+    irr_esperada_pct = Column(Numeric(6, 2), nullable=True)
+    plazo_esperado_meses = Column(Integer, nullable=True)
+
+    # Rentabilidad final
+    roi_final_pct = Column(Numeric(6, 2), nullable=True)
+    moic_final = Column(Numeric(10, 4), nullable=True)
+    irr_final_pct = Column(Numeric(6, 2), nullable=True)
+    plazo_final_meses = Column(Integer, nullable=True)
+
+    notas = Column(sa.Text, nullable=True)
+
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
+
+    # Relaciones
+    user = relationship("User", back_populates="inversiones")
+
+    tipo_gasto = relationship("TipoGasto", back_populates="inversiones")
+
+    proveedor = relationship(
+        "Proveedor",
+        foreign_keys=[proveedor_id],
+        back_populates="inversiones_como_proveedor",
+    )
+    dealer = relationship(
+        "Proveedor",
+        foreign_keys=[dealer_id],
+        back_populates="inversiones_como_dealer",
+    )
+
+    metricas = relationship(
+        "InversionMetrica",
+        back_populates="inversion",
+        cascade="all, delete-orphan",
+    )
+
+
+class InversionMetrica(Base):
+    __tablename__ = "inversion_metrica"
+    __table_args__ = {"extend_existing": True}
+
+    id = Column(sa.BigInteger, primary_key=True, autoincrement=True)
+
+    inversion_id = Column(
+        String,
+        ForeignKey("inversion.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+
+    escenario = Column(String, nullable=True)  # BASE/PESIMISTA/OPTIMISTA
+    clave = Column(String, nullable=False)
+
+    valor_num = Column(Numeric(18, 6), nullable=True)
+    valor_texto = Column(sa.Text, nullable=True)
+    unidad = Column(String, nullable=True)
+    origen = Column(String, nullable=True)  # MANUAL/MODELO/TAPE
+
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+    inversion = relationship("Inversion", back_populates="metricas")

@@ -74,9 +74,12 @@ import GestionDbScreen from '../screens/bd/gestionDbScreen';
 import ReinciarCierreScreen from '../screens/cierres/ReinciarCierreScreen';
 import ReiniciarMesScreen from '../screens/cierres/ReiniciarMesScreen';
 import ReiniciarMesPreviewScreen from '../screens/cierres/ReiniciarMesPreviewScreen';
+import InversionesStack from './InversionesStack'
+
 
 // ✅ Sistema reusable de info “i”
 import { InfoButton, InfoModal, useInfoModal } from '../components/ui/InfoModal';
+
 
 // --------------------
 // Tipos de navegación
@@ -302,6 +305,7 @@ export type PatrimonyStackParamList = {
     | undefined;
 
   PrestamosStack: undefined;
+  InversionesStack: undefined;
 };
 
 // --------------------
@@ -1194,6 +1198,8 @@ function PatrimonyStackNavigator() {
       <PatrimonyStack.Screen name="AuxEntityForm" component={AuxEntityFormScreen} />
       <PatrimonyStack.Screen name="LocalidadForm" component={LocalidadFormScreen} />
       <PatrimonyStack.Screen name="PrestamosStack" component={PrestamosStack} />
+      <PatrimonyStack.Screen name="InversionesStack" component={InversionesStack} />
+
     </PatrimonyStack.Navigator>
   );
 }

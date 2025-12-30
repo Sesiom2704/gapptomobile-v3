@@ -429,6 +429,26 @@ def list_ingresos_extra(
 
     return out
 
+@router.get("/", response_model=List[IngresoSchema])
+@router.get("", response_model=List[IngresoSchema], include_in_schema=False)
+def list_all(
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(require_user),
+):
+    """
+    Lista TODOS los ingresos del usuario actual.
+    """
+    objs = (
+        db.query(models.Ingreso)
+        .filter(models.Ingreso.user_id == current_user.id)
+        .order_by(
+            models.Ingreso.fecha_inicio.asc().nullslast(),
+            models.Ingreso.createon.asc(),
+        )
+        .all()
+    )
+    return [_serialize_ingreso(o) for o in objs]
+
 
 @router.get("/{ingreso_id}", response_model=IngresoSchema)
 def get_ingreso(

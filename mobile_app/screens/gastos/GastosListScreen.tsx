@@ -19,6 +19,18 @@
  *
  * EXTRA (para navegación desde DayToDayAnalysisScreen sin perder UX):
  * - Soporta params.initialSearchText para precargar el buscador.
+ *
+ * FIXES:
+ * 1) Gestionables "Todos": ordenar por fecha (g.fecha) DESC.
+ * 2) Gestionables "Pendientes": mantener orden actual (fecha de cobro como ya está en backend/hook).
+ * 3) Cotidianos: se mantiene orden por fecha DESC.
+ * 4) Cotidianos "Quién paga": en v3 backend NO existe paga_yo; se usa models.GastoCotidiano.pagado:
+ *    - pagado=true  => afecta liquidez => “Pagado por mí”
+ *    - pagado=false => INVITADO/no afecta liquidez => “Lo paga otro”
+ *
+ * IMPORTANTE:
+ * - Para que el filtro "Quién paga" funcione, no podemos pedir al backend solo pagado=true.
+ *   Por eso ahora cargamos TODOS los cotidianos (sin filtro pagado en fetch), y filtramos localmente.
  */
 
 import React, { useMemo, useState, useEffect, useCallback, useRef } from 'react';
@@ -146,6 +158,36 @@ function getIconNameForTipoCotidiano(g: GastoCotidiano): string {
   if (label.includes('ROPA')) return 'shirt-outline';
 
   return 'pricetag-outline';
+}
+
+/**
+ * ✅ FIX v3:
+ * En backend v3, "quién paga" se representa con el boolean "pagado":
+ * - true  => pagado por mí (aplica liquidez)
+ * - false => invitado / lo paga otro (no aplica liquidez)
+ *
+ * Esta función es defensiva por si en algún punto llega como string/number.
+ */
+function normalizarPagadoComoQuienPaga(g: GastoCotidiano): boolean | null {
+  const raw = (g as any).pagado;
+
+  if (raw === null || raw === undefined) return null;
+  if (typeof raw === 'boolean') return raw;
+
+  if (typeof raw === 'number') {
+    if (raw === 1) return true;
+    if (raw === 0) return false;
+    return null;
+  }
+
+  if (typeof raw === 'string') {
+    const v = raw.trim().toLowerCase();
+    if (['true', '1', 'si', 'sí', 'pagado'].includes(v)) return true;
+    if (['false', '0', 'no', 'invitado'].includes(v)) return false;
+    return null;
+  }
+
+  return null;
 }
 
 export const GastosListScreen: React.FC<{ navigation: any; route: any }> = ({
@@ -397,7 +439,12 @@ export const GastosListScreen: React.FC<{ navigation: any; route: any }> = ({
   const cargarGastosCotidianos = async () => {
     setLoadingCotidianos(true);
     try {
-      const data = await fetchGastosCotidianos({ pagado: true });
+      /**
+       * ✅ FIX:
+       * Antes: fetchGastosCotidianos({ pagado: true }) => solo “pagado por mí”.
+       * Ahora: traemos TODOS para que el filtro “Quién paga” funcione (yo/otro).
+       */
+      const data = await fetchGastosCotidianos({});
       setGastosCotidianos(data);
       console.log('[Cotidianos] count=', data?.length, 'sample=', data?.[0]);
       setErrorCotidianos(null);
@@ -530,6 +577,31 @@ export const GastosListScreen: React.FC<{ navigation: any; route: any }> = ({
     filtroPeriodicidad,
   ]);
 
+  /**
+   * ✅ FIX: ordenación gestionables.
+   * - "Todos": ordenar por fecha (g.fecha) DESC.
+   * - "Pendientes": mantener orden actual (depende del hook/backend; no tocamos).
+   */
+  const listaGestionables = useMemo(() => {
+    const base = gastosFiltrados;
+
+    if (filtro === 'todos') {
+      return [...base].sort((a, b) => {
+        const ta = new Date(a.fecha).getTime();
+        const tb = new Date(b.fecha).getTime();
+
+        if (Number.isNaN(ta) && Number.isNaN(tb)) return 0;
+        if (Number.isNaN(ta)) return 1;
+        if (Number.isNaN(tb)) return -1;
+
+        return tb - ta; // desc
+      });
+    }
+
+    // pendientes (y cualquier otro estado gestionable): no tocar orden actual
+    return base;
+  }, [gastosFiltrados, filtro]);
+
   // ======= Filtros LOCALES para cotidianos =======
   const aplicarFiltrosCotidianos = useMemo(() => {
     return (lista: GastoCotidiano[]): GastoCotidiano[] => {
@@ -556,10 +628,15 @@ export const GastosListScreen: React.FC<{ navigation: any; route: any }> = ({
           if (g.tipo_id !== filtroTipoCotidiano) return false;
         }
 
+        // ✅ FIX v3: "quién paga" se basa en g.pagado (no existe paga_yo en backend)
         if (filtroQuienPaga !== 'todos') {
-          const pagaYo = (g as any).paga_yo as boolean | null | undefined;
-          if (filtroQuienPaga === 'yo' && pagaYo === false) return false;
-          if (filtroQuienPaga === 'otro' && pagaYo === true) return false;
+          const pagado = normalizarPagadoComoQuienPaga(g);
+
+          // si no sabemos, no puede hacer match con yo/otro
+          if (pagado === null) return false;
+
+          if (filtroQuienPaga === 'yo' && pagado !== true) return false;
+          if (filtroQuienPaga === 'otro' && pagado !== false) return false;
         }
 
         if (fechaDesde || fechaHasta) {
@@ -1518,7 +1595,9 @@ export const GastosListScreen: React.FC<{ navigation: any; route: any }> = ({
       const listaOrdenada = [...listaFiltrada].sort((a, b) => {
         const ta = new Date(a.fecha).getTime();
         const tb = new Date(b.fecha).getTime();
-        if (Number.isNaN(ta) || Number.isNaN(tb)) return 0;
+        if (Number.isNaN(ta) && Number.isNaN(tb)) return 0;
+        if (Number.isNaN(ta)) return 1;
+        if (Number.isNaN(tb)) return -1;
         return tb - ta;
       });
 
@@ -1603,7 +1682,7 @@ export const GastosListScreen: React.FC<{ navigation: any; route: any }> = ({
       );
     }
 
-    const lista = gastosFiltrados;
+    const lista = listaGestionables;
 
     if (lista.length === 0) {
       return (

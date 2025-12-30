@@ -21,6 +21,10 @@ const PatrimonioScreen: React.FC<Props> = ({ navigation }) => {
   navigation.navigate('PrestamosStack');
   };
 
+  const goInversiones = () => {
+  navigation.navigate('InversionesStack');
+};
+
   return (
     <>
       <Header title="Patrimonio" subtitle="Propiedades y préstamos activos." showBack />
@@ -61,6 +65,23 @@ const PatrimonioScreen: React.FC<Props> = ({ navigation }) => {
 
               <Ionicons name="chevron-forward" size={18} color={colors.textSecondary} />
             </TouchableOpacity>
+
+            {/* Inversiones */}
+          <TouchableOpacity style={panelStyles.menuCard} onPress={goInversiones}>
+            <View style={panelStyles.menuIconCircle}>
+              <Ionicons name="trending-up-outline" size={22} color="#fff" />
+            </View>
+
+            <View style={panelStyles.menuTextContainer}>
+              <Text style={panelStyles.menuTitle}>Inversiones</Text>
+              <Text style={panelStyles.menuSubtitle}>
+                Operaciones tipo JV/NPL: capital, retorno y rentabilidad esperada.
+              </Text>
+            </View>
+
+            <Ionicons name="chevron-forward" size={18} color={colors.textSecondary} />
+          </TouchableOpacity>
+
           </View>
         </ScrollView>
       </View>

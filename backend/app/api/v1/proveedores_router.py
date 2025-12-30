@@ -123,7 +123,7 @@ def create_proveedor(
     return obj
 
 @router.put(
-    "{prov_id}",
+    "/{prov_id}",
     response_model=ProveedorRead,
     summary="Actualizar proveedor",
 )
