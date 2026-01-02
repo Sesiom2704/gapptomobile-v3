@@ -665,21 +665,21 @@ SELECT
 UNION ALL
 SELECT
   (SELECT cierre_id FROM params), (SELECT anio FROM params), (SELECT mes FROM params),
-  CAST(:seg_vivi AS text), 'VIVI'::text,
+  CAST(:seg_vivi AS text), 'VIVIENDAS'::text,
   (SELECT esperado FROM vivi_esperado),
   (SELECT real     FROM vivi_real)
 
 UNION ALL
 SELECT
   (SELECT cierre_id FROM params), (SELECT anio FROM params), (SELECT mes FROM params),
-  CAST(:seg_gest_resto AS text), 'GEST'::text,
+  CAST(:seg_gest_resto AS text), 'GESTIONABLES'::text,
   (SELECT esperado FROM gest_esperado),
   (SELECT real     FROM gest_real)
 
 UNION ALL
 SELECT
   (SELECT cierre_id FROM params), (SELECT anio FROM params), (SELECT mes FROM params),
-  CAST(:seg_aho AS text), 'AHO'::text,
+  CAST(:seg_aho AS text), 'AHORRO'::text,
   (SELECT esperado FROM aho_esperado),
   (SELECT real     FROM aho_real);
 """
