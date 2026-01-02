@@ -77,7 +77,6 @@ export type ReiniciarMesRequest = {
 export type GenerarCierreRequest = {
   force?: boolean;
   user_id?: number;
-  version?: number;
 };
 
 export type GenerarYReiniciarRequest = {
@@ -181,7 +180,7 @@ export const reinicioApi = {
     const res = await cierreMensualApi.generar({
       force: !!payload?.force,
       userId: payload?.user_id,
-      version: payload?.version,
+
     });
     return res;
   },
