@@ -56,7 +56,6 @@ class CierreMensualDetalleOut(BaseModel):
     real: float
     desviacion: float
     cumplimiento_pct: Optional[float] = None
-    n_items: int
     incluye_kpi: bool
 
     fecha_cierre: datetime
