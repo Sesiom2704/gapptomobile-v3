@@ -11,8 +11,12 @@ CAMBIO IMPORTANTE:
 - Rangos de fecha son half-open: [start, end)
   Ejemplo: dic 2025 => [2025-12-01, 2026-01-01)
 
-Nota:
+Notas:
 - Se normaliza periodicidad: UPPER(REPLACE(periodicidad,'_',' ')) para tolerar 'PAGO_UNICO'.
+- Inserción detalle:
+    - 4 filas: COT, VIVI, GEST-RESTO, AHO
+    - NO usa n_items (columna eliminada)
+    - robusto ante ausencia de gen_random_uuid() en Postgres (Render suele no tener pgcrypto)
 """
 
 from __future__ import annotations
@@ -20,6 +24,7 @@ from __future__ import annotations
 from calendar import monthrange
 from datetime import date, datetime, timezone
 from typing import Any, Dict, Optional, Tuple
+from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import func, text
@@ -306,8 +311,6 @@ def _reiniciar_estados_core(db: Session, user_id: int, aplicar_promedios: bool =
             inc.modifiedon = func.now()
 
     # Nota: aquí no ejecuto promedios porque tu snippet original los tenía en otro bloque.
-    # Si quieres reactivar PROM-3M, lo enchufamos aquí con una función equivalente a la que ya usabas.
-
     db.commit()
     return {"updated": counters}
 
@@ -336,7 +339,7 @@ def _build_summary(updated: dict) -> dict:
 
 def _compute_cierre_snapshot_sql(db: Session, user_id: int, anio: int, mes: int) -> dict:
     """
-    Calcula el snapshot del cierre del periodo (anio, mes) con las reglas definidas arriba.
+    Calcula el snapshot del cierre del periodo (anio, mes) con las reglas definidas.
 
     Además, añade contadores útiles para UI (tabla 3 columnas):
     - n_ingresos_total
@@ -414,7 +417,7 @@ def _compute_cierre_snapshot_sql(db: Session, user_id: int, anio: int, mes: int)
         or 0
     )
 
-    # 3) desv_ingresos = esperados - reales (según tu definición)
+    # 3) desv_ingresos = esperados - reales
     desv_ingresos = float(ingresos_esperados - ingresos_reales)
 
     # 4) gastos_gestionables_esperados + 13) n_recurrentes_gas
@@ -506,7 +509,7 @@ def _compute_cierre_snapshot_sql(db: Session, user_id: int, anio: int, mes: int)
     gastos_esperados_total = float(gastos_gestionables_esperados + gastos_cotidianos_esperados)
     desv_gastos_total = float(gastos_esperados_total - gastos_reales_total)
 
-    # Resultado esperado/real (necesario en UI)
+    # Resultado esperado/real
     resultado_esperado = float(ingresos_esperados - gastos_esperados_total)
     resultado_real = float(ingresos_reales - gastos_reales_total)
     desv_resultado = float(resultado_esperado - resultado_real)
@@ -550,22 +553,21 @@ def _compute_cierre_snapshot_sql(db: Session, user_id: int, anio: int, mes: int)
 
 
 # =============================================================================
-# Core - insertar detalle cierre (SQL puro)
+# Core - insertar detalle cierre (SQL puro) + estrategia UUID robusta
 # =============================================================================
 
-DETAIL_INSERT_SQL = """
+DETAIL_INSERT_SQL_TEMPLATE = """
 WITH
 params AS (
   SELECT
     :user_id::int  AS user_id,
     :anio::int     AS anio,
     :mes::int      AS mes,
-    :cierre_id::uuid AS cierre_id,
+    {cierre_id_cast} AS cierre_id,
     :start_date::date AS start_date,
     :end_date::date   AS end_date
 ),
 
--- Base gastos del mes (rango half-open) + normalización periodicidad
 gastos_base AS (
   SELECT
     g.*,
@@ -584,9 +586,7 @@ ingresos_base AS (
     AND i.ultimo_ingreso_on <  (SELECT end_date   FROM params)
 ),
 
--- -------------------------
 -- 1) COT (COTIDIANOS)
--- -------------------------
 cot_esperado AS (
   SELECT COALESCE(SUM(importe_cuota), 0)::float AS esperado
   FROM gastos_base
@@ -601,11 +601,7 @@ cot_real AS (
     AND gc.pagado = TRUE
 ),
 
--- -------------------------
 -- 2) VIVI (VIVIENDAS)
--- esperado: periodicidad != PAGO UNICO
--- real: todos
--- -------------------------
 vivi_esperado AS (
   SELECT COALESCE(SUM(importe_cuota), 0)::float AS esperado
   FROM gastos_base
@@ -618,12 +614,7 @@ vivi_real AS (
   WHERE segmento_id = :seg_vivi
 ),
 
--- -------------------------
 -- 3) GEST-RESTO (GESTIONABLES)
--- excluye COT, VIVI, AHO
--- esperado: periodicidad != PAGO UNICO
--- real: todos
--- -------------------------
 gest_esperado AS (
   SELECT COALESCE(SUM(importe_cuota), 0)::float AS esperado
   FROM gastos_base
@@ -636,11 +627,7 @@ gest_real AS (
   WHERE segmento_id NOT IN (:seg_cot, :seg_vivi, :seg_aho)
 ),
 
--- -------------------------
 -- 4) AHO (AHORRO)
--- esperado: gastos AHO no PAGO UNICO
--- real: (gastos AHO) - (ingresos tipo_id = TING_AHO)
--- -------------------------
 aho_esperado AS (
   SELECT COALESCE(SUM(importe_cuota), 0)::float AS esperado
   FROM gastos_base
@@ -673,19 +660,19 @@ rows AS (
   UNION ALL
   SELECT
     (SELECT cierre_id FROM params), (SELECT anio FROM params), (SELECT mes FROM params),
-    :seg_vivi, 'VIVIENDAS',
+    :seg_vivi::text, 'VIVIENDAS'::text,
     (SELECT esperado FROM vivi_esperado),
     (SELECT real     FROM vivi_real)
   UNION ALL
   SELECT
     (SELECT cierre_id FROM params), (SELECT anio FROM params), (SELECT mes FROM params),
-    :seg_gest_resto, 'GESTIONABLES',
+    :seg_gest_resto::text, 'GESTIONABLES'::text,
     (SELECT esperado FROM gest_esperado),
     (SELECT real     FROM gest_real)
   UNION ALL
   SELECT
     (SELECT cierre_id FROM params), (SELECT anio FROM params), (SELECT mes FROM params),
-    :seg_aho, 'AHORRO',
+    :seg_aho::text, 'AHORRO'::text,
     (SELECT esperado FROM aho_esperado),
     (SELECT real     FROM aho_real)
 )
@@ -706,7 +693,7 @@ INSERT INTO cierre_mensual_detalle (
   user_id
 )
 SELECT
-  gen_random_uuid(),
+  {uuid_expr} AS id,
   r.cierre_id,
   r.anio,
   r.mes,
@@ -726,35 +713,263 @@ FROM rows r;
 """
 
 
+def _is_uuid_value(v: Any) -> bool:
+    """Heurística segura: detecta si v es UUID o string UUID."""
+    if isinstance(v, UUID):
+        return True
+    if isinstance(v, str):
+        try:
+            UUID(v)
+            return True
+        except Exception:
+            return False
+    return False
+
+
+def _detect_uuid_function(db: Session) -> str | None:
+    """
+    Detecta una función de generación UUID disponible en Postgres.
+    Orden:
+      1) gen_random_uuid()   (pgcrypto)
+      2) uuid_generate_v4()  (uuid-ossp)
+    """
+    try:
+        db.execute(text("SELECT gen_random_uuid();"))
+        return "gen_random_uuid()"
+    except Exception:
+        pass
+    try:
+        db.execute(text("SELECT uuid_generate_v4();"))
+        return "uuid_generate_v4()"
+    except Exception:
+        return None
+
+
 def _insert_cierre_detalles_sql_puro(
     db: Session,
     *,
-    cierre_id,
+    cierre_id: Any,
     user_id: int,
     anio: int,
     mes: int,
     start_date: date,
     end_date: date,
-) -> None:
+) -> int:
     """
     Inserta en cierre_mensual_detalle usando SQL puro.
-    - Inserta 4 filas (COT, VIVI, GEST-RESTO, AHO) con las reglas definidas.
+
+    - Inserta 4 filas (COT, VIVI, GEST-RESTO, AHO).
     - NO usa n_items (columna eliminada).
+    - Robusto ante:
+        * cierre_id UUID o string
+        * ausencia de gen_random_uuid() / uuid_generate_v4()
+          (si no hay función, genera UUID en Python e inserta uno por fila)
+    Devuelve: número de filas insertadas.
     """
-    params = {
-        "cierre_id": str(cierre_id),
+
+    # 1) casteo cierre_id dentro del CTE params (evita fallos si NO es UUID)
+    if _is_uuid_value(cierre_id):
+        cierre_id_cast = ":cierre_id::uuid"
+        cierre_id_param = str(cierre_id)
+    else:
+        cierre_id_cast = ":cierre_id::text"
+        cierre_id_param = str(cierre_id)
+
+    # 2) detectar función UUID en DB (si existe)
+    uuid_func = _detect_uuid_function(db)
+
+    # 3) si hay función, podemos generar id en SQL; si no, pre-generamos 4 UUIDs en Python
+    if uuid_func:
+        uuid_expr = uuid_func
+        sql = DETAIL_INSERT_SQL_TEMPLATE.format(cierre_id_cast=cierre_id_cast, uuid_expr=uuid_expr)
+        params = {
+            "cierre_id": cierre_id_param,
+            "user_id": int(user_id),
+            "anio": int(anio),
+            "mes": int(mes),
+            "start_date": start_date,  # pasar date, no string
+            "end_date": end_date,      # pasar date, no string
+            "seg_cot": SEG_COT,
+            "seg_vivi": SEG_VIVI,
+            "seg_aho": SEG_AHO,
+            "seg_gest_resto": SEG_GEST_RESTO,
+            "ting_aho": TING_AHO,
+        }
+        res = db.execute(text(sql), params)
+        # En psycopg3, rowcount suele venir bien en INSERT...SELECT
+        return int(res.rowcount or 0)
+
+    # 4) fallback sin función UUID: generar IDs Python y hacer INSERT separado (4 filas)
+    #    Mantiene el mismo cálculo (CTEs), pero insertamos cada fila con id fijo.
+    sql_base = DETAIL_INSERT_SQL_TEMPLATE.format(cierre_id_cast=cierre_id_cast, uuid_expr=":detalle_id")
+    base_params = {
+        "cierre_id": cierre_id_param,
         "user_id": int(user_id),
         "anio": int(anio),
         "mes": int(mes),
-        "start_date": start_date.isoformat(),
-        "end_date": end_date.isoformat(),
+        "start_date": start_date,
+        "end_date": end_date,
         "seg_cot": SEG_COT,
         "seg_vivi": SEG_VIVI,
         "seg_aho": SEG_AHO,
         "seg_gest_resto": SEG_GEST_RESTO,
         "ting_aho": TING_AHO,
     }
-    db.execute(text(DETAIL_INSERT_SQL), params)
+
+    inserted_total = 0
+    # Ejecutamos 4 veces: cada ejecución generará 4 filas si dejamos el UNION ALL completo.
+    # Para evitar duplicar, en este fallback no repetimos el UNION ALL 4 veces.
+    # Solución: insertamos una sola vez, pero necesitamos un id por fila: imposible sin función UUID.
+    # Por eso, en fallback hacemos un INSERT multi-row explícito calculando rows primero.
+    #
+    # Estrategia: extraer las 4 filas "rows" como SELECT y luego insertar desde Python.
+
+    rows_sql = text(f"""
+    WITH
+    params AS (
+      SELECT
+        :user_id::int  AS user_id,
+        :anio::int     AS anio,
+        :mes::int      AS mes,
+        {cierre_id_cast} AS cierre_id,
+        :start_date::date AS start_date,
+        :end_date::date   AS end_date
+    ),
+    gastos_base AS (
+      SELECT g.*, UPPER(REPLACE(COALESCE(g.periodicidad, ''), '_', ' ')) AS per_norm
+      FROM gastos g
+      JOIN params p ON p.user_id = g.user_id
+      WHERE g.ultimo_pago_on >= (SELECT start_date FROM params)
+        AND g.ultimo_pago_on <  (SELECT end_date   FROM params)
+    ),
+    ingresos_base AS (
+      SELECT i.*
+      FROM ingresos i
+      JOIN params p ON p.user_id = i.user_id
+      WHERE i.ultimo_ingreso_on >= (SELECT start_date FROM params)
+        AND i.ultimo_ingreso_on <  (SELECT end_date   FROM params)
+    ),
+    cot_esperado AS (
+      SELECT COALESCE(SUM(importe_cuota), 0)::float AS esperado
+      FROM gastos_base WHERE segmento_id = :seg_cot
+    ),
+    cot_real AS (
+      SELECT COALESCE(SUM(gc.importe), 0)::float AS real
+      FROM gastos_cotidianos gc
+      JOIN params p ON p.user_id = gc.user_id
+      WHERE gc.fecha >= (SELECT start_date FROM params)
+        AND gc.fecha <  (SELECT end_date   FROM params)
+        AND gc.pagado = TRUE
+    ),
+    vivi_esperado AS (
+      SELECT COALESCE(SUM(importe_cuota), 0)::float AS esperado
+      FROM gastos_base
+      WHERE segmento_id = :seg_vivi AND per_norm <> 'PAGO UNICO'
+    ),
+    vivi_real AS (
+      SELECT COALESCE(SUM(importe_cuota), 0)::float AS real
+      FROM gastos_base WHERE segmento_id = :seg_vivi
+    ),
+    gest_esperado AS (
+      SELECT COALESCE(SUM(importe_cuota), 0)::float AS esperado
+      FROM gastos_base
+      WHERE segmento_id NOT IN (:seg_cot, :seg_vivi, :seg_aho)
+        AND per_norm <> 'PAGO UNICO'
+    ),
+    gest_real AS (
+      SELECT COALESCE(SUM(importe_cuota), 0)::float AS real
+      FROM gastos_base
+      WHERE segmento_id NOT IN (:seg_cot, :seg_vivi, :seg_aho)
+    ),
+    aho_esperado AS (
+      SELECT COALESCE(SUM(importe_cuota), 0)::float AS esperado
+      FROM gastos_base
+      WHERE segmento_id = :seg_aho AND per_norm <> 'PAGO UNICO'
+    ),
+    aho_gastos_real AS (
+      SELECT COALESCE(SUM(importe_cuota), 0)::float AS real_gastos
+      FROM gastos_base WHERE segmento_id = :seg_aho
+    ),
+    aho_ingresos_real AS (
+      SELECT COALESCE(SUM(importe), 0)::float AS real_ing
+      FROM ingresos_base WHERE tipo_id = :ting_aho
+    ),
+    aho_real AS (
+      SELECT (SELECT real_gastos FROM aho_gastos_real) - (SELECT real_ing FROM aho_ingresos_real) AS real
+    )
+    SELECT
+      (SELECT cierre_id FROM params) AS cierre_id,
+      (SELECT anio FROM params) AS anio,
+      (SELECT mes  FROM params) AS mes,
+      :seg_cot::text AS segmento_id,
+      'COTIDIANOS'::text AS tipo_detalle,
+      (SELECT esperado FROM cot_esperado) AS esperado,
+      (SELECT real     FROM cot_real)     AS real
+    UNION ALL
+    SELECT
+      (SELECT cierre_id FROM params), (SELECT anio FROM params), (SELECT mes FROM params),
+      :seg_vivi::text, 'VIVIENDAS'::text,
+      (SELECT esperado FROM vivi_esperado),
+      (SELECT real     FROM vivi_real)
+    UNION ALL
+    SELECT
+      (SELECT cierre_id FROM params), (SELECT anio FROM params), (SELECT mes FROM params),
+      :seg_gest_resto::text, 'GESTIONABLES'::text,
+      (SELECT esperado FROM gest_esperado),
+      (SELECT real     FROM gest_real)
+    UNION ALL
+    SELECT
+      (SELECT cierre_id FROM params), (SELECT anio FROM params), (SELECT mes FROM params),
+      :seg_aho::text, 'AHORRO'::text,
+      (SELECT esperado FROM aho_esperado),
+      (SELECT real     FROM aho_real)
+    """)
+
+    rows = db.execute(rows_sql, base_params).mappings().all()
+
+    if not rows:
+        return 0
+
+    # Insert por fila con UUID python
+    insert_one = text("""
+    INSERT INTO cierre_mensual_detalle (
+      id, cierre_id, anio, mes, segmento_id, tipo_detalle,
+      esperado, real, desviacion, cumplimiento_pct,
+      incluye_kpi, fecha_cierre, user_id
+    ) VALUES (
+      :id, :cierre_id, :anio, :mes, :segmento_id, :tipo_detalle,
+      :esperado, :real, :desviacion, :cumplimiento_pct,
+      TRUE, NOW(), :user_id
+    )
+    """)
+
+    for r in rows:
+        esperado = float(r["esperado"] or 0.0)
+        real = float(r["real"] or 0.0)
+        desviacion = esperado - real
+        cumplimiento_pct = None
+        if esperado and esperado != 0:
+            cumplimiento_pct = round((real / esperado) * 100.0, 2)
+
+        db.execute(
+            insert_one,
+            {
+                "id": str(uuid4()),
+                "cierre_id": str(r["cierre_id"]),
+                "anio": int(r["anio"]),
+                "mes": int(r["mes"]),
+                "segmento_id": str(r["segmento_id"]),
+                "tipo_detalle": str(r["tipo_detalle"]),
+                "esperado": esperado,
+                "real": real,
+                "desviacion": desviacion,
+                "cumplimiento_pct": cumplimiento_pct,
+                "user_id": int(user_id),
+            },
+        )
+        inserted_total += 1
+
+    return inserted_total
 
 
 # =============================================================================
@@ -974,7 +1189,7 @@ def cierre_ejecutar(
         db.add(cab)
         db.flush()  # asegura cab.id disponible antes del detalle
 
-        _insert_cierre_detalles_sql_puro(
+        inserted = _insert_cierre_detalles_sql_puro(
             db,
             cierre_id=cab.id,
             user_id=current_user.id,
@@ -986,16 +1201,18 @@ def cierre_ejecutar(
 
         db.commit()
 
+    except HTTPException:
+        # Si es un HTTPException explícito, lo propagamos
+        raise
     except Exception as e:
         db.rollback()
-        # Importante: devolver un error útil sin perder el stack interno del servidor
         raise HTTPException(status_code=500, detail=f"Error insertando cierre mensual: {str(e)}")
 
     return CierreExecuteResponse(
         cierre_id=str(cab.id),
         anio=anio_val,
         mes=mes_val,
-        inserted_detalles=4,
+        inserted_detalles=int(inserted),
         range_start=start_date.isoformat(),
         range_end=end_date.isoformat(),
     )
