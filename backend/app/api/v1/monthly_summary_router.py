@@ -7,7 +7,7 @@ from typing import Optional, List, Tuple
 
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.orm import Session
-from sqlalchemy import func, cast, Integer  # ✅ PATCH: cast/Integer para evitar SMALLINT overflow
+from sqlalchemy import func, cast, Integer  # ✅ Cast a Integer para evitar overflow SMALLINT
 
 from backend.app.schemas.monthly_summary import (
     MonthlySummaryResponse,
@@ -56,6 +56,23 @@ def _get_month_range(year: Optional[int], month: Optional[int]) -> Tuple[date, d
     return ini, fin_excl
 
 
+def _add_months(y: int, m: int, delta: int) -> Tuple[int, int]:
+    """
+    Suma (o resta) meses a un (year, month) y devuelve el nuevo (year, month).
+
+    Ej:
+      _add_months(2025, 1, -1) -> (2024, 12)
+      _add_months(2025, 12,  1) -> (2026, 1)
+
+    Implementación robusta basada en "mes absoluto":
+      abs = year*12 + (month-1)
+    """
+    total = y * 12 + (m - 1) + delta
+    y2 = total // 12
+    m2 = (total % 12) + 1
+    return y2, m2
+
+
 @router.get(
     "/analytics/monthly-summary",
     response_model=MonthlySummaryResponse,
@@ -82,6 +99,10 @@ def get_monthly_summary(
     - REAL gestionables extras: pagados en mes, segmento != COT, periodicidad = PAGO UNICO (incluye legacy PAGO ÚNICO)
     - REAL cotidianos: gasto_cotidiano pagado en mes
     - REAL gastos_mes: gestionables_recurrentes + gestionables_extras + cotidianos
+
+    NOTA SOBRE "vs media 12m" y "run rate 12m":
+    - Ambos se calculan contra los 12 cierres ANTERIORES al mes objetivo.
+    - Esto evita "contaminar" la media incluyendo el propio mes objetivo.
     """
     ini, fin_excl = _get_month_range(year, month)
     anio = ini.year
@@ -89,23 +110,24 @@ def get_monthly_summary(
     mes_label = ini.strftime("%B %Y").capitalize()
 
     # -------------------------------------------------------------------------
-    # ✅ PATCH (CRÍTICO):
-    # Ventana 12 meses SIN overflow y con cálculo correcto.
+    # ✅ Ventana 12 meses (benchmark) CORRECTA Y SIN OVERFLOW
     #
-    # Problema detectado en Render:
-    # - Se estaba usando (anio * 100 + mes) con casts implícitos a SMALLINT
-    # - SMALLINT no soporta 202512 (máx 32767) => "smallint out of range"
-    # - Además, (anio*100+mes) - 120 NO representa "12 meses atrás" de forma correcta
+    # Queremos los 12 cierres anteriores al mes objetivo:
+    #   end = mes objetivo - 1
+    #   start = end - 11
     #
-    # Solución:
-    # - Construimos un "period_ym" como INTEGER: anio::int*100 + mes::int
-    # - current_ym = anio*100 + mes (ej 202512)
-    # - lower_ym   = (anio-1)*100 + mes (ej 202412)
-    # - Filtramos: period_ym <= current_ym AND period_ym > lower_ym
-    #   => incluye exactamente los 12 meses: 202501..202512
+    # Ej (mes objetivo = 2025-12):
+    #   end = 2025-11
+    #   start = 2024-12
+    #   => 12 meses: 202412..202511
     # -------------------------------------------------------------------------
-    current_ym = int(anio) * 100 + int(mes)
-    lower_ym = (int(anio) - 1) * 100 + int(mes)
+    end_y, end_m = _add_months(anio, mes, -1)
+    start_y, start_m = _add_months(end_y, end_m, -11)
+
+    end_ym = int(end_y) * 100 + int(end_m)
+    start_ym = int(start_y) * 100 + int(start_m)
+
+    # period_ym como INTEGER evita overflow de SMALLINT en expresiones (ej 202512)
     period_ym = cast(CierreMensual.anio, Integer) * 100 + cast(CierreMensual.mes, Integer)
 
     # -------------------------------------------------------------------------
@@ -273,7 +295,7 @@ def get_monthly_summary(
 
     ahorro_mes = ingresos_mes - gastos_mes
 
-    # ✅ PATCH: 12m media SIN SMALLINT y con rango 12m correcto
+    # Media 12m: 12 cierres ANTERIORES al mes objetivo (start_ym..end_ym)
     cierres_12m_q = (
         db.query(
             func.coalesce(func.avg(CierreMensual.ingresos_reales), 0.0),
@@ -281,10 +303,11 @@ def get_monthly_summary(
         )
         .filter(
             CierreMensual.user_id == current_user.id,
-            period_ym <= current_ym,
-            period_ym > lower_ym,
+            period_ym >= start_ym,
+            period_ym <= end_ym,
         )
     )
+
     ingresos_media_12m, gastos_media_12m = cierres_12m_q.first() or (0.0, 0.0)
     ingresos_media_12m = float(ingresos_media_12m or 0.0)
     gastos_media_12m = float(gastos_media_12m or 0.0)
@@ -378,7 +401,7 @@ def get_monthly_summary(
     # 7) Run rate 12 meses
     # -------------------------------------------------------------------------
 
-    # ✅ PATCH: mismo arreglo que en KPIs (evitar SMALLINT overflow y rango 12m correcto)
+    # Run rate: promedio de los 12 cierres ANTERIORES (no incluye el mes objetivo)
     cierres_det_q = (
         db.query(
             func.coalesce(func.avg(CierreMensual.ingresos_reales), 0.0),
@@ -388,8 +411,8 @@ def get_monthly_summary(
         )
         .filter(
             CierreMensual.user_id == current_user.id,
-            period_ym <= current_ym,
-            period_ym > lower_ym,
+            period_ym >= start_ym,
+            period_ym <= end_ym,
         )
     )
 
@@ -412,46 +435,144 @@ def get_monthly_summary(
         )
 
     # -------------------------------------------------------------------------
-    # 8) Notas
+    # 8) Alertas e Insight (ANTES: notas)
+    # -------------------------------------------------------------------------
+    #
+    # Objetivo:
+    # - Dar señales accionables sin generar "spam".
+    # - Mantener compatibilidad: se devuelve la lista `notas` como antes.
+    #
+    # Convención de tipo:
+    # - WARNING: requiere atención
+    # - SUCCESS: señal positiva
+    # - INFO: insight informativo
     # -------------------------------------------------------------------------
 
     notas: List[MonthlyResumenNota] = []
 
-    if ahorro_mes < 0:
-        notas.append(
-            MonthlyResumenNota(
-                tipo="WARNING",
-                titulo="Mes en negativo",
-                mensaje=(
-                    "Este mes has gastado más de lo que has ingresado. "
-                    "Revisa tus gastos extraordinarios y cotidianos."
-                ),
-            )
-        )
-    elif ahorro_mes > 0 and ingresos_vs_media_pct and ingresos_vs_media_pct > 5:
-        notas.append(
-            MonthlyResumenNota(
-                tipo="SUCCESS",
-                titulo="Buen mes de ingresos",
-                mensaje=(
-                    "Tus ingresos están por encima de la media de los últimos 12 meses. "
-                    "Aprovecha para reforzar tu ahorro o amortizar deuda."
-                ),
-            )
+    def add_note(tipo: str, titulo: str, mensaje: str) -> None:
+        # Evita duplicados por título (simple y suficiente)
+        if any(n.titulo == titulo for n in notas):
+            return
+        notas.append(MonthlyResumenNota(tipo=tipo, titulo=titulo, mensaje=mensaje))
+
+    # 8.1) Situaciones base
+    if ingresos_mes <= 0 and gastos_mes > 0:
+        add_note(
+            "WARNING",
+            "Gastos sin ingresos",
+            "Este mes hay gastos registrados pero no se han registrado ingresos. Revisa cobros o categorización.",
         )
 
-    if ingresos_mes > 0:
-        ratio_gasto = gastos_mes / ingresos_mes * 100.0
-        notas.append(
-            MonthlyResumenNota(
-                tipo="INFO",
-                titulo="Ratio de gasto sobre ingresos",
-                mensaje=(
-                    f"Has destinado aproximadamente un {ratio_gasto:.1f}% de tus "
-                    "ingresos a gastos este mes."
-                ),
-            )
+    if ahorro_mes < 0:
+        add_note(
+            "WARNING",
+            "Mes en negativo",
+            "Este mes has gastado más de lo que has ingresado. Revisa gastos extraordinarios y cotidianos.",
         )
+
+    # 8.2) vs media 12m (interpretación: negativo = mejor, positivo = peor)
+    # (El front pintará negativo en verde y positivo en rojo.)
+    if gastos_vs_media_pct is not None:
+        if gastos_vs_media_pct > 10:
+            add_note(
+                "WARNING",
+                "Gasto por encima de la media",
+                "Tus gastos están significativamente por encima de la media de los últimos 12 cierres. Revisa especialmente extraordinarios.",
+            )
+        elif gastos_vs_media_pct < -10:
+            add_note(
+                "SUCCESS",
+                "Gasto por debajo de la media",
+                "Buen control: tus gastos están claramente por debajo de la media de los últimos 12 cierres.",
+            )
+
+    if ingresos_vs_media_pct is not None:
+        if ingresos_vs_media_pct < -15:
+            add_note(
+                "WARNING",
+                "Ingresos por debajo de la media",
+                "Tus ingresos están por debajo de la media de los últimos 12 cierres. Revisa si ha faltado algún cobro o KPI.",
+            )
+        elif ingresos_vs_media_pct > 10 and ahorro_mes > 0:
+            add_note(
+                "SUCCESS",
+                "Buen mes de ingresos",
+                "Tus ingresos están por encima de la media de los últimos 12 cierres. Aprovecha para reforzar ahorro o amortizar deuda.",
+            )
+
+    # 8.3) Peso de extraordinarios (gastos)
+    if gastos_mes > 0 and gastos_extra_importe > 0:
+        pct_extra_gastos = (gastos_extra_importe / gastos_mes) * 100.0
+        if pct_extra_gastos >= 35:
+            add_note(
+                "WARNING",
+                "Mucho gasto extraordinario",
+                f"Los gastos extraordinarios representan aprox. un {pct_extra_gastos:.1f}% del total de gastos del mes.",
+            )
+        else:
+            add_note(
+                "INFO",
+                "Gastos extraordinarios presentes",
+                f"Este mes has tenido gastos extraordinarios (aprox. {pct_extra_gastos:.1f}% del total).",
+            )
+
+    # 8.4) Presupuesto vs real (si hay presupuesto > 0)
+    if gasto_total_presupuesto > 0:
+        desviacion_gasto_pct = ((gastos_mes - gasto_total_presupuesto) / gasto_total_presupuesto) * 100.0
+        if desviacion_gasto_pct > 10:
+            add_note(
+                "WARNING",
+                "Gasto por encima del presupuesto",
+                f"Este mes has gastado aprox. un +{desviacion_gasto_pct:.1f}% sobre el presupuesto.",
+            )
+        elif desviacion_gasto_pct < -10:
+            add_note(
+                "SUCCESS",
+                "Gasto por debajo del presupuesto",
+                f"Buen control: este mes estás aprox. un {desviacion_gasto_pct:.1f}% por debajo del presupuesto.",
+            )
+
+    if presupuesto_cotidianos > 0:
+        desviacion_cot_pct = ((consumidos_cotidianos - presupuesto_cotidianos) / presupuesto_cotidianos) * 100.0
+        if desviacion_cot_pct > 10:
+            add_note(
+                "WARNING",
+                "Cotidianos por encima del presupuesto",
+                f"Los gastos cotidianos van aprox. un +{desviacion_cot_pct:.1f}% sobre el presupuesto.",
+            )
+
+    # 8.5) Insight general: ratio gastos/ingresos (solo si ingresos > 0)
+    if ingresos_mes > 0:
+        ratio_gasto = (gastos_mes / ingresos_mes) * 100.0
+        add_note(
+            "INFO",
+            "Ratio de gasto sobre ingresos",
+            f"Has destinado aproximadamente un {ratio_gasto:.1f}% de tus ingresos a gastos este mes.",
+        )
+
+        # Señal extra: eficiencia de gasto
+        if ratio_gasto <= 70 and ahorro_mes > 0:
+            add_note(
+                "SUCCESS",
+                "Buen equilibrio ingresos/gastos",
+                "Tu ratio de gasto es bajo y el mes cierra en positivo. Mantén el patrón.",
+            )
+
+    # 8.6) Insight por ingresos extraordinarios (si existen)
+    if ingresos_mes > 0 and ingresos_extra_importe > 0:
+        pct_extra_ing = (ingresos_extra_importe / ingresos_mes) * 100.0
+        add_note(
+            "INFO",
+            "Ingresos extraordinarios",
+            f"Este mes has tenido ingresos extraordinarios (aprox. {pct_extra_ing:.1f}% del total).",
+        )
+
+    # Limitar cantidad para evitar saturación (orden actual ya prioriza WARNING/SUCCESS primero)
+    # Ajusta el límite si quieres más/menos densidad de insight.
+    MAX_NOTAS = 6
+    if len(notas) > MAX_NOTAS:
+        notas = notas[:MAX_NOTAS]
 
     # -------------------------------------------------------------------------
     # 9) Response (IMPORTANTE: consumidos_cotidianos es REQUIRED en tu schema)

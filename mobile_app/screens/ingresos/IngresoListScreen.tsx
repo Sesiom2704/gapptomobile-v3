@@ -14,11 +14,22 @@
  *       - NO existen ingresos pendientes (gestionables)
  *   - Si NO se cumple, se mantiene el "+" legacy (no se pierde funcionalidad).
  *
- * Implementación:
- *   - Ingresos pendientes: ya existe endpoint /api/v1/ingresos/pendientes.
- *     - Si estamos en filtro "pendientes", usamos ingresos.length (la lista ya es esa).
- *     - Si estamos en "todos", pedimos el endpoint para el count.
- *   - Gastos pendientes: usamos useGastos('pendientes') (mismo hook que en GastosList).
+ * NUEVO (Estado vacío inteligente – cierre mensual):
+ * - En IngresosList, cuando estamos en "Pendientes":
+ *   1) Si NO hay ingresos pendientes y NO hay gastos pendientes, y además NO hay filtros activos "reales":
+ *      - Mostrar icono de check centrado (tamaño medio) en lugar del texto legacy.
+ *   2) Si NO hay ingresos pendientes pero SÍ hay gastos pendientes (y NO hay filtros activos "reales"):
+ *      - Mostrar el mismo check + botón: "Ver X gastos pendientes" que navega a Gastos pendientes.
+ *   3) Si hay ingresos pendientes: se muestra la lista normal.
+ *   4) Si la lista está vacía por búsqueda/filtros: se mantiene el mensaje legacy.
+ *
+ * IMPORTANTE (qué cuenta como "filtros activos reales" en Pendientes):
+ * - En "Pendientes" se fuerzan automáticamente: Estado=activos, Pagado=no_pagado, KPI=kpi_si.
+ *   Esos NO cuentan como filtros activos reales para el vacío inteligente.
+ * - Sí cuentan:
+ *   - searchText (búsqueda)
+ *   - periodicidad distinta de 'todos'
+ *   - tipo distinto de 'todos'
  */
 
 import React, { useEffect, useState, useMemo, useCallback } from 'react';
@@ -95,18 +106,6 @@ type EstadoFiltro = 'todos' | 'activos' | 'inactivos';
 type PagadoFiltro = 'todos' | 'pagado' | 'no_pagado';
 type KpiFiltro = 'todos' | 'kpi_si' | 'kpi_no';
 
-function formatFechaIngreso(ing: Ingreso): string {
-  const raw = ing.fecha_inicio || ing.createon || null;
-  if (!raw) return '-';
-  const d = new Date(raw);
-  if (Number.isNaN(d.getTime())) return '-';
-  return d.toLocaleDateString('es-ES', {
-    day: '2-digit',
-    month: 'long',
-    year: 'numeric',
-  });
-}
-
 function getNombreTipoIngreso(ing: Ingreso): string {
   if (ing.tipo_nombre && ing.tipo_nombre.trim() !== '') return ing.tipo_nombre;
   if (ing.tipo_id && ing.tipo_id.trim() !== '') return ing.tipo_id;
@@ -164,7 +163,7 @@ export const IngresoListScreen: React.FC<Props> = ({ navigation }) => {
   };
 
   // ============================
-  // ✅ NUEVO: gastos pendientes para eligibility de reinicio
+  // ✅ GASTOS PENDIENTES: eligibility reinicio + vacío inteligente
   // ============================
   const {
     gastos: gastosPendientes,
@@ -174,7 +173,7 @@ export const IngresoListScreen: React.FC<Props> = ({ navigation }) => {
   const gastosPendientesCount = gastosPendientes?.length ?? 0;
 
   // ============================
-  // ✅ NUEVO: ingresos pendientes count para eligibility (cuando NO estamos en filtro pendientes)
+  // ✅ Ingresos pendientes count para eligibility (cuando NO estamos en "pendientes")
   // ============================
   const [ingresosPendientesCountApi, setIngresosPendientesCountApi] = useState<number | null>(
     null
@@ -247,7 +246,7 @@ export const IngresoListScreen: React.FC<Props> = ({ navigation }) => {
 
   const isPendientes = filtro === 'pendientes';
 
-  // En pendientes: fijamos estado/pagado/KPI
+  // En pendientes: fijamos estado/pagado/KPI (comportamiento legacy)
   useEffect(() => {
     if (isPendientes) {
       setFiltroEstado('activos');
@@ -502,6 +501,68 @@ export const IngresoListScreen: React.FC<Props> = ({ navigation }) => {
       return true;
     });
   }, [ingresos, searchText, filtroPeriodicidad, filtroTipo, filtroEstado, filtroPagado, filtroKpi]);
+
+  // =========================================================
+  // ✅ VACÍO INTELIGENTE (helpers únicos - sin duplicados)
+  // =========================================================
+
+  // "Filtros activos reales" para Pendientes (excluye estado/pagado/kpi porque están forzados)
+  const isDefaultPendientesIngresosFilters = useMemo(() => {
+    const hasSearch = searchText.trim().length > 0;
+    const hasPeriodicidad = filtroPeriodicidad !== 'todos';
+    const hasTipo = filtroTipo !== 'todos';
+    return !(hasSearch || hasPeriodicidad || hasTipo);
+  }, [searchText, filtroPeriodicidad, filtroTipo]);
+
+  // Navegación a Gastos pendientes (ajusta aquí si tu ruta difiere)
+  const goToGastosPendientes = useCallback(() => {
+    navigation.navigate('DayToDayTab', {
+      screen: 'GastosList',
+      params: { initialFiltro: 'pendientes' },
+    });
+  }, [navigation]);
+
+  const renderEmptyOkState = useCallback(
+    (opts: { showButton: boolean; buttonLabel?: string; onPress?: () => void }) => {
+      return (
+        <View style={styles.centered}>
+          <Ionicons name="checkmark-circle-outline" size={92} color={colors.primary} />
+
+          <Text
+            style={{
+              marginTop: 10,
+              fontSize: 13,
+              color: colors.textSecondary,
+              textAlign: 'center',
+            }}
+          >
+            Mes listo para cerrar.
+          </Text>
+
+          {opts.showButton && opts.buttonLabel && opts.onPress && (
+            <TouchableOpacity
+              onPress={opts.onPress}
+              style={{
+                marginTop: 14,
+                backgroundColor: colors.primary,
+                paddingVertical: 10,
+                paddingHorizontal: 14,
+                borderRadius: 12,
+              }}
+            >
+              <Text style={{ color: '#fff', fontWeight: '600' }}>{opts.buttonLabel}</Text>
+            </TouchableOpacity>
+          )}
+        </View>
+      );
+    },
+    []
+  );
+
+
+  // =========================================================
+  // Buscador avanzado
+  // =========================================================
 
   const renderBuscador = () => {
     const canChangeFixedFilters = !isPendientes;
@@ -833,6 +894,37 @@ export const IngresoListScreen: React.FC<Props> = ({ navigation }) => {
     );
   };
 
+  // ============================
+  // ✅ Regla final: Reiniciar mes
+  // ============================
+  const effectiveIngresosPendientesCount = useMemo(() => {
+    // Si estás en "pendientes", ya estás viendo EXACTAMENTE los pendientes.
+    if (isPendientes) return ingresos.length;
+
+    // Si estás en "todos", dependemos del count via API.
+    return ingresosPendientesCountApi;
+  }, [isPendientes, ingresos.length, ingresosPendientesCountApi]);
+
+  const canReiniciarMes = useMemo(() => {
+    if (effectiveIngresosPendientesCount == null) return false;
+    return gastosPendientesCount === 0 && effectiveIngresosPendientesCount === 0;
+  }, [gastosPendientesCount, effectiveIngresosPendientesCount]);
+
+  const goReiniciarMes = useCallback(() => {
+    navigation.navigate('MonthTab', {
+      screen: 'ReinciarCierreScreen',
+      params: {
+        returnToTab: 'DayToDayTab',
+        returnToScreen: 'IngresosList',
+      },
+    });
+  }, [navigation]);
+
+  const eligibilityLoading = loadingGastosPendientes || loadingIngresosPendientes;
+
+  // ============================
+  // Contenido
+  // ============================
   const renderContenido = () => {
     if (loading && ingresos.length === 0) {
       return (
@@ -851,7 +943,33 @@ export const IngresoListScreen: React.FC<Props> = ({ navigation }) => {
       );
     }
 
+    // ✅ Estado vacío inteligente + fallback legacy
     if (ingresosFiltrados.length === 0) {
+      const isPendientesView = filtro === 'pendientes';
+
+      if (isPendientesView) {
+        // En pendientes: ingresos === pendientes
+        const noHayIngresosPendientes = ingresos.length === 0;
+
+        // Solo si el vacío NO es por búsqueda/filtros reales
+        if (isDefaultPendientesIngresosFilters && noHayIngresosPendientes) {
+          const gastosPend = gastosPendientesCount;
+
+          // Caso 2: no hay ingresos pendientes, pero sí gastos pendientes
+          if (gastosPend > 0) {
+            return renderEmptyOkState({
+              showButton: true,
+              buttonLabel: `Ver ${gastosPend} gastos pendientes`,
+              onPress: goToGastosPendientes,
+            });
+          }
+
+          // Caso 1: no hay ingresos pendientes ni gastos pendientes
+          return renderEmptyOkState({ showButton: false });
+        }
+      }
+
+      // Vacío por filtros (o no estamos en Pendientes): mantenemos mensaje legacy
       return (
         <View style={styles.centered}>
           <Text style={styles.emptyText}>No hay ingresos que coincidan con el filtro.</Text>
@@ -889,34 +1007,6 @@ export const IngresoListScreen: React.FC<Props> = ({ navigation }) => {
     );
   };
 
-  // ============================
-  // ✅ NUEVO: regla final para habilitar Reiniciar mes
-  // ============================
-  const effectiveIngresosPendientesCount = useMemo(() => {
-    // Si estás en "pendientes", ya estás viendo EXACTAMENTE los pendientes.
-    if (isPendientes) return ingresos.length;
-
-    // Si estás en "todos", dependemos del count via API.
-    return ingresosPendientesCountApi;
-  }, [isPendientes, ingresos.length, ingresosPendientesCountApi]);
-
-  const canReiniciarMes = useMemo(() => {
-    if (effectiveIngresosPendientesCount == null) return false;
-    return gastosPendientesCount === 0 && effectiveIngresosPendientesCount === 0;
-  }, [gastosPendientesCount, effectiveIngresosPendientesCount]);
-
-  const goReiniciarMes = useCallback(() => {
-    navigation.navigate('MonthTab', {
-      screen: 'ReinciarCierreScreen',
-      params: {
-        returnToTab: 'DayToDayTab',
-        returnToScreen: 'IngresosList',
-      },
-    });
-  }, [navigation]);
-
-  const eligibilityLoading = loadingGastosPendientes || loadingIngresosPendientes;
-
   return (
     <>
       <Header
@@ -925,8 +1015,8 @@ export const IngresoListScreen: React.FC<Props> = ({ navigation }) => {
         showBack
         onBackPress={handleBack}
         /**
-         * ✅ NUEVO:
-         * - Si se cumplen requisitos: mostramos icono de reinicio (calendar-outline).
+         * ✅ Header:
+         * - Si se cumplen requisitos: icono de reinicio (calendar-outline).
          * - Si no: mantenemos el "+" legacy.
          */
         rightIconName={!eligibilityLoading && canReiniciarMes ? 'calendar-outline' : undefined}

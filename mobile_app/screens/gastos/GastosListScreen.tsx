@@ -12,6 +12,24 @@
  *     - NO existen ingresos pendientes (gestionables)
  * - Si NO se cumple, se mantiene el "+" legacy (no se pierde funcionalidad).
  *
+ * NUEVO (requisito "estado vacío inteligente" para cierre mensual):
+ * - En GastosList e IngresosList, cuando estamos en "Pendientes":
+ *   1) Si NO hay gastos pendientes y NO hay ingresos pendientes, y además NO hay filtros activos:
+ *      - Mostrar un icono de check centrado (tamaño medio) en vez de:
+ *        "No hay gastos que coincidan con el filtro."
+ *   2) Si NO hay gastos pendientes pero SÍ hay ingresos pendientes (y NO hay filtros activos):
+ *      - Mostrar check centrado + botón: "Ver X ingresos pendientes" que navega a Ingresos pendientes.
+ *   3) Si SÍ hay gastos pendientes:
+ *      - Mostrar la lista normal (sin cambios).
+ *   4) Si la lista está vacía porque el usuario está filtrando/buscando:
+ *      - Mantener el texto legacy "No hay gastos que coincidan con el filtro."
+ *
+ * NOTAS IMPORTANTES DE UX:
+ * - "No hay filtros activos" en Pendientes significa:
+ *   - NO hay búsqueda
+ *   - Segmento/Tipo/Periodicidad están en "todos"
+ *   - Los filtros fijados automáticamente en pendientes (activo/no_pagado/kpi) NO cuentan como filtros activos.
+ *
  * NOTAS DE IMPLEMENTACIÓN:
  * - Gastos pendientes: se obtienen con un useGastos('pendientes') adicional (no afecta al listado actual).
  * - Ingresos pendientes: se consulta /api/v1/ingresos/pendientes (misma ruta ya usada en IngresoListScreen).
@@ -300,7 +318,7 @@ export const GastosListScreen: React.FC<{ navigation: any; route: any }> = ({
   >(null);
 
   // ============================
-  // ✅ NUEVO: ingresos pendientes (para habilitar Reiniciar mes)
+  // ✅ NUEVO: ingresos pendientes (para habilitar Reiniciar mes y estado vacío inteligente)
   // ============================
   const [ingresosPendientesCount, setIngresosPendientesCount] = useState<number | null>(
     null
@@ -315,7 +333,7 @@ export const GastosListScreen: React.FC<{ navigation: any; route: any }> = ({
       const list = resp.data ?? [];
       setIngresosPendientesCount(Array.isArray(list) ? list.length : 0);
     } catch (e) {
-      // No rompemos la pantalla si falla el check. Dejamos null (desactiva reinicio).
+      // No rompemos la pantalla si falla el check. Dejamos null (desactiva reinicio + vacío inteligente).
       console.error('[GastosList] Error cargando ingresos pendientes', e);
       setIngresosPendientesCount(null);
     } finally {
@@ -1570,6 +1588,75 @@ export const GastosListScreen: React.FC<{ navigation: any; route: any }> = ({
     );
   };
 
+  // =========================================================
+  // ✅ NUEVO: Estado vacío inteligente (solo para GESTIONABLES en "Pendientes")
+  // =========================================================
+
+  /**
+   * En "Pendientes" hay filtros fijados automáticamente (activo/no_pagado/kpi).
+   * Para el "estado vacío inteligente" NO queremos considerar esos como filtros activos.
+   * Solo cuentan como filtros activos: búsqueda, segmento, tipo y periodicidad.
+   */
+  const isDefaultPendientesGestionablesFilters = useMemo(() => {
+    const hasSearch = searchText.trim().length > 0;
+    const hasSegmento = filtroSegmento !== 'todos';
+    const hasTipo = filtroTipoGasto !== 'todos';
+    const hasPeriodicidad = filtroPeriodicidad !== 'todos';
+
+    return !(hasSearch || hasSegmento || hasTipo || hasPeriodicidad);
+  }, [searchText, filtroSegmento, filtroTipoGasto, filtroPeriodicidad]);
+
+  /**
+   * Navegar a ingresos pendientes:
+   * - Asumimos que IngresosList vive en DayToDayTab (como en tu navegación existente).
+   * - Si tu ruta difiere, aquí es el único punto a ajustar.
+   */
+  const goToIngresosPendientes = useCallback(() => {
+    navigation.navigate('DayToDayTab', { screen: 'IngresosList' });
+  }, [navigation]);
+
+  /**
+   * Render de "check centrado" y opcionalmente botón.
+   * - Evitamos tocar listStyles: el estilo se construye inline para no romper nada global.
+   */
+  const renderEmptyOkState = useCallback(
+    (opts: { showButton: boolean; buttonLabel?: string; onPress?: () => void }) => {
+      return (
+        <View style={styles.centered}>
+          <Ionicons name="checkmark-circle-outline" size={92} color={colors.primary} />
+
+          <Text
+            style={{
+              marginTop: 10,
+              fontSize: 13,
+              color: colors.textSecondary,
+              textAlign: 'center',
+            }}
+          >
+            Mes listo para cerrar.
+          </Text>
+
+          {opts.showButton && opts.buttonLabel && opts.onPress && (
+            <TouchableOpacity
+              onPress={opts.onPress}
+              style={{
+                marginTop: 14,
+                backgroundColor: colors.primary,
+                paddingVertical: 10,
+                paddingHorizontal: 14,
+                borderRadius: 12,
+              }}
+            >
+              <Text style={{ color: '#fff', fontWeight: '600' }}>{opts.buttonLabel}</Text>
+            </TouchableOpacity>
+          )}
+        </View>
+      );
+    },
+    []
+  );
+
+
   // ======= Contenido principal (lista) =======
   const renderContenido = () => {
     if (filtro === 'cotidiano') {
@@ -1684,7 +1771,38 @@ export const GastosListScreen: React.FC<{ navigation: any; route: any }> = ({
 
     const lista = listaGestionables;
 
+    // =========================================================
+    // ✅ NUEVO: Estado vacío inteligente (solo si:
+    // - estamos en "pendientes" (gestionables),
+    // - la lista queda vacía,
+    // - y NO hay filtros activos (búsqueda/segmento/tipo/periodicidad),
+    // - y realmente NO hay pendientes (gastosPendientesCount === 0).
+    // =========================================================
     if (lista.length === 0) {
+      const isPendientesView = filtro === 'pendientes';
+
+      if (isPendientesView) {
+        const noHayGastosPendientes = gastosPendientesCount === 0;
+
+        // Solo mostramos "check" si el vacío no es por filtros/búsqueda.
+        if (isDefaultPendientesGestionablesFilters && noHayGastosPendientes) {
+          const ingresosPend = ingresosPendientesCount ?? 0;
+
+          // Caso 2: no hay gastos pendientes, pero sí ingresos pendientes
+          if (ingresosPend > 0) {
+            return renderEmptyOkState({
+              showButton: true,
+              buttonLabel: `Ver ${ingresosPend} ingresos pendientes`,
+              onPress: goToIngresosPendientes,
+            });
+          }
+
+          // Caso 1: no hay gastos pendientes ni ingresos pendientes
+          return renderEmptyOkState({ showButton: false });
+        }
+      }
+
+      // Vacío por filtros (o no estamos en Pendientes): mantenemos mensaje legacy
       return (
         <View style={styles.centered}>
           <Text style={styles.emptyText}>No hay gastos que coincidan con el filtro.</Text>

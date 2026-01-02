@@ -1,21 +1,31 @@
 // mobile_app/screens/cierres/ReinciarCierreScreen.tsx
 // -----------------------------------------------------------------------------
-// ReinciarCierreScreen (ajustes de diseño + comparativa)
+// ReinciarCierreScreen (ajustes de diseño + comparativa + PREVIEW cierre a insertar)
 //
-// Requisitos aplicados:
+// Requisitos (y comportamiento actual):
 // 1) El cierre persistido sigue siendo M-1 (ej. NOV 2025) -> sirve de referencia.
-// 2) La previsualización debe ser del mes actual (M), ej. DIC 2025.
+// 2) La previsualización "comparativa" es del mes actual (M), ej. DIC 2025.
 // 3) En lugar de “mostrar solo noviembre”, mostramos:
 //    - Datos de DICIEMBRE (mes actual) y al lado el % vs NOVIEMBRE.
-// 4) CTA dinámico sin chevron (usa OptionCard.showChevron=false).
+// 4) CTA dinámico sin chevron (OptionCard.showChevron=false).
+//
+// NUEVO (lo que pides ahora):
+// 5) En este screen se debe ver una PREVISUALIZACIÓN de los datos que se insertarán
+//    cuando se genere el cierre (M-1).
+//    - Se obtiene de /api/v1/cierre_mensual/_debug_snapshot (debug snapshot).
+//    - Se renderiza en estados:
+//        - HAY_PENDIENTES
+//        - LISTO_PARA_CIERRE
+//    - Esto NO rompe el flujo actual y NO cambia la persistencia.
 //
 // Implementación:
-// - “Mes actual” se saca de Date().
-// - “Mes anterior” (cierre) se busca en cierreMensualApi.list().
-// - “Datos del mes actual” se sacan de analyticsApi.getMonthlySummary()
-//   (mismo servicio que ya usas en ResumenScreen).
+// - “Mes actual” = Date().
+// - “Mes anterior (M-1)” = getPrevMonthRef(Date()).
+// - “Cierre M-1 existente” = cierreMensualApi.list() y filtrar.
+// - “Datos del mes actual (M)” = analyticsApi.getMonthlySummary().
+// - “Preview del cierre a insertar (M-1)” = cierreMensualApi.debugSnapshot({anio, mes}).
 //
-// Mapeo para comparativa:
+// Mapeo comparativa (mes actual vs cierre previo):
 // - Ingresos: current.general.ingresos_mes vs cierre.ingresos_reales
 // - Gastos:   current.general.gastos_mes   vs cierre.gastos_reales_total
 // - Ahorro:   current.general.ahorro_mes   vs cierre.resultado_real
@@ -31,7 +41,7 @@ import { Header } from '../../components/layout/Header';
 import { OptionCard } from '../../components/cards/OptionCard';
 import { colors, spacing } from '../../theme';
 
-import { cierreMensualApi, CierreMensual } from '../../services/cierreMensualApi';
+import { cierreMensualApi, CierreMensual, type CierreMensualDebugSnapshot } from '../../services/cierreMensualApi';
 import { fetchGastos } from '../../services/gastosApi';
 
 import { getMonthlySummary } from '../../services/analyticsApi';
@@ -86,13 +96,13 @@ function moneyColor(value?: number | null): string {
 export const ReinciarCierreScreen: React.FC = () => {
   const navigation = useNavigation<any>();
 
-  // Mes actual (M): Diciembre si estamos en diciembre.
+  // Mes actual (M)
   const currentPeriod = useMemo(() => {
     const now = new Date();
     return { anio: now.getFullYear(), mes: now.getMonth() + 1 };
   }, []);
 
-  // Cierre de referencia (M-1): Noviembre si estamos en diciembre.
+  // Mes anterior (M-1) -> el que se cierra/persiste
   const prevPeriod = useMemo(() => getPrevMonthRef(new Date()), []);
 
   const [state, setState] = useState<CierreState>('LOADING');
@@ -101,14 +111,18 @@ export const ReinciarCierreScreen: React.FC = () => {
   const [pendientesCount, setPendientesCount] = useState<number>(0);
   const [cierrePrev, setCierrePrev] = useState<CierreMensual | null>(null);
 
+  // Mes actual (M) para comparativa
   const [summaryCurrent, setSummaryCurrent] = useState<MonthlySummaryResponse | null>(null);
+
+  // ✅ NUEVO: Snapshot de debug (preview de lo que se insertará al generar cierre M-1)
+  const [snapshotPrev, setSnapshotPrev] = useState<CierreMensualDebugSnapshot | null>(null);
 
   const load = useCallback(async () => {
     setState('LOADING');
     setErrorMsg(null);
 
     try {
-      // 1) Pendientes
+      // 1) Pendientes (ahora mismo solo se revisan gastos pendientes; mantenemos el comportamiento existente)
       const pendientes = await fetchGastos('pendientes');
       const count = Array.isArray(pendientes) ? pendientes.length : 0;
       setPendientesCount(count);
@@ -119,12 +133,26 @@ export const ReinciarCierreScreen: React.FC = () => {
         (cierres ?? []).find((c) => c.anio === prevPeriod.anio && c.mes === prevPeriod.mes) ?? null;
       setCierrePrev(found);
 
-      // 3) Datos del mes actual (Diciembre) para preview/comparativa
-      // getMonthlySummary() ya trae “mes actual” por defecto (como en ResumenScreen).
+      // 3) Datos del mes actual (M) para preview/comparativa
       const current = await getMonthlySummary();
       setSummaryCurrent(current);
 
-      // 4) Estado UX:
+      // 4) ✅ NUEVO: snapshot del cierre M-1 (preview de inserción)
+      //    - Si hay cierre ya generado, la preview no es imprescindible,
+      //      pero no molesta y permite ver qué “habría sido”.
+      //    - Si el endpoint falla, no rompemos la UX: snapshot queda null.
+      try {
+        const snap = await cierreMensualApi.debugSnapshot({
+          anio: prevPeriod.anio,
+          mes: prevPeriod.mes,
+        });
+        setSnapshotPrev(snap ?? null);
+      } catch (snapErr) {
+        console.warn('[ReinciarCierreScreen] No se pudo cargar debug snapshot', snapErr);
+        setSnapshotPrev(null);
+      }
+
+      // 5) Estado UX:
       // - Si hay cierre M-1 -> pantalla principal (comparativa + CTA reiniciar mes)
       // - Si no hay cierre -> comportamiento original (pendientes / listo para cierre)
       if (found) {
@@ -167,6 +195,8 @@ export const ReinciarCierreScreen: React.FC = () => {
     try {
       const res = await cierreMensualApi.generar({ force: false });
       setCierrePrev(res);
+
+      // Tras generar, recargamos para refrescar comparativa/snapshot/estado
       setState('CIERRE_GENERADO');
     } catch (e: any) {
       setErrorMsg(e?.message ?? 'No se ha podido generar el cierre.');
@@ -186,6 +216,119 @@ export const ReinciarCierreScreen: React.FC = () => {
   const irAKpis = () => {
     navigation.navigate('CierreKpiScreen', { cierreId: cierrePrev?.id });
   };
+
+  // ---------------------------------------------------------------------------
+  // ✅ NUEVO: Render “Previsualización del cierre a insertar (M-1)”
+  // ---------------------------------------------------------------------------
+
+  const renderPreviewCierreAInsertar = () => {
+    // Snapshot puede venir como {header} o null
+    const h = snapshotPrev?.header ?? null;
+
+    // Si no hay snapshot, mostramos un mensaje discreto, sin romper flujo.
+    if (!h) {
+      return (
+        <View style={styles.previewCard}>
+          <View style={styles.previewHeaderRow}>
+            <Text style={styles.previewTitle}>
+              Previsualización del cierre ({mesNombreES(prevPeriod.mes)} {prevPeriod.anio})
+            </Text>
+          </View>
+          <Text style={styles.previewMuted}>
+            No se ha podido cargar la previsualización. Puedes generar el cierre igualmente.
+          </Text>
+        </View>
+      );
+    }
+
+    const ingresosReales = Number(h.ingresos_reales ?? 0);
+    const gastosReales = Number(h.gastos_reales_total ?? 0);
+    const resultadoReal = Number(h.resultado_real ?? 0);
+
+    const ingresosEsperados = h.ingresos_esperados != null ? Number(h.ingresos_esperados) : null;
+    const gastosEsperados = h.gastos_esperados_total != null ? Number(h.gastos_esperados_total) : null;
+    const resultadoEsperado = h.resultado_esperado != null ? Number(h.resultado_esperado) : null;
+
+    const liquidezTotal = h.liquidez_total != null ? Number(h.liquidez_total) : null;
+
+    return (
+      <View style={styles.previewCard}>
+        <View style={styles.previewHeaderRow}>
+          <View>
+            <Text style={styles.previewTitle}>
+              Previsualización del cierre ({mesNombreES(prevPeriod.mes)} {prevPeriod.anio})
+            </Text>
+            <Text style={styles.previewSubtitle}>
+              Estos son los valores que se insertarán al generar el cierre.
+            </Text>
+          </View>
+        </View>
+
+        <View style={styles.previewRow}>
+          <Text style={styles.previewLabel}>Ingresos reales</Text>
+          <Text style={[styles.previewValue, { color: moneyColor(ingresosReales) }]}>
+            {EuroformatEuro(ingresosReales, 'plus')}
+          </Text>
+        </View>
+
+        <View style={styles.previewRow}>
+          <Text style={styles.previewLabel}>Gastos reales</Text>
+          <Text style={[styles.previewValue, { color: moneyColor(-Math.abs(gastosReales)) }]}>
+            {EuroformatEuro(gastosReales, 'minus')}
+          </Text>
+        </View>
+
+        <View style={styles.previewRow}>
+          <Text style={styles.previewLabel}>Resultado real</Text>
+          <Text style={[styles.previewValue, { color: moneyColor(resultadoReal) }]}>
+            {EuroformatEuro(resultadoReal, 'signed')}
+          </Text>
+        </View>
+
+        {/* Opcionales (si el snapshot los trae) */}
+        {(ingresosEsperados != null || gastosEsperados != null || resultadoEsperado != null) && (
+          <>
+            <View style={styles.previewDivider} />
+
+            {ingresosEsperados != null && (
+              <View style={styles.previewRow}>
+                <Text style={styles.previewLabel}>Ingresos esperados</Text>
+                <Text style={styles.previewValue}>{EuroformatEuro(ingresosEsperados, 'plus')}</Text>
+              </View>
+            )}
+
+            {gastosEsperados != null && (
+              <View style={styles.previewRow}>
+                <Text style={styles.previewLabel}>Gastos esperados</Text>
+                <Text style={styles.previewValue}>{EuroformatEuro(gastosEsperados, 'minus')}</Text>
+              </View>
+            )}
+
+            {resultadoEsperado != null && (
+              <View style={styles.previewRow}>
+                <Text style={styles.previewLabel}>Resultado esperado</Text>
+                <Text style={styles.previewValue}>{EuroformatEuro(resultadoEsperado, 'signed')}</Text>
+              </View>
+            )}
+          </>
+        )}
+
+        {liquidezTotal != null && (
+          <>
+            <View style={styles.previewDivider} />
+            <View style={styles.previewRow}>
+              <Text style={styles.previewLabel}>Liquidez total (snapshot)</Text>
+              <Text style={styles.previewValue}>{EuroformatEuro(liquidezTotal, 'signed')}</Text>
+            </View>
+          </>
+        )}
+      </View>
+    );
+  };
+
+  // ---------------------------------------------------------------------------
+  // Comparativa mes actual (M) vs cierre anterior (M-1 ya persistido)
+  // ---------------------------------------------------------------------------
 
   const renderComparativa = () => {
     const g = summaryCurrent?.general;
@@ -292,18 +435,21 @@ export const ReinciarCierreScreen: React.FC = () => {
             Antes de generar el cierre, conviene revisar los gastos pendientes del mes.
           </Text>
 
+          {/* ✅ NUEVO: Preview de lo que se insertará al generar cierre (M-1) */}
+          {renderPreviewCierreAInsertar()}
+
           <OptionCard
             iconName="alert-circle-outline"
             title="Pendientes detectados"
             description={`Tienes ${pendientesCount} gasto(s) pendiente(s). Pulsa para revisarlos.`}
-            onPress={irAPendientes}
+            onPress={() => irAPendientes()}
           />
 
           <OptionCard
             iconName="calculator-outline"
             title="Generar cierre igualmente"
             description="Si lo necesitas, puedes forzar el cierre ahora. Recomendado solo si lo tienes controlado."
-            onPress={confirmarGenerar}
+            onPress={() => confirmarGenerar()}
           />
         </View>
       );
@@ -317,11 +463,14 @@ export const ReinciarCierreScreen: React.FC = () => {
             No hay pendientes detectados. Puedes generar el cierre del mes anterior.
           </Text>
 
+          {/* ✅ NUEVO: Preview de lo que se insertará al generar cierre (M-1) */}
+          {renderPreviewCierreAInsertar()}
+
           <OptionCard
             iconName="checkmark-circle-outline"
             title="Generar cierre"
             description={`Genera el cierre de ${mesNombreES(prevPeriod.mes)} ${prevPeriod.anio}.`}
-            onPress={confirmarGenerar}
+            onPress={() => confirmarGenerar()}
           />
         </View>
       );
@@ -341,7 +490,7 @@ export const ReinciarCierreScreen: React.FC = () => {
           iconName="repeat-outline"
           title="Reiniciar mes"
           description={`Preparar ${mesNombreES(currentPeriod.mes)} ${currentPeriod.anio}.`}
-          onPress={irAReiniciarMes}
+          onPress={() => irAReiniciarMes()}
           showChevron={false}
         />
       </View>
@@ -352,7 +501,12 @@ export const ReinciarCierreScreen: React.FC = () => {
     <Screen withHeaderBackground>
       {/* Header del mes actual (M) */}
       <View style={styles.topArea}>
-        <Header title="Cierre mensual" subtitleYear={currentPeriod.anio} subtitleMonth={currentPeriod.mes} showBack />
+        <Header
+          title="Cierre mensual"
+          subtitleYear={currentPeriod.anio}
+          subtitleMonth={currentPeriod.mes}
+          showBack
+        />
       </View>
 
       <View style={styles.body}>{renderBody()}</View>
@@ -407,6 +561,7 @@ const styles = StyleSheet.create({
     marginBottom: spacing.md,
   },
 
+  // Comparativa (mes actual vs cierre anterior)
   summaryCard: {
     backgroundColor: '#FFFFFF',
     borderRadius: 14,
@@ -471,6 +626,59 @@ const styles = StyleSheet.create({
     fontSize: 11,
     color: colors.textSecondary,
     lineHeight: 16,
+  },
+
+  // ✅ NUEVO: Preview del cierre a insertar (M-1)
+  previewCard: {
+    backgroundColor: '#FFFFFF',
+    borderRadius: 14,
+    padding: spacing.lg,
+    borderWidth: 1,
+    borderColor: '#E6E6EA',
+  },
+  previewHeaderRow: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    justifyContent: 'space-between',
+    marginBottom: spacing.sm,
+  },
+  previewTitle: {
+    fontSize: 14,
+    fontWeight: '800',
+    color: colors.textPrimary,
+    textTransform: 'capitalize',
+  },
+  previewSubtitle: {
+    marginTop: 4,
+    fontSize: 12,
+    color: colors.textSecondary,
+    lineHeight: 16,
+  },
+  previewMuted: {
+    marginTop: 6,
+    fontSize: 12,
+    color: colors.textSecondary,
+    lineHeight: 16,
+  },
+  previewRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    paddingVertical: 6,
+    alignItems: 'baseline',
+  },
+  previewLabel: {
+    fontSize: 12,
+    color: colors.textSecondary,
+  },
+  previewValue: {
+    fontSize: 13,
+    fontWeight: '800',
+    color: colors.textPrimary,
+  },
+  previewDivider: {
+    height: 1,
+    backgroundColor: '#E6E6EA',
+    marginVertical: spacing.sm,
   },
 });
 

@@ -3,13 +3,13 @@
 // Servicio API para cierres mensuales (GapptoMobile v3)
 //
 // Usa el cliente axios global (services/api.ts) para:
-// - Reutilizar baseURL ya configurada (http://192.168.1.132:8000)
+// - Reutilizar baseURL ya configurada
 // - Reutilizar timeout, headers y token Bearer (setAuthToken)
 // - Homogeneizar el manejo de errores en toda la app
 //
 // Endpoints (según /docs):
 // - GET    /api/v1/cierre_mensual/                         -> Listar cierres
-// - GET    /api/v1/cierre_mensual/_debug_snapshot          -> Debug snapshot
+// - GET    /api/v1/cierre_mensual/_debug_snapshot          -> Debug snapshot (preview)
 // - GET    /api/v1/cierre_mensual/generar                  -> Generar cierre M-1
 // - POST   /api/v1/cierre_mensual/generar_y_reiniciar      -> Generar + reiniciar
 // - GET    /api/v1/cierre_mensual/{cierre_id}/detalles     -> Detalles por cierre
@@ -88,6 +88,23 @@ export type CierreMensualKpisResponse = {
   detalles: CierreMensualDetalle[];
 };
 
+/**
+ * ✅ NUEVO: tipo de snapshot de debug (previsualización).
+ * El backend puede devolver:
+ * - Una cabecera tipo CierreMensual (sin id)
+ * - Y opcionalmente detalles/metadata
+ *
+ * Para no romper por variaciones de backend, lo hacemos defensivo:
+ * - header: Partial<CierreMensual>
+ * - detalles: opcional
+ * - meta: opcional
+ */
+export type CierreMensualDebugSnapshot = {
+  header?: Partial<CierreMensual>;
+  detalles?: Partial<CierreMensualDetalle>[];
+  meta?: Record<string, any>;
+};
+
 // -----------------------------------------------------------------------------
 // Helpers
 // -----------------------------------------------------------------------------
@@ -117,6 +134,37 @@ export const cierreMensualApi = {
         params,
       });
       return res.data;
+    } catch (e) {
+      throw new Error(unwrapError(e));
+    }
+  },
+
+  /**
+   * ✅ NUEVO: Previsualización (snapshot) del cierre, sin persistir.
+   * Útil para mostrar al usuario qué se insertaría si genera el cierre.
+   *
+   * Nota: Si el backend ignora anio/mes, igualmente funcionará como “snapshot M-1”.
+   * Si el backend los usa, mejor todavía: snapshot exacto del periodo.
+   */
+  async debugSnapshot(opts?: { anio?: number; mes?: number; userId?: number; version?: number }) {
+    try {
+      const params: any = {};
+      if (opts?.anio != null) params.anio = opts.anio;
+      if (opts?.mes != null) params.mes = opts.mes;
+      if (opts?.userId != null) params.user_id = opts.userId;
+      if (opts?.version != null) params.version = opts.version;
+
+      const res = await api.get<CierreMensualDebugSnapshot>('/api/v1/cierre_mensual/_debug_snapshot', {
+        params,
+      });
+
+      // Compatibilidad: si backend devuelve directamente la cabecera (sin wrapper)
+      const data: any = res.data ?? null;
+      if (data && (data.ingresos_reales != null || data.gastos_reales_total != null)) {
+        return { header: data as Partial<CierreMensual> } as CierreMensualDebugSnapshot;
+      }
+
+      return data as CierreMensualDebugSnapshot;
     } catch (e) {
       throw new Error(unwrapError(e));
     }
