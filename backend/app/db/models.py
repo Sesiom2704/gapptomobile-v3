@@ -306,7 +306,7 @@ class CuentaBancaria(Base):
     liquidez_inicial   = Column(Float, nullable=False, server_default=text("0"))
     # 👇 Nueva columna: propietario de la cuenta
     user_id    = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
-    Activo =    Column("activo", Boolean, default=True)
+    activo = Column(Boolean, default=True)
 
     banco_rel = relationship("Proveedor", back_populates="cuentas_bancarias")
     gastos    = relationship("Gasto", back_populates="cuenta_rel")
@@ -328,7 +328,6 @@ class CuentaBancaria(Base):
         cascade="all, delete-orphan",
     )
     
-
 class MovimientoCuenta(Base):
     __tablename__ = "movimientos_cuenta"
 
