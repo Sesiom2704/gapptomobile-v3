@@ -40,7 +40,6 @@ class CierreMensualOut(BaseModel):
     n_unicos_ing: int
     n_unicos_gas: int
     n_cotidianos: int
-    n_pendientes_al_cerrar: int
 
     class Config:
         from_attributes = True
