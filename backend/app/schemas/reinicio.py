@@ -83,3 +83,23 @@ class CierrePreviewOut(BaseModel):
     desv_gastos_total: Optional[float] = None
 
     extras: Optional[Dict[str, Any]] = None
+
+
+# ---------------------------------------------------------------------------
+# Cierre mensual (ejecutar / insertar)
+# ---------------------------------------------------------------------------
+
+class CierreExecuteResponse(BaseModel):
+    """
+    Respuesta al ejecutar el cierre:
+    - devuelve id cabecera y rango calculado
+    - devuelve cuántas filas de detalle se insertaron (4)
+    """
+    model_config = ConfigDict(from_attributes=True)
+
+    cierre_id: str
+    anio: int
+    mes: int
+    inserted_detalles: int
+    range_start: str
+    range_end: str

@@ -1,58 +1,15 @@
 # backend/app/api/v1/reinicio_router.py
 """
-Router de REINICIO (mes) + PREVIEW + PROMEDIOS 3M + PREVIEW CIERRE (what-if).
+Router de REINICIO (mes) + PREVIEW + (EJECUCIÓN) CIERRE MENSUAL.
 
-Objetivo:
-- Consolidar todo lo de reinicio del mes fuera de gastos_router:
-  - eligibility
-  - preview (sin insertar)
-  - ejecutar reinicio (persistente)
-  - cálculo promedios 3M contenedores COT
-  - presupuesto total COT
-
-Además:
-- Preview cierre mensual (what-if): "si cerráramos el mes ahora",
-  sin insertar cierre en DB.
+Incluye:
+- Reinicio de mes (eligibility / preview / ejecutar)
+- Preview de cierre mensual (what-if) SIN insertar
+- Ejecutar cierre mensual (insertar cabecera + detalle) CON SQL PURO para detalle
 
 CAMBIO IMPORTANTE:
-- /reinicio/cierre/preview calcula con EXACTAMENTE las mismas reglas que has definido:
-
-Periodo = [start, end) (half-open). Ej: dic 2025 => [2025-12-01, 2026-01-01)
-
-1) ingresos_esperados:
-   ingresos where ultimo_ingreso_on in range AND periodicidad <> 'PAGO UNICO'
-
-2) ingresos_reales:
-   ingresos where ultimo_ingreso_on in range
-
-3) desv_ingresos = (1) - (2)
-
-4) gastos_gestionables_esperados:
-   gastos where ultimo_pago_on in range AND periodicidad <> 'PAGO UNICO' AND segmento_id <> SEG_COT
-
-5) gastos_gestionables_reales:
-   gastos where ultimo_pago_on in range AND segmento_id <> SEG_COT
-
-6) gastos_cotidianos_esperados:
-   gastos where ultimo_pago_on in range AND segmento_id = SEG_COT
-
-7) gastos_cotidianos_reales:
-   gastos_cotidianos where fecha in range AND pagado = true
-
-8) gastos_reales_total = (5) + (7)
-
-9)  desv_gestionables = (4) - (5)
-10) desv_cotidianos   = (6) - (7)
-11) desv_gastos_total = ((4)+(6)) - (8)
-
-12) n_recurrentes_ing = COUNT rows de (1)
-13) n_recurrentes_gas = COUNT rows de (4)
-14) n_unicos_ing      = COUNT ingresos in range AND periodicidad='PAGO UNICO'
-15) n_unicos_gas      = (según tu definición) COUNT gastos in range AND segmento_id = SEG_COT
-16) n_cotidianos      = COUNT rows de (7)
-
-17) liquidez_total:
-    cuentas_bancarias where activo=true
+- Rangos de fecha son half-open: [start, end)
+  Ejemplo: dic 2025 => [2025-12-01, 2026-01-01)
 
 Nota:
 - Se normaliza periodicidad: UPPER(REPLACE(periodicidad,'_',' ')) para tolerar 'PAGO_UNICO'.
@@ -65,13 +22,14 @@ from datetime import date, datetime, timezone
 from typing import Any, Dict, Optional, Tuple
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import func
+from sqlalchemy import func, text
 from sqlalchemy.orm import Session
 
 from backend.app.api.v1.auth_router import require_user
 from backend.app.db import models
 from backend.app.db.session import get_db
 from backend.app.schemas.reinicio import (
+    CierreExecuteResponse,
     CierrePreviewOut,
     PresupuestoCotidianosTotalResponse,
     ReinicioMesEligibilityResponse,
@@ -87,6 +45,13 @@ router = APIRouter(prefix="/reinicio", tags=["reinicio"])
 # =============================================================================
 
 SEG_COT = "COT-12345"
+SEG_VIVI = "VIVI-12345"
+SEG_AHO = "AHO-12345"
+SEG_GEST_RESTO = "GEST-RESTO"
+
+# Ingreso "tipo ahorro" que se descuenta del real en el detalle AHO (según tu definición)
+TING_AHO = "TING-2IB5N9"
+
 PERIOD_MESES = {"TRIMESTRAL": 3, "SEMESTRAL": 6, "ANUAL": 12}
 
 
@@ -372,6 +337,11 @@ def _build_summary(updated: dict) -> dict:
 def _compute_cierre_snapshot_sql(db: Session, user_id: int, anio: int, mes: int) -> dict:
     """
     Calcula el snapshot del cierre del periodo (anio, mes) con las reglas definidas arriba.
+
+    Además, añade contadores útiles para UI (tabla 3 columnas):
+    - n_ingresos_total
+    - n_gastos_gestionables_reales
+    - n_gastos_reales_total
     """
     start_date, end_date = _month_range_date_half_open(anio, mes)
 
@@ -422,6 +392,17 @@ def _compute_cierre_snapshot_sql(db: Session, user_id: int, anio: int, mes: int)
         or 0.0
     )
 
+    # Contador total de ingresos reales (para UI)
+    n_ingresos_total = int(
+        db.query(func.count())
+        .select_from(Ingreso)
+        .filter(Ingreso.user_id == user_id)
+        .filter(Ingreso.ultimo_ingreso_on >= start_date)
+        .filter(Ingreso.ultimo_ingreso_on < end_date)
+        .scalar()
+        or 0
+    )
+
     # 14) n_unicos_ing
     n_unicos_ing = int(
         db.query(func.count())
@@ -463,6 +444,18 @@ def _compute_cierre_snapshot_sql(db: Session, user_id: int, anio: int, mes: int)
         or 0.0
     )
 
+    # Contador de gastos gestionables reales (para UI)
+    n_gastos_gestionables_reales = int(
+        db.query(func.count())
+        .select_from(Gasto)
+        .filter(Gasto.user_id == user_id)
+        .filter(Gasto.ultimo_pago_on >= start_date)
+        .filter(Gasto.ultimo_pago_on < end_date)
+        .filter(Gasto.segmento_id != SEG_COT)
+        .scalar()
+        or 0
+    )
+
     # 6) gastos_cotidianos_esperados (desde gastos)
     gastos_cotidianos_esperados = float(
         db.query(func.coalesce(func.sum(Gasto.importe_cuota), 0.0))
@@ -502,6 +495,9 @@ def _compute_cierre_snapshot_sql(db: Session, user_id: int, anio: int, mes: int)
 
     # 8) gastos_reales_total
     gastos_reales_total = float(gastos_gestionables_reales + gastos_cotidianos_reales)
+
+    # Contador total de gastos reales (para UI)
+    n_gastos_reales_total = int(n_gastos_gestionables_reales + n_cotidianos)
 
     # 9..11) desviaciones de gastos
     desv_gestionables = float(gastos_gestionables_esperados - gastos_gestionables_reales)
@@ -546,8 +542,219 @@ def _compute_cierre_snapshot_sql(db: Session, user_id: int, anio: int, mes: int)
         "n_unicos_ing": n_unicos_ing,
         "n_unicos_gas": n_unicos_gas,
         "n_cotidianos": n_cotidianos,
+        "n_ingresos_total": n_ingresos_total,
+        "n_gastos_gestionables_reales": n_gastos_gestionables_reales,
+        "n_gastos_reales_total": n_gastos_reales_total,
         "liquidez_total": liquidez_total,
     }
+
+
+# =============================================================================
+# Core - insertar detalle cierre (SQL puro)
+# =============================================================================
+
+DETAIL_INSERT_SQL = """
+WITH
+params AS (
+  SELECT
+    :user_id::int  AS user_id,
+    :anio::int     AS anio,
+    :mes::int      AS mes,
+    :cierre_id::uuid AS cierre_id,
+    :start_date::date AS start_date,
+    :end_date::date   AS end_date
+),
+
+-- Base gastos del mes (rango half-open) + normalización periodicidad
+gastos_base AS (
+  SELECT
+    g.*,
+    UPPER(REPLACE(COALESCE(g.periodicidad, ''), '_', ' ')) AS per_norm
+  FROM gastos g
+  JOIN params p ON p.user_id = g.user_id
+  WHERE g.ultimo_pago_on >= (SELECT start_date FROM params)
+    AND g.ultimo_pago_on <  (SELECT end_date   FROM params)
+),
+
+ingresos_base AS (
+  SELECT i.*
+  FROM ingresos i
+  JOIN params p ON p.user_id = i.user_id
+  WHERE i.ultimo_ingreso_on >= (SELECT start_date FROM params)
+    AND i.ultimo_ingreso_on <  (SELECT end_date   FROM params)
+),
+
+-- -------------------------
+-- 1) COT (COTIDIANOS)
+-- -------------------------
+cot_esperado AS (
+  SELECT COALESCE(SUM(importe_cuota), 0)::float AS esperado
+  FROM gastos_base
+  WHERE segmento_id = :seg_cot
+),
+cot_real AS (
+  SELECT COALESCE(SUM(gc.importe), 0)::float AS real
+  FROM gastos_cotidianos gc
+  JOIN params p ON p.user_id = gc.user_id
+  WHERE gc.fecha >= (SELECT start_date FROM params)
+    AND gc.fecha <  (SELECT end_date   FROM params)
+    AND gc.pagado = TRUE
+),
+
+-- -------------------------
+-- 2) VIVI (VIVIENDAS)
+-- esperado: periodicidad != PAGO UNICO
+-- real: todos
+-- -------------------------
+vivi_esperado AS (
+  SELECT COALESCE(SUM(importe_cuota), 0)::float AS esperado
+  FROM gastos_base
+  WHERE segmento_id = :seg_vivi
+    AND per_norm <> 'PAGO UNICO'
+),
+vivi_real AS (
+  SELECT COALESCE(SUM(importe_cuota), 0)::float AS real
+  FROM gastos_base
+  WHERE segmento_id = :seg_vivi
+),
+
+-- -------------------------
+-- 3) GEST-RESTO (GESTIONABLES)
+-- excluye COT, VIVI, AHO
+-- esperado: periodicidad != PAGO UNICO
+-- real: todos
+-- -------------------------
+gest_esperado AS (
+  SELECT COALESCE(SUM(importe_cuota), 0)::float AS esperado
+  FROM gastos_base
+  WHERE segmento_id NOT IN (:seg_cot, :seg_vivi, :seg_aho)
+    AND per_norm <> 'PAGO UNICO'
+),
+gest_real AS (
+  SELECT COALESCE(SUM(importe_cuota), 0)::float AS real
+  FROM gastos_base
+  WHERE segmento_id NOT IN (:seg_cot, :seg_vivi, :seg_aho)
+),
+
+-- -------------------------
+-- 4) AHO (AHORRO)
+-- esperado: gastos AHO no PAGO UNICO
+-- real: (gastos AHO) - (ingresos tipo_id = TING_AHO)
+-- -------------------------
+aho_esperado AS (
+  SELECT COALESCE(SUM(importe_cuota), 0)::float AS esperado
+  FROM gastos_base
+  WHERE segmento_id = :seg_aho
+    AND per_norm <> 'PAGO UNICO'
+),
+aho_gastos_real AS (
+  SELECT COALESCE(SUM(importe_cuota), 0)::float AS real_gastos
+  FROM gastos_base
+  WHERE segmento_id = :seg_aho
+),
+aho_ingresos_real AS (
+  SELECT COALESCE(SUM(importe), 0)::float AS real_ing
+  FROM ingresos_base
+  WHERE tipo_id = :ting_aho
+),
+aho_real AS (
+  SELECT (SELECT real_gastos FROM aho_gastos_real) - (SELECT real_ing FROM aho_ingresos_real) AS real
+),
+
+rows AS (
+  SELECT
+    (SELECT cierre_id FROM params) AS cierre_id,
+    (SELECT anio FROM params) AS anio,
+    (SELECT mes  FROM params) AS mes,
+    :seg_cot::text AS segmento_id,
+    'COTIDIANOS'::text AS tipo_detalle,
+    (SELECT esperado FROM cot_esperado) AS esperado,
+    (SELECT real     FROM cot_real)     AS real
+  UNION ALL
+  SELECT
+    (SELECT cierre_id FROM params), (SELECT anio FROM params), (SELECT mes FROM params),
+    :seg_vivi, 'VIVIENDAS',
+    (SELECT esperado FROM vivi_esperado),
+    (SELECT real     FROM vivi_real)
+  UNION ALL
+  SELECT
+    (SELECT cierre_id FROM params), (SELECT anio FROM params), (SELECT mes FROM params),
+    :seg_gest_resto, 'GESTIONABLES',
+    (SELECT esperado FROM gest_esperado),
+    (SELECT real     FROM gest_real)
+  UNION ALL
+  SELECT
+    (SELECT cierre_id FROM params), (SELECT anio FROM params), (SELECT mes FROM params),
+    :seg_aho, 'AHORRO',
+    (SELECT esperado FROM aho_esperado),
+    (SELECT real     FROM aho_real)
+)
+
+INSERT INTO cierre_mensual_detalle (
+  id,
+  cierre_id,
+  anio,
+  mes,
+  segmento_id,
+  tipo_detalle,
+  esperado,
+  real,
+  desviacion,
+  cumplimiento_pct,
+  incluye_kpi,
+  fecha_cierre,
+  user_id
+)
+SELECT
+  gen_random_uuid(),
+  r.cierre_id,
+  r.anio,
+  r.mes,
+  r.segmento_id,
+  r.tipo_detalle,
+  r.esperado,
+  r.real,
+  (r.esperado - r.real) AS desviacion,
+  CASE
+    WHEN r.esperado IS NULL OR r.esperado = 0 THEN NULL
+    ELSE ROUND((r.real / r.esperado) * 100.0, 2)
+  END AS cumplimiento_pct,
+  TRUE AS incluye_kpi,
+  NOW() AS fecha_cierre,
+  (SELECT user_id FROM params) AS user_id
+FROM rows r;
+"""
+
+
+def _insert_cierre_detalles_sql_puro(
+    db: Session,
+    *,
+    cierre_id,
+    user_id: int,
+    anio: int,
+    mes: int,
+    start_date: date,
+    end_date: date,
+) -> None:
+    """
+    Inserta en cierre_mensual_detalle usando SQL puro.
+    - Inserta 4 filas (COT, VIVI, GEST-RESTO, AHO) con las reglas definidas.
+    - NO usa n_items (columna eliminada).
+    """
+    params = {
+        "cierre_id": str(cierre_id),
+        "user_id": int(user_id),
+        "anio": int(anio),
+        "mes": int(mes),
+        "start_date": start_date.isoformat(),
+        "end_date": end_date.isoformat(),
+        "seg_cot": SEG_COT,
+        "seg_vivi": SEG_VIVI,
+        "seg_aho": SEG_AHO,
+        "seg_gest_resto": SEG_GEST_RESTO,
+        "ting_aho": TING_AHO,
+    }
+    db.execute(text(DETAIL_INSERT_SQL), params)
 
 
 # =============================================================================
@@ -649,6 +856,8 @@ def cierre_preview(
         extras={
             "range_start": snap["periodo"]["start"],
             "range_end": snap["periodo"]["end"],
+
+            # Desglose importes
             "gastos_gestionables_esperados": snap["gastos_gestionables_esperados"],
             "gastos_gestionables_reales": snap["gastos_gestionables_reales"],
             "gastos_cotidianos_esperados": snap["gastos_cotidianos_esperados"],
@@ -656,12 +865,137 @@ def cierre_preview(
             "desv_gestionables": snap["desv_gestionables"],
             "desv_cotidianos": snap["desv_cotidianos"],
             "liquidez_total": snap["liquidez_total"],
+
+            # Contadores históricos
             "n_recurrentes_ing": snap["n_recurrentes_ing"],
             "n_recurrentes_gas": snap["n_recurrentes_gas"],
             "n_unicos_ing": snap["n_unicos_ing"],
             "n_unicos_gas": snap["n_unicos_gas"],
             "n_cotidianos": snap["n_cotidianos"],
+
+            # Contadores para tabla 3 columnas en UI
+            "n_ingresos_total": snap["n_ingresos_total"],
+            "n_gastos_gestionables_reales": snap["n_gastos_gestionables_reales"],
+            "n_gastos_reales_total": snap["n_gastos_reales_total"],
+
             "periodicidad_norm": "UPPER(REPLACE(periodicidad,'_',' '))",
             "note": "Preview calculado con reglas del cierre (no inserta).",
         },
+    )
+
+
+# =============================================================================
+# Endpoints - CIERRE (ejecutar / insertar)
+# =============================================================================
+
+@router.post("/cierre/ejecutar", response_model=CierreExecuteResponse)
+def cierre_ejecutar(
+    anio: Optional[int] = Query(None, ge=2000, le=2100),
+    mes: Optional[int] = Query(None, ge=1, le=12),
+    enforce_window: bool = Query(False, description="Si True, bloquea fuera del día 1..5."),
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(require_user),
+):
+    """
+    Ejecuta el cierre mensual:
+    - Inserta cabecera en cierre_mensual
+    - Inserta detalle en cierre_mensual_detalle (SQL puro)
+
+    Reglas:
+    - Rango half-open [start, end)
+    - VIVI esperado = periodicidad != PAGO UNICO
+    - GEST-RESTO excluye COT, VIVI, AHO
+    - AHO real = gastos_AHO - ingresos(tipo_id=TING_AHO)
+
+    Control de duplicado:
+    - Si existe cierre para (user_id, anio, mes) => 409
+    """
+    if enforce_window and not _is_in_reinicio_window():
+        raise HTTPException(status_code=409, detail="Fuera de ventana (días 1..5).")
+
+    now = datetime.now(timezone.utc)
+    anio_val = anio or now.year
+    mes_val = mes or now.month
+    start_date, end_date = _month_range_date_half_open(anio_val, mes_val)
+
+    # 1) Evitar duplicados por usuario
+    existing = (
+        db.query(models.CierreMensual)
+        .filter(
+            models.CierreMensual.user_id == current_user.id,
+            models.CierreMensual.anio == anio_val,
+            models.CierreMensual.mes == mes_val,
+        )
+        .first()
+    )
+    if existing:
+        raise HTTPException(status_code=409, detail="Ya existe un cierre para ese año/mes.")
+
+    # 2) Calcular snapshot con las mismas reglas del preview
+    snap = _compute_cierre_snapshot_sql(db, user_id=current_user.id, anio=anio_val, mes=mes_val)
+
+    # 3) Insertar cabecera + detalle en una única transacción
+    try:
+        cab = models.CierreMensual(
+            anio=anio_val,
+            mes=mes_val,
+            user_id=current_user.id,
+            criterio="CAJA",
+
+            ingresos_esperados=float(snap["ingresos_esperados"]),
+            ingresos_reales=float(snap["ingresos_reales"]),
+            desv_ingresos=float(snap["desv_ingresos"]),
+
+            gastos_gestionables_esperados=float(snap["gastos_gestionables_esperados"]),
+            gastos_gestionables_reales=float(snap["gastos_gestionables_reales"]),
+            gastos_cotidianos_esperados=float(snap["gastos_cotidianos_esperados"]),
+            gastos_cotidianos_reales=float(snap["gastos_cotidianos_reales"]),
+
+            gastos_esperados_total=float(snap["gastos_esperados_total"]),
+            gastos_reales_total=float(snap["gastos_reales_total"]),
+
+            desv_gestionables=float(snap["desv_gestionables"]),
+            desv_cotidianos=float(snap["desv_cotidianos"]),
+            desv_gastos_total=float(snap["desv_gastos_total"]),
+
+            resultado_esperado=float(snap["resultado_esperado"]),
+            resultado_real=float(snap["resultado_real"]),
+            desv_resultado=float(snap["desv_resultado"]),
+
+            n_recurrentes_ing=int(snap["n_recurrentes_ing"]),
+            n_recurrentes_gas=int(snap["n_recurrentes_gas"]),
+            n_unicos_ing=int(snap["n_unicos_ing"]),
+            n_unicos_gas=int(snap["n_unicos_gas"]),
+            n_cotidianos=int(snap["n_cotidianos"]),
+
+            liquidez_total=float(snap["liquidez_total"]),
+        )
+
+        db.add(cab)
+        db.flush()  # asegura cab.id disponible antes del detalle
+
+        _insert_cierre_detalles_sql_puro(
+            db,
+            cierre_id=cab.id,
+            user_id=current_user.id,
+            anio=anio_val,
+            mes=mes_val,
+            start_date=start_date,
+            end_date=end_date,
+        )
+
+        db.commit()
+
+    except Exception as e:
+        db.rollback()
+        # Importante: devolver un error útil sin perder el stack interno del servidor
+        raise HTTPException(status_code=500, detail=f"Error insertando cierre mensual: {str(e)}")
+
+    return CierreExecuteResponse(
+        cierre_id=str(cab.id),
+        anio=anio_val,
+        mes=mes_val,
+        inserted_detalles=4,
+        range_start=start_date.isoformat(),
+        range_end=end_date.isoformat(),
     )

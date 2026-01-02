@@ -1,30 +1,14 @@
 // mobile_app/screens/cierres/ReinciarCierreScreen.tsx
 // -----------------------------------------------------------------------------
-// ReinciarCierreScreen (ajustes de diseño + comparativa + PREVIEW cierre a insertar)
+// ReinciarCierreScreen
 //
-// Requisitos (y comportamiento):
-// 1) El cierre persistido sigue siendo M-1 (ej. NOV 2025) -> sirve de referencia.
-// 2) La previsualización "comparativa" es del mes actual (M), ej. DIC 2025.
-// 3) En lugar de “mostrar solo noviembre”, mostramos:
-//    - Datos de DICIEMBRE (mes actual) y al lado el % vs NOVIEMBRE.
-// 4) CTA dinámico sin chevron (OptionCard.showChevron=false).
-//
-// NUEVO (lo que pides ahora):
-// 5) En este screen se debe ver una PREVISUALIZACIÓN de los datos que se insertarán
-//    cuando se genere el cierre (M-1).
-//
-// IMPORTANTE (fix definitivo del 405):
-// - NO usamos /api/v1/cierre_mensual/_debug_snapshot porque en staging devuelve 405.
-// - Usamos el endpoint nuevo y soportado:
-//     GET /api/v1/reinicio/cierre/preview?anio=...&mes=...
-//   que devuelve un "what-if" (sin persistir).
-//
-// Implementación:
-// - “Mes actual” = Date().
-// - “Mes anterior (M-1)” = getPrevMonthRef(Date()).
-// - “Cierre M-1 existente” = cierreMensualApi.list() y filtrar.
-// - “Datos del mes actual (M)” = analyticsApi.getMonthlySummary().
-// - “Preview del cierre a insertar (M-1)” = reinicioApi.fetchCierrePreview({anio, mes}).
+// Ajustes solicitados:
+// 1) Previsualización con 3 columnas: Concepto | Cantidad | Importe
+// 2) No mostrar el mensaje “No hay pendientes detectados…” (si llegas aquí, ya es porque procede)
+// 3) As of simplificado: "HH:mm - D/MM/YYYY"
+// 4) Generación del cierre: usar el nuevo endpoint persistente:
+//      POST /api/v1/reinicio/cierre/ejecutar?anio&mes
+//    (inserta cabecera + detalle en backend)
 // -----------------------------------------------------------------------------
 
 import React, { useCallback, useMemo, useState } from 'react';
@@ -101,6 +85,34 @@ function moneyColor(value?: number | null): string {
   return colors.textPrimary;
 }
 
+function pad2(n: number): string {
+  return n < 10 ? `0${n}` : `${n}`;
+}
+
+/**
+ * Formato solicitado:
+ *   "17:20 - 2/01/2026"
+ * - Hora: HH:mm
+ * - Día: D (sin 0)
+ * - Mes: MM (con 0)
+ * - Año: YYYY
+ *
+ * Nota: usamos Date() local del dispositivo.
+ */
+function formatAsOfSimple(iso: string | null | undefined): string {
+  if (!iso) return '';
+  const d = new Date(iso);
+  if (!Number.isFinite(d.getTime())) return String(iso);
+
+  const hh = pad2(d.getHours());
+  const mm = pad2(d.getMinutes());
+  const day = d.getDate(); // sin 0
+  const month = pad2(d.getMonth() + 1);
+  const year = d.getFullYear();
+
+  return `${hh}:${mm} - ${day}/${month}/${year}`;
+}
+
 export const ReinciarCierreScreen: React.FC = () => {
   const navigation = useNavigation<any>();
 
@@ -146,7 +158,6 @@ export const ReinciarCierreScreen: React.FC = () => {
       setSummaryCurrent(current);
 
       // 4) ✅ PREVIEW real del cierre a insertar (M-1)
-      //    IMPORTANTE: usamos reinicioApi (backend nuevo) para evitar 405 de _debug_snapshot.
       try {
         const preview = await reinicioApi.fetchCierrePreview({
           anio: prevPeriod.anio,
@@ -154,7 +165,6 @@ export const ReinciarCierreScreen: React.FC = () => {
         });
         setCierrePreview(preview ?? null);
       } catch (previewErr) {
-        // No rompemos UX: simplemente no mostramos preview detallada
         console.warn('[ReinciarCierreScreen] No se pudo cargar cierre preview', previewErr);
         setCierrePreview(null);
       }
@@ -194,13 +204,47 @@ export const ReinciarCierreScreen: React.FC = () => {
     );
   };
 
+  /**
+   * ✅ Generar cierre usando el NUEVO endpoint (persistente) en /reinicio.
+   *
+   * Backend:
+   *   POST /api/v1/reinicio/cierre/ejecutar?anio=YYYY&mes=MM
+   *
+   * Importante:
+   * - Este endpoint devuelve { cierre_id, ... } pero NO devuelve toda la cabecera.
+   * - Por compatibilidad con el resto de la pantalla (comparativa), tras ejecutar:
+   *     1) recargamos cierres con cierreMensualApi.list()
+   *     2) buscamos el cierre por anio/mes y lo seteamos como cierrePrev
+   */
   const generarCierre = async () => {
     setState('LOADING');
     setErrorMsg(null);
+
     try {
-      const res = await cierreMensualApi.generar({ force: false });
-      setCierrePrev(res);
+      await reinicioApi.postCierreEjecutar({
+        anio: prevPeriod.anio,
+        mes: prevPeriod.mes,
+        enforceWindow: false,
+      });
+
+      // Recargar lista para obtener la cabecera persistida (y tener todos los campos)
+      const cierres = await cierreMensualApi.list();
+      const found =
+        (cierres ?? []).find((c) => c.anio === prevPeriod.anio && c.mes === prevPeriod.mes) ?? null;
+
+      setCierrePrev(found);
       setState('CIERRE_GENERADO');
+
+      // Refrescar preview (opcional, pero ayuda a que el “as_of” cambie)
+      try {
+        const preview = await reinicioApi.fetchCierrePreview({
+          anio: prevPeriod.anio,
+          mes: prevPeriod.mes,
+        });
+        setCierrePreview(preview ?? null);
+      } catch {
+        // no bloquea
+      }
     } catch (e: any) {
       setErrorMsg(e?.message ?? 'No se ha podido generar el cierre.');
       setState('ERROR');
@@ -222,6 +266,7 @@ export const ReinciarCierreScreen: React.FC = () => {
 
   // ---------------------------------------------------------------------------
   // ✅ Render “Previsualización del cierre a insertar (M-1)”
+  // 3 columnas: Concepto | Cantidad | Importe
   // ---------------------------------------------------------------------------
 
   const renderPreviewCierreAInsertar = () => {
@@ -240,81 +285,80 @@ export const ReinciarCierreScreen: React.FC = () => {
       );
     }
 
+    const extras = cierrePreview.extras ?? {};
+
+    // Cantidades para la columna "cantidad"
+    const nIngresos =
+      Number(extras?.n_ingresos_total ?? extras?.n_recurrentes_ing ?? 0) || 0;
+
+    const nGastos =
+      Number(extras?.n_gastos_reales_total ?? (extras?.n_gastos_gestionables_reales ?? 0) + (extras?.n_cotidianos ?? 0)) || 0;
+
+    // Importes (columna importe)
     const ingresosReales = Number(cierrePreview.ingresos_reales ?? 0);
     const gastosReales = Number(cierrePreview.gastos_reales_total ?? 0);
     const resultadoReal = Number(cierrePreview.resultado_real ?? 0);
 
-    const ingresosEsperados =
-      cierrePreview.ingresos_esperados != null ? Number(cierrePreview.ingresos_esperados) : null;
-    const gastosEsperados =
-      cierrePreview.gastos_esperados_total != null ? Number(cierrePreview.gastos_esperados_total) : null;
-    const resultadoEsperado =
-      cierrePreview.resultado_esperado != null ? Number(cierrePreview.resultado_esperado) : null;
+    // Nota: en tu UI ya formateas “gastos” como minus en EuroformatEuro
+    const rows: Array<{
+      label: string;
+      count: number | null;
+      value: number;
+      format: 'plus' | 'minus' | 'signed';
+    }> = [
+      { label: 'Ingresos reales', count: nIngresos, value: ingresosReales, format: 'plus' },
+      { label: 'Gastos reales', count: nGastos, value: gastosReales, format: 'minus' },
+      { label: 'Resultado real', count: null, value: resultadoReal, format: 'signed' },
+    ];
+
+    const asOf = formatAsOfSimple(cierrePreview.as_of);
 
     return (
       <View style={styles.previewCard}>
         <View style={styles.previewHeaderRow}>
-          <View>
+          <View style={{ flex: 1 }}>
             <Text style={styles.previewTitle}>
               Previsualización del cierre ({mesNombreES(prevPeriod.mes)} {prevPeriod.anio})
             </Text>
             <Text style={styles.previewSubtitle}>
-              Estos son los valores que se insertarían si generas el cierre ahora.
+              Valores que se insertarían al generar el cierre.
             </Text>
           </View>
         </View>
 
-        <View style={styles.previewRow}>
-          <Text style={styles.previewLabel}>Ingresos reales</Text>
-          <Text style={[styles.previewValue, { color: moneyColor(ingresosReales) }]}>
-            {EuroformatEuro(ingresosReales, 'plus')}
-          </Text>
+        {/* Header tabla 3 columnas */}
+        <View style={styles.tableHeaderRow}>
+          <Text style={[styles.colConcept, styles.tableHeaderText]}>Concepto</Text>
+          <Text style={[styles.colCount, styles.tableHeaderText]}>Cantidad</Text>
+          <Text style={[styles.colAmount, styles.tableHeaderText]}>Importe</Text>
         </View>
+        <View style={styles.previewDivider} />
 
-        <View style={styles.previewRow}>
-          <Text style={styles.previewLabel}>Gastos reales</Text>
-          <Text style={[styles.previewValue, { color: moneyColor(-Math.abs(gastosReales)) }]}>
-            {EuroformatEuro(gastosReales, 'minus')}
-          </Text>
-        </View>
+        {/* Filas */}
+        {rows.map((r) => {
+          const amountText =
+            r.format === 'minus'
+              ? EuroformatEuro(r.value, 'minus')
+              : r.format === 'plus'
+                ? EuroformatEuro(r.value, 'plus')
+                : EuroformatEuro(r.value, 'signed');
 
-        <View style={styles.previewRow}>
-          <Text style={styles.previewLabel}>Resultado real</Text>
-          <Text style={[styles.previewValue, { color: moneyColor(resultadoReal) }]}>
-            {EuroformatEuro(resultadoReal, 'signed')}
-          </Text>
-        </View>
+          // Color: ingresos/resultados según signo; gastos en rojo por convención
+          const color =
+            r.label.toLowerCase().includes('gastos')
+              ? moneyColor(-Math.abs(r.value))
+              : moneyColor(r.value);
 
-        {(ingresosEsperados != null || gastosEsperados != null || resultadoEsperado != null) && (
-          <>
-            <View style={styles.previewDivider} />
+          return (
+            <View key={r.label} style={styles.tableRow}>
+              <Text style={styles.colConcept}>{r.label}</Text>
+              <Text style={styles.colCount}>{r.count == null ? '—' : String(r.count)}</Text>
+              <Text style={[styles.colAmount, { color }]}>{amountText}</Text>
+            </View>
+          );
+        })}
 
-            {ingresosEsperados != null && (
-              <View style={styles.previewRow}>
-                <Text style={styles.previewLabel}>Ingresos esperados</Text>
-                <Text style={styles.previewValue}>{EuroformatEuro(ingresosEsperados, 'plus')}</Text>
-              </View>
-            )}
-
-            {gastosEsperados != null && (
-              <View style={styles.previewRow}>
-                <Text style={styles.previewLabel}>Gastos esperados</Text>
-                <Text style={styles.previewValue}>{EuroformatEuro(gastosEsperados, 'minus')}</Text>
-              </View>
-            )}
-
-            {resultadoEsperado != null && (
-              <View style={styles.previewRow}>
-                <Text style={styles.previewLabel}>Resultado esperado</Text>
-                <Text style={styles.previewValue}>{EuroformatEuro(resultadoEsperado, 'signed')}</Text>
-              </View>
-            )}
-          </>
-        )}
-
-        <Text style={styles.previewMuted}>
-          As of: {(cierrePreview.as_of ?? '').toString()}
-        </Text>
+        <Text style={styles.previewMuted}>As of: {asOf}</Text>
       </View>
     );
   };
@@ -452,8 +496,10 @@ export const ReinciarCierreScreen: React.FC = () => {
       return (
         <View style={styles.content}>
           <Text style={styles.h1}>Listo para cierre</Text>
+
+          {/* ✅ Eliminado: “No hay pendientes detectados…” */}
           <Text style={styles.subtitle}>
-            No hay pendientes detectados. Puedes generar el cierre del mes anterior.
+            Puedes generar el cierre del mes anterior.
           </Text>
 
           {/* ✅ Preview del cierre a insertar (M-1) */}
@@ -647,30 +693,55 @@ const styles = StyleSheet.create({
     lineHeight: 16,
   },
   previewMuted: {
-    marginTop: 6,
+    marginTop: 10,
     fontSize: 12,
     color: colors.textSecondary,
     lineHeight: 16,
   },
-  previewRow: {
+
+  // Tabla 3 columnas
+  tableHeaderRow: {
     flexDirection: 'row',
+    alignItems: 'baseline',
     justifyContent: 'space-between',
     paddingVertical: 6,
-    alignItems: 'baseline',
   },
-  previewLabel: {
+  tableHeaderText: {
+    fontSize: 11,
+    color: colors.textSecondary,
+    fontWeight: '700',
+  },
+  tableRow: {
+    flexDirection: 'row',
+    alignItems: 'baseline',
+    justifyContent: 'space-between',
+    paddingVertical: 8,
+  },
+  colConcept: {
+    flex: 1,
     fontSize: 12,
     color: colors.textSecondary,
+    paddingRight: 10,
   },
-  previewValue: {
+  colCount: {
+    width: 60,
+    textAlign: 'center',
+    fontSize: 12,
+    color: colors.textSecondary,
+    fontWeight: '700',
+  },
+  colAmount: {
+    width: 140,
+    textAlign: 'right',
     fontSize: 13,
-    fontWeight: '800',
+    fontWeight: '900',
     color: colors.textPrimary,
   },
+
   previewDivider: {
     height: 1,
     backgroundColor: '#E6E6EA',
-    marginVertical: spacing.sm,
+    marginVertical: spacing.xs,
   },
 });
 

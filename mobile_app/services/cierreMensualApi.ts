@@ -78,7 +78,6 @@ export type CierreMensualDetalle = {
   real: number;
   desviacion: number;
   cumplimiento_pct: number;
-  n_items: number;
   incluye_kpi: boolean;
   fecha_cierre: string;
   user_id?: number | null;

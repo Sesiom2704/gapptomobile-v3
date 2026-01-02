@@ -7,13 +7,12 @@
 //     * GET /cierre/preview   -> "si cerráramos ahora el mes indicado"
 // - Acciones (persistentes):
 //     * POST /mes/ejecutar    -> usa QUERY PARAMS (FastAPI Query), no body
+//     * POST /cierre/ejecutar -> NUEVO: inserta cabecera + detalle (SQL puro backend)
 //
 // COMPATIBILIDAD IMPORTANTE:
 // - Tu UI ya usa reinicioApi.postGenerarCierre() y postGenerarYReiniciar().
-// - En el backend que has pegado NO existen esos POST bajo /reinicio.
-// - Para no romper, implementamos esos métodos delegando en cierreMensualApi.generar()
-//   (que en tu proyecto existe como GET /api/v1/cierre_mensual/generar)
-//   y luego llamando a postReiniciarMes().
+// - Se mantienen, sin romper.
+// - Para el cierre "nuevo" recomendado: reinicioApi.postCierreEjecutar({anio, mes})
 // -----------------------------------------------------------------------------
 
 import { api } from './api';
@@ -86,6 +85,16 @@ export type GenerarYReiniciarRequest = {
   reinicio?: ReiniciarMesRequest;
 };
 
+// ✅ Nuevo: respuesta del POST /reinicio/cierre/ejecutar
+export type CierreExecuteResponse = {
+  cierre_id: string;
+  anio: number;
+  mes: number;
+  inserted_detalles: number;
+  range_start: string;
+  range_end: string;
+};
+
 // Resultado combinado (útil para tu UI si hace “todo en uno”)
 export type GenerarYReiniciarResult = {
   cierre: CierreMensual;
@@ -141,15 +150,34 @@ export const reinicioApi = {
   },
 
   // ---------------------------------------------------------------------------
+  // ✅ NUEVO: Ejecutar cierre mensual (persistente) en /reinicio
+  // ---------------------------------------------------------------------------
+  // Inserta cabecera + detalles (SQL puro en backend):
+  //   POST /api/v1/reinicio/cierre/ejecutar?anio=YYYY&mes=MM&enforce_window=false
+  async postCierreEjecutar(opts?: {
+    anio?: number;
+    mes?: number;
+    enforceWindow?: boolean;
+  }): Promise<CierreExecuteResponse> {
+    const params: any = {
+      enforce_window: !!opts?.enforceWindow,
+    };
+    if (opts?.anio != null) params.anio = opts.anio;
+    if (opts?.mes != null) params.mes = opts.mes;
+
+    const res = await api.post<CierreExecuteResponse>(`${BASE}/cierre/ejecutar`, null, { params });
+    return res.data;
+  },
+
+  // ---------------------------------------------------------------------------
   // ✅ COMPATIBILIDAD: postGenerarCierre
   // ---------------------------------------------------------------------------
   // Tu UI lo llama como si existiera bajo /reinicio/cierre/generar.
-  // Pero en tu proyecto actual, el endpoint operativo para generar cierre es:
+  // En tu proyecto legacy se usa:
   //   GET /api/v1/cierre_mensual/generar  (cierreMensualApi.generar)
   //
-  // Por tanto, implementamos postGenerarCierre delegando a cierreMensualApi.generar.
+  // Lo mantenemos para no romper otras pantallas.
   async postGenerarCierre(payload?: GenerarCierreRequest): Promise<CierreMensual> {
-    // cierreMensualApi.generar usa GET con params (force, userId, version)
     const res = await cierreMensualApi.generar({
       force: !!payload?.force,
       userId: payload?.user_id,
@@ -162,7 +190,7 @@ export const reinicioApi = {
   // ✅ COMPATIBILIDAD: postGenerarYReiniciar
   // ---------------------------------------------------------------------------
   // Ejecuta dos pasos:
-  // 1) Generar cierre (persistente) -> cierreMensualApi.generar
+  // 1) Generar cierre (persistente) -> cierreMensualApi.generar (legacy)
   // 2) Reiniciar mes (persistente)  -> POST /reinicio/mes/ejecutar (query params)
   //
   // Devuelve ambos resultados para que la UI tenga visibilidad.

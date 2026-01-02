@@ -718,7 +718,6 @@ class CierreMensualDetalle(Base):
     real = sa.Column(sa.Float, nullable=False, server_default=sa.text("0"))
     desviacion = sa.Column(sa.Float, nullable=False, server_default=sa.text("0"))
     cumplimiento_pct = sa.Column(sa.Float, nullable=True)
-    n_items = sa.Column(sa.Integer, nullable=False, server_default=sa.text("0"))
     incluye_kpi = sa.Column(sa.Boolean, nullable=False, server_default=sa.text("true"))
 
     fecha_cierre = sa.Column(sa.DateTime, server_default=func.now())
