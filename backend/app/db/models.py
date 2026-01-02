@@ -585,6 +585,23 @@ class User(Base):
 # =============================================
 
 class CierreMensual(Base):
+    """
+    Tabla: cierre_mensual
+
+    IMPORTANTE (fix de consistencia ORM <-> DB):
+    - En BD ya NO existen las columnas:
+        * n_pendientes_al_cerrar
+        * version
+      Por tanto, NO deben estar en el modelo ORM.
+    - Si el modelo incluye columnas que no existen físicamente,
+      SQLAlchemy generará SELECT que las referencia y Postgres fallará con:
+        psycopg.errors.UndefinedColumn
+
+    Resultado:
+    - Evitamos el error en listados y en cualquier carga ORM de CierreMensual.
+    - Mantenemos el resto de métricas necesarias para preview/insert del cierre.
+    """
+
     __tablename__ = "cierre_mensual"
     __table_args__ = (
         sa.UniqueConstraint("anio", "mes", name="uq_cierre_anio_mes"),
@@ -604,38 +621,65 @@ class CierreMensual(Base):
     mes = sa.Column(sa.SmallInteger, nullable=False)
 
     fecha_cierre = sa.Column(sa.DateTime, server_default=func.now())
+
     user_id = sa.Column(
-        sa.Integer, sa.ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+        sa.Integer,
+        sa.ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
     )
+
     criterio = sa.Column(sa.String, nullable=False, server_default="CAJA")
 
+    # -------------------------
+    # Ingresos
+    # -------------------------
     ingresos_esperados = sa.Column(sa.Float, nullable=False, server_default=sa.text("0"))
     ingresos_reales = sa.Column(sa.Float, nullable=False, server_default=sa.text("0"))
     desv_ingresos = sa.Column(sa.Float, nullable=False, server_default=sa.text("0"))
 
+    # -------------------------
+    # Gastos (desglose)
+    # -------------------------
     gastos_gestionables_esperados = sa.Column(sa.Float, nullable=False, server_default=sa.text("0"))
     gastos_gestionables_reales = sa.Column(sa.Float, nullable=False, server_default=sa.text("0"))
+
     gastos_cotidianos_esperados = sa.Column(sa.Float, nullable=False, server_default=sa.text("0"))
     gastos_cotidianos_reales = sa.Column(sa.Float, nullable=False, server_default=sa.text("0"))
+
     gastos_esperados_total = sa.Column(sa.Float, nullable=False, server_default=sa.text("0"))
     gastos_reales_total = sa.Column(sa.Float, nullable=False, server_default=sa.text("0"))
 
+    # -------------------------
+    # Desviaciones
+    # -------------------------
     desv_gestionables = sa.Column(sa.Float, nullable=False, server_default=sa.text("0"))
     desv_cotidianos = sa.Column(sa.Float, nullable=False, server_default=sa.text("0"))
     desv_gastos_total = sa.Column(sa.Float, nullable=False, server_default=sa.text("0"))
 
+    # -------------------------
+    # Resultado
+    # -------------------------
     resultado_esperado = sa.Column(sa.Float, nullable=False, server_default=sa.text("0"))
     resultado_real = sa.Column(sa.Float, nullable=False, server_default=sa.text("0"))
     desv_resultado = sa.Column(sa.Float, nullable=False, server_default=sa.text("0"))
 
+    # -------------------------
+    # Contadores
+    # -------------------------
     n_recurrentes_ing = sa.Column(sa.Integer, nullable=False, server_default=sa.text("0"))
     n_recurrentes_gas = sa.Column(sa.Integer, nullable=False, server_default=sa.text("0"))
     n_unicos_ing = sa.Column(sa.Integer, nullable=False, server_default=sa.text("0"))
     n_unicos_gas = sa.Column(sa.Integer, nullable=False, server_default=sa.text("0"))
     n_cotidianos = sa.Column(sa.Integer, nullable=False, server_default=sa.text("0"))
-    n_pendientes_al_cerrar = sa.Column(sa.Integer, nullable=False, server_default=sa.text("0"))
 
-    version = sa.Column(sa.Integer, nullable=False, server_default=sa.text("1"))
+    # -------------------------
+    # Liquidez snapshot
+    # -------------------------
+    liquidez_total = sa.Column(sa.Float, nullable=False, server_default=sa.text("0"))
+
+    # ❌ ELIMINADAS (no existen en DB)
+    # n_pendientes_al_cerrar = sa.Column(...)
+    # version = sa.Column(...)
 
     detalles = relationship(
         "CierreMensualDetalle",
@@ -643,9 +687,9 @@ class CierreMensual(Base):
         cascade="all, delete-orphan",
         passive_deletes=True,
     )
+
     user_rel = relationship("User")
-
-
+    
 class CierreMensualDetalle(Base):
     __tablename__ = "cierre_mensual_detalle"
     __table_args__ = (
