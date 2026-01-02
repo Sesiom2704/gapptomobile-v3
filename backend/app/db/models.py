@@ -677,10 +677,6 @@ class CierreMensual(Base):
     # -------------------------
     liquidez_total = sa.Column(sa.Float, nullable=False, server_default=sa.text("0"))
 
-    # ❌ ELIMINADAS (no existen en DB)
-    # n_pendientes_al_cerrar = sa.Column(...)
-    # version = sa.Column(...)
-
     detalles = relationship(
         "CierreMensualDetalle",
         back_populates="cabecera",
@@ -689,7 +685,7 @@ class CierreMensual(Base):
     )
 
     user_rel = relationship("User")
-    
+
 class CierreMensualDetalle(Base):
     __tablename__ = "cierre_mensual_detalle"
     __table_args__ = (

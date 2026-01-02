@@ -13,7 +13,6 @@ class CierreMensualOut(BaseModel):
     fecha_cierre: datetime
     user_id: Optional[int] = None
     criterio: str
-    version: int
     liquidez_total: float = 0
 
     ingresos_esperados: float
