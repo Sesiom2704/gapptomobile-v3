@@ -40,7 +40,7 @@ export const CuentaBancariaFormScreen: React.FC<Props> = ({ navigation, route })
   useEffect(() => {
     const loadBancos = async () => {
       try {
-        const onlyBanks = await listProveedores({ ramaId: BANCOS_RAMA_ID });
+        const onlyBanks = await listProveedores({ rama_id: BANCOS_RAMA_ID });
         setBancos(onlyBanks ?? []);
       } catch (e) {
         console.error('[CuentaBancariaForm] Error cargando bancos', e);

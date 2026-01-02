@@ -246,7 +246,7 @@ def get_balance_cuentas_mes(
         db.query(models.CuentaBancaria)
         .filter(
             models.CuentaBancaria.user_id == current_user.id,
-            models.CuentaBancaria.Activo.is_(True),
+            models.CuentaBancaria.activo.is_(True),
         )
         .all()
     )
