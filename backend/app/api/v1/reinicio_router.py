@@ -14,6 +14,54 @@ Además:
 - Preview cierre mensual (what-if): "si cerráramos el mes ahora",
   sin insertar cierre en DB.
 
+CAMBIO IMPORTANTE (2026-01):
+- La preview de cierre (/reinicio/cierre/preview) se ajusta para que use
+  EXACTAMENTE las mismas reglas/SQL que defines para los importes del cierre:
+
+  Para un periodo [start, end) (ej: 2025-12-01 .. 2026-01-01):
+
+  1) ingresos_esperados:
+     ingresos where ultimo_ingreso_on in range AND periodicidad <> 'PAGO UNICO'
+
+  2) ingresos_reales:
+     ingresos where ultimo_ingreso_on in range
+
+  3) desv_ingresos = esperados - reales
+
+  4) gastos_gestionables_esperados:
+     gastos where ultimo_pago_on in range AND periodicidad <> 'PAGO UNICO' AND segmento_id <> SEG_COT
+
+  5) gastos_gestionables_reales:
+     gastos where ultimo_pago_on in range AND segmento_id <> SEG_COT
+
+  6) gastos_cotidianos_esperados:
+     gastos where ultimo_pago_on in range AND segmento_id = SEG_COT
+
+  7) gastos_cotidianos_reales:
+     gastos_cotidianos where fecha in range AND pagado = true
+
+  8) gastos_reales_total = (5) + (7)
+
+  9)  desv_gestionables = (4) - (5)
+  10) desv_cotidianos   = (6) - (7)
+  11) desv_gastos_total = ((4)+(6)) - (8)
+
+  12) n_recurrentes_ing = COUNT rows de (1)
+  13) n_recurrentes_gas = COUNT rows de (4)
+  14) n_unicos_ing      = COUNT ingresos en range AND periodicidad='PAGO UNICO'
+  15) n_unicos_gas      = (según tu especificación original: COUNT gastos en range AND segmento_id = SEG_COT)
+      Nota: esto es contraintuitivo (parece "unicos gas" pero filtras COT).
+      Se mantiene 1:1 con tu definición para que cuadre.
+
+  16) n_cotidianos = COUNT rows de (7) (pagado=true en gastos_cotidianos)
+
+  17) liquidez_total:
+      cuentas_bancarias where activo=true
+
+- Se usa rango half-open [start, end) siempre (ej: end=2026-01-01 para diciembre).
+- Se normaliza periodicidad de forma defensiva para tolerar 'PAGO_UNICO' vs 'PAGO UNICO'
+  (UPPER + reemplazo de '_' por ' ').
+
 Nota:
 - No usamos capa services (según tu preferencia).
 """
@@ -114,12 +162,44 @@ def _month_bounds(y: int, m: int) -> Tuple[date, date]:
 
 
 def _month_range_dt(anio: int, mes: int) -> tuple[datetime, datetime]:
-    """Devuelve [inicio_mes, inicio_mes_siguiente) para filtrar por fecha/datetime."""
+    """
+    Devuelve [inicio_mes, inicio_mes_siguiente) para filtrar por fecha/datetime.
+
+    Nota: Este helper se usa en otras partes del router.
+    Para la preview de cierre ajustada a tus SQL, usamos _month_range_date_half_open().
+    """
     if mes < 1 or mes > 12:
         raise ValueError("mes fuera de rango")
     start = datetime(anio, mes, 1)
     end = datetime(anio + 1, 1, 1) if mes == 12 else datetime(anio, mes + 1, 1)
     return start, end
+
+
+def _month_range_date_half_open(anio: int, mes: int) -> tuple[date, date]:
+    """
+    Rango de mes half-open [start, end) en DATE.
+    Ejemplo: dic 2025 => [2025-12-01, 2026-01-01)
+    """
+    if mes < 1 or mes > 12:
+        raise ValueError("mes fuera de rango")
+    start = date(anio, mes, 1)
+    end = date(anio + 1, 1, 1) if mes == 12 else date(anio, mes + 1, 1)
+    return start, end
+
+
+# =============================================================================
+# Helpers - normalización de periodicidad (defensivo)
+# =============================================================================
+
+def _periodicidad_norm_sql(col):
+    """
+    Normaliza 'periodicidad' para tolerar variaciones:
+    - 'PAGO_UNICO' vs 'PAGO UNICO'
+    - mayúsculas/minúsculas
+
+    Equivalentemente a: UPPER(REPLACE(periodicidad, '_', ' '))
+    """
+    return func.upper(func.replace(func.coalesce(col, ""), "_", " "))
 
 
 # =============================================================================
@@ -133,7 +213,7 @@ def _sum_gc_tipo_mes(
     end: date,
     user_id: Optional[int] = None,
 ) -> float:
-    """Suma importe de GastoCotidiano.pagado en rango start-end."""
+    """Suma importe de GastoCotidiano.pagado en rango start-end (inclusive en este helper histórico)."""
     q = (
         db.query(func.coalesce(func.sum(models.GastoCotidiano.importe), 0.0))
         .filter(models.GastoCotidiano.tipo_id == tipo_id)
@@ -439,6 +519,257 @@ def _build_summary(updated: dict) -> dict:
 
 
 # =============================================================================
+# Core - cálculo snapshot cierre según TU SQL (fuente de verdad)
+# =============================================================================
+
+def _compute_cierre_snapshot_sql(
+    db: Session,
+    user_id: int,
+    anio: int,
+    mes: int,
+) -> dict:
+    """
+    Calcula el "snapshot" del cierre para el periodo (anio, mes) usando EXACTAMENTE
+    las reglas de importes/contadores que has definido.
+
+    Devuelve un dict con:
+      - importes esperados/reales + desviaciones
+      - contadores
+      - liquidez_total
+      - resultado_esperado / resultado_real / desv_resultado
+
+    Importante:
+    - Rango siempre half-open [start, end)
+    - Fechas/columnas:
+        ingresos.ultimo_ingreso_on
+        gastos.ultimo_pago_on
+        gastos_cotidianos.fecha
+        cuentas_bancarias.activo
+    """
+    start_date, end_date = _month_range_date_half_open(anio, mes)
+
+    # Modelos
+    Ingreso = models.Ingreso
+    Gasto = models.Gasto
+    GastoCot = models.GastoCotidiano  # tabla gastos_cotidianos en DB
+    Cuenta = models.CuentaBancaria if hasattr(models, "CuentaBancaria") else None
+
+    # Validación defensiva de columnas (para fallar con mensaje claro si el modelo no coincide)
+    required_ing_cols = ["ultimo_ingreso_on", "importe", "periodicidad", "user_id"]
+    required_gas_cols = ["ultimo_pago_on", "importe_cuota", "segmento_id", "periodicidad", "user_id"]
+    required_gc_cols = ["fecha", "importe", "pagado", "user_id"]
+
+    for c in required_ing_cols:
+        if not hasattr(Ingreso, c):
+            raise HTTPException(status_code=500, detail=f"models.Ingreso no tiene '{c}' (requerido para snapshot cierre).")
+    for c in required_gas_cols:
+        if not hasattr(Gasto, c):
+            raise HTTPException(status_code=500, detail=f"models.Gasto no tiene '{c}' (requerido para snapshot cierre).")
+    for c in required_gc_cols:
+        if not hasattr(GastoCot, c):
+            raise HTTPException(status_code=500, detail=f"models.GastoCotidiano no tiene '{c}' (requerido para snapshot cierre).")
+
+    if Cuenta is not None:
+        if not hasattr(Cuenta, "liquidez") or not hasattr(Cuenta, "activo") or not hasattr(Cuenta, "user_id"):
+            # Si existe el modelo pero no cuadra, preferimos un error explícito.
+            raise HTTPException(status_code=500, detail="models.CuentaBancaria no tiene columnas esperadas (liquidez/activo/user_id).")
+
+    # Normalización SQL de periodicidad (tolerante a 'PAGO_UNICO' vs 'PAGO UNICO')
+    per_ing = _periodicidad_norm_sql(Ingreso.periodicidad)
+    per_gas = _periodicidad_norm_sql(Gasto.periodicidad)
+
+    # -------------------------------------------------------------------------
+    # 1) ingresos_esperados + 12) n_recurrentes_ing
+    # -------------------------------------------------------------------------
+    q_ing_rec = (
+        db.query(
+            func.count().label("n_rows"),
+            func.coalesce(func.sum(Ingreso.importe), 0.0).label("sum_importe"),
+        )
+        .filter(Ingreso.user_id == user_id)
+        .filter(Ingreso.ultimo_ingreso_on >= start_date)
+        .filter(Ingreso.ultimo_ingreso_on < end_date)
+        .filter(per_ing != "PAGO UNICO")
+    ).one()
+
+    ingresos_esperados = float(q_ing_rec.sum_importe or 0.0)
+    n_recurrentes_ing = int(q_ing_rec.n_rows or 0)
+
+    # -------------------------------------------------------------------------
+    # 2) ingresos_reales
+    # -------------------------------------------------------------------------
+    q_ing_all = (
+        db.query(func.coalesce(func.sum(Ingreso.importe), 0.0))
+        .filter(Ingreso.user_id == user_id)
+        .filter(Ingreso.ultimo_ingreso_on >= start_date)
+        .filter(Ingreso.ultimo_ingreso_on < end_date)
+    ).scalar()
+
+    ingresos_reales = float(q_ing_all or 0.0)
+
+    # -------------------------------------------------------------------------
+    # 14) n_unicos_ing (PAGO UNICO)
+    # -------------------------------------------------------------------------
+    q_ing_unicos = (
+        db.query(func.count())
+        .filter(Ingreso.user_id == user_id)
+        .filter(Ingreso.ultimo_ingreso_on >= start_date)
+        .filter(Ingreso.ultimo_ingreso_on < end_date)
+        .filter(per_ing == "PAGO UNICO")
+    ).scalar()
+
+    n_unicos_ing = int(q_ing_unicos or 0)
+
+    # 3) desv_ingresos = esperados - reales (según tu definición)
+    desv_ingresos = float(ingresos_esperados - ingresos_reales)
+
+    # -------------------------------------------------------------------------
+    # 4) gastos_gestionables_esperados + 13) n_recurrentes_gas
+    #    (importe_cuota, no PAGO UNICO, no COT)
+    # -------------------------------------------------------------------------
+    q_gas_gest_rec = (
+        db.query(
+            func.count().label("n_rows"),
+            func.coalesce(func.sum(Gasto.importe_cuota), 0.0).label("sum_importe"),
+        )
+        .filter(Gasto.user_id == user_id)
+        .filter(Gasto.ultimo_pago_on >= start_date)
+        .filter(Gasto.ultimo_pago_on < end_date)
+        .filter(per_gas != "PAGO UNICO")
+        .filter(Gasto.segmento_id != SEG_COT)
+    ).one()
+
+    gastos_gestionables_esperados = float(q_gas_gest_rec.sum_importe or 0.0)
+    n_recurrentes_gas = int(q_gas_gest_rec.n_rows or 0)
+
+    # -------------------------------------------------------------------------
+    # 5) gastos_gestionables_reales (importe_cuota, no COT)
+    # -------------------------------------------------------------------------
+    q_gas_gest_all = (
+        db.query(func.coalesce(func.sum(Gasto.importe_cuota), 0.0))
+        .filter(Gasto.user_id == user_id)
+        .filter(Gasto.ultimo_pago_on >= start_date)
+        .filter(Gasto.ultimo_pago_on < end_date)
+        .filter(Gasto.segmento_id != SEG_COT)
+    ).scalar()
+
+    gastos_gestionables_reales = float(q_gas_gest_all or 0.0)
+
+    # -------------------------------------------------------------------------
+    # 6) gastos_cotidianos_esperados (desde tabla gastos, segmento COT, importe_cuota)
+    # -------------------------------------------------------------------------
+    q_cot_esp = (
+        db.query(func.coalesce(func.sum(Gasto.importe_cuota), 0.0))
+        .filter(Gasto.user_id == user_id)
+        .filter(Gasto.ultimo_pago_on >= start_date)
+        .filter(Gasto.ultimo_pago_on < end_date)
+        .filter(Gasto.segmento_id == SEG_COT)
+    ).scalar()
+
+    gastos_cotidianos_esperados = float(q_cot_esp or 0.0)
+
+    # -------------------------------------------------------------------------
+    # 7) gastos_cotidianos_reales + 16) n_cotidianos
+    #    (desde gastos_cotidianos, importe, pagado=true)
+    # -------------------------------------------------------------------------
+    q_cot_real = (
+        db.query(
+            func.count().label("n_rows"),
+            func.coalesce(func.sum(GastoCot.importe), 0.0).label("sum_importe"),
+        )
+        .filter(GastoCot.user_id == user_id)
+        .filter(GastoCot.fecha >= start_date)
+        .filter(GastoCot.fecha < end_date)
+        .filter(GastoCot.pagado == True)
+    ).one()
+
+    gastos_cotidianos_reales = float(q_cot_real.sum_importe or 0.0)
+    n_cotidianos = int(q_cot_real.n_rows or 0)
+
+    # -------------------------------------------------------------------------
+    # 15) n_unicos_gas (mantener 1:1 con tu definición)
+    #     OJO: tu definición filtra segmento_id = COT, no periodicidad PAGO UNICO.
+    # -------------------------------------------------------------------------
+    q_n_unicos_gas = (
+        db.query(func.count())
+        .filter(Gasto.user_id == user_id)
+        .filter(Gasto.ultimo_pago_on >= start_date)
+        .filter(Gasto.ultimo_pago_on < end_date)
+        .filter(Gasto.segmento_id == SEG_COT)
+    ).scalar()
+
+    n_unicos_gas = int(q_n_unicos_gas or 0)
+
+    # -------------------------------------------------------------------------
+    # 8) gastos_reales_total = (5) + (7)
+    # -------------------------------------------------------------------------
+    gastos_reales_total = float(gastos_gestionables_reales + gastos_cotidianos_reales)
+
+    # -------------------------------------------------------------------------
+    # 9)  desv_gestionables = (4) - (5)
+    # 10) desv_cotidianos   = (6) - (7)
+    # 11) desv_gastos_total = ((4)+(6)) - (8)
+    # -------------------------------------------------------------------------
+    desv_gestionables = float(gastos_gestionables_esperados - gastos_gestionables_reales)
+    desv_cotidianos = float(gastos_cotidianos_esperados - gastos_cotidianos_reales)
+
+    gastos_esperados_total = float(gastos_gestionables_esperados + gastos_cotidianos_esperados)
+    desv_gastos_total = float(gastos_esperados_total - gastos_reales_total)
+
+    # -------------------------------------------------------------------------
+    # Resultado esperado/real + desviación
+    # - No lo listaste como sentencia, pero el modelo de cierre lo usa y lo necesitas.
+    # -------------------------------------------------------------------------
+    resultado_esperado = float(ingresos_esperados - gastos_esperados_total)
+    resultado_real = float(ingresos_reales - gastos_reales_total)
+    desv_resultado = float(resultado_esperado - resultado_real)
+
+    # -------------------------------------------------------------------------
+    # 17) liquidez_total (si existe el modelo de cuentas)
+    # -------------------------------------------------------------------------
+    liquidez_total = 0.0
+    if Cuenta is not None:
+        q_liq = (
+            db.query(func.coalesce(func.sum(Cuenta.liquidez), 0.0))
+            .filter(Cuenta.user_id == user_id)
+            .filter(Cuenta.activo == True)
+        ).scalar()
+        liquidez_total = float(q_liq or 0.0)
+
+    return {
+        "periodo": {"anio": int(anio), "mes": int(mes), "start": start_date.isoformat(), "end": end_date.isoformat()},
+        "ingresos_esperados": ingresos_esperados,
+        "ingresos_reales": ingresos_reales,
+        "desv_ingresos": desv_ingresos,
+        "gastos_gestionables_esperados": gastos_gestionables_esperados,
+        "gastos_gestionables_reales": gastos_gestionables_reales,
+        "gastos_cotidianos_esperados": gastos_cotidianos_esperados,
+        "gastos_cotidianos_reales": gastos_cotidianos_reales,
+        "gastos_esperados_total": gastos_esperados_total,
+        "gastos_reales_total": gastos_reales_total,
+        "desv_gestionables": desv_gestionables,
+        "desv_cotidianos": desv_cotidianos,
+        "desv_gastos_total": desv_gastos_total,
+        "resultado_esperado": resultado_esperado,
+        "resultado_real": resultado_real,
+        "desv_resultado": desv_resultado,
+        "n_recurrentes_ing": n_recurrentes_ing,
+        "n_recurrentes_gas": n_recurrentes_gas,
+        "n_unicos_ing": n_unicos_ing,
+        "n_unicos_gas": n_unicos_gas,
+        "n_cotidianos": n_cotidianos,
+        "liquidez_total": liquidez_total,
+        "meta": {
+            "notes": [
+                "Snapshot calculado con reglas SQL de cierre (ultimo_ingreso_on / ultimo_pago_on / gastos_cotidianos pagado).",
+                "Rango half-open [start, end).",
+                "Periodicidad normalizada: UPPER(REPLACE(periodicidad,'_',' ')).",
+            ]
+        },
+    }
+
+
+# =============================================================================
 # Endpoints - MES (reinicio)
 # =============================================================================
 
@@ -496,7 +827,7 @@ def mes_ejecutar(
 
 
 # =============================================================================
-# Endpoints - CIERRE (preview what-if)
+# Endpoints - CIERRE (preview what-if)  ✅ AJUSTADO A TU SQL
 # =============================================================================
 
 @router.get("/cierre/preview", response_model=CierrePreviewOut)
@@ -507,69 +838,66 @@ def cierre_preview(
     current_user: models.User = Depends(require_user),
 ):
     """
-    Preview "what-if": acumulado del mes indicado hasta ahora (sin insertar cierre).
-    Por defecto: mes actual.
+    Preview "what-if" del cierre mensual, SIN insertar en DB.
+
+    Importante:
+    - Este endpoint ya NO usa las columnas fecha_inicio/fecha como antes.
+    - Ahora usa tu “fuente de verdad” para el cierre:
+        * ingresos.ultimo_ingreso_on
+        * gastos.ultimo_pago_on
+        * gastos_cotidianos.fecha (pagado=true)
+        * cuentas_bancarias.liquidez (activo=true)
+
+    Por defecto:
+    - Si no envías (anio, mes), se usa el mes actual.
     """
     now = datetime.now(timezone.utc)
     anio_val = anio or now.year
     mes_val = mes or now.month
 
-    start, end = _month_range_dt(anio_val, mes_val)
+    snap = _compute_cierre_snapshot_sql(db, user_id=current_user.id, anio=anio_val, mes=mes_val)
 
-    Ingreso = models.Ingreso
-    Gasto = models.Gasto
-
-    # -----------------------------
-    # IMPORTANTE: Ingreso NO tiene 'fecha' en tu modelo.
-    # En tu código ya usas 'fecha_inicio'.
-    # -----------------------------
-    if not hasattr(Ingreso, "fecha_inicio"):
-        raise HTTPException(
-            status_code=500,
-            detail="models.Ingreso no tiene 'fecha_inicio'. Indica el nombre real del campo fecha en Ingreso.",
-        )
-    if not hasattr(Gasto, "fecha"):
-        raise HTTPException(
-            status_code=500,
-            detail="models.Gasto no tiene 'fecha'. Indica el nombre real del campo fecha en Gasto.",
-        )
-
-    q_ing = (
-        db.query(func.coalesce(func.sum(Ingreso.importe), 0.0))
-        .filter(Ingreso.user_id == current_user.id)
-        .filter(Ingreso.fecha_inicio >= start)
-        .filter(Ingreso.fecha_inicio < end)
-    )
-
-    q_gas = (
-        db.query(func.coalesce(func.sum(Gasto.importe), 0.0))
-        .filter(Gasto.user_id == current_user.id)
-        .filter(Gasto.fecha >= start)
-        .filter(Gasto.fecha < end)
-    )
-
-    ingresos_reales = float(q_ing.scalar() or 0.0)
-    gastos_reales_total = float(q_gas.scalar() or 0.0)
-    resultado_real = ingresos_reales - gastos_reales_total
-
+    # Encajamos el resultado en el schema de salida existente CierrePreviewOut.
+    # Si tu schema admite extras, lo rellenamos con trazas de rango y notas.
     return CierrePreviewOut(
         anio=anio_val,
         mes=mes_val,
         as_of=now.isoformat(),
-        ingresos_reales=ingresos_reales,
-        gastos_reales_total=gastos_reales_total,
-        resultado_real=resultado_real,
-        ingresos_esperados=None,
-        gastos_esperados_total=None,
-        resultado_esperado=None,
-        desv_resultado=None,
-        desv_ingresos=None,
-        desv_gastos_total=None,
+
+        ingresos_reales=float(snap["ingresos_reales"]),
+        gastos_reales_total=float(snap["gastos_reales_total"]),
+        resultado_real=float(snap["resultado_real"]),
+
+        ingresos_esperados=float(snap["ingresos_esperados"]),
+        gastos_esperados_total=float(snap["gastos_esperados_total"]),
+        resultado_esperado=float(snap["resultado_esperado"]),
+
+        desv_resultado=float(snap["desv_resultado"]),
+        desv_ingresos=float(snap["desv_ingresos"]),
+        desv_gastos_total=float(snap["desv_gastos_total"]),
+
         extras={
-            "range_start": start.isoformat(),
-            "range_end": end.isoformat(),
-            "note": "Preview what-if: acumulado del mes hasta la fecha (no inserta cierre).",
-            "ingreso_date_field": "fecha_inicio",
-            "gasto_date_field": "fecha",
+            # Rango exacto usado (DATE half-open)
+            "range_start": snap["periodo"]["start"],
+            "range_end": snap["periodo"]["end"],
+
+            # Desgloses útiles para debug/UI
+            "gastos_gestionables_esperados": snap["gastos_gestionables_esperados"],
+            "gastos_gestionables_reales": snap["gastos_gestionables_reales"],
+            "gastos_cotidianos_esperados": snap["gastos_cotidianos_esperados"],
+            "gastos_cotidianos_reales": snap["gastos_cotidianos_reales"],
+            "desv_gestionables": snap["desv_gestionables"],
+            "desv_cotidianos": snap["desv_cotidianos"],
+            "liquidez_total": snap["liquidez_total"],
+
+            # Contadores
+            "n_recurrentes_ing": snap["n_recurrentes_ing"],
+            "n_recurrentes_gas": snap["n_recurrentes_gas"],
+            "n_unicos_ing": snap["n_unicos_ing"],
+            "n_unicos_gas": snap["n_unicos_gas"],
+            "n_cotidianos": snap["n_cotidianos"],
+
+            # Notas/metadata
+            "meta": snap.get("meta", {}),
         },
     )

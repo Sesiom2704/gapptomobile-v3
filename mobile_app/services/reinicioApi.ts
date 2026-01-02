@@ -1,20 +1,26 @@
 // mobile_app/services/reinicioApi.ts
 // -----------------------------------------------------------------------------
 // Servicio unificado "reinicioApi":
-// - Endpoints bajo /api/v1/reinicio
+// - Endpoints bajo /api/v1/reinicio (según reinicio_router.py)
 // - Previews (sin insertar):
 //     * GET /mes/preview
-//     * GET /cierre/preview   -> "si cerráramos ahora el mes M"
+//     * GET /cierre/preview   -> "si cerráramos ahora el mes indicado"
 // - Acciones (persistentes):
-//     * POST /mes/ejecutar
-//     * POST /cierre/generar
-//     * POST /generar_y_reiniciar
+//     * POST /mes/ejecutar    -> usa QUERY PARAMS (FastAPI Query), no body
+//
+// COMPATIBILIDAD IMPORTANTE:
+// - Tu UI ya usa reinicioApi.postGenerarCierre() y postGenerarYReiniciar().
+// - En el backend que has pegado NO existen esos POST bajo /reinicio.
+// - Para no romper, implementamos esos métodos delegando en cierreMensualApi.generar()
+//   (que en tu proyecto existe como GET /api/v1/cierre_mensual/generar)
+//   y luego llamando a postReiniciarMes().
 // -----------------------------------------------------------------------------
 
 import { api } from './api';
+import { cierreMensualApi, type CierreMensual } from './cierreMensualApi';
 
 // -----------------------------
-// Tipos (alineados con backend/schemas/reinicio.py)
+// Tipos (alineados con backend mostrado)
 // -----------------------------
 
 export type ReinicioMesEligibility = {
@@ -23,25 +29,23 @@ export type ReinicioMesEligibility = {
   can_reiniciar: boolean;
 };
 
-export type PresupuestoContenedorItem = {
-  id?: string | null;
-  label: string;
-  presupuesto: number;
+// backend: PresupuestoCotidianosTotalResponse(total: float)
+export type PresupuestoCotidianosTotalResponse = {
+  total: number;
 };
 
+// backend: ReinicioMesPreviewResponse
 export type ReinicioMesPreview = {
-  anio: number;
-  mes: number;
+  ventana_1_5_ok: boolean;
   eligibility: ReinicioMesEligibility;
-  presupuesto_total: number;
-  contenedores: PresupuestoContenedorItem[];
+  presupuesto_cotidianos_total: PresupuestoCotidianosTotalResponse;
 };
 
+// backend: CierrePreviewOut
 export type CierrePreview = {
   anio: number;
   mes: number;
-  as_of: string; // ISO date YYYY-MM-DD (o timestamp si lo defines así)
-
+  as_of: string; // ISO datetime
   ingresos_reales: number;
   gastos_reales_total: number;
   resultado_real: number;
@@ -57,6 +61,7 @@ export type CierrePreview = {
   extras?: Record<string, any>;
 };
 
+// backend: ReinicioMesExecuteResponse
 export type ReinicioMesResult = {
   updated: any;
   summary: {
@@ -67,6 +72,7 @@ export type ReinicioMesResult = {
 
 export type ReiniciarMesRequest = {
   aplicar_promedios?: boolean;
+  enforce_window?: boolean;
 };
 
 export type GenerarCierreRequest = {
@@ -80,20 +86,24 @@ export type GenerarYReiniciarRequest = {
   reinicio?: ReiniciarMesRequest;
 };
 
-// -----------------------------
-// Endpoints
-// -----------------------------
+// Resultado combinado (útil para tu UI si hace “todo en uno”)
+export type GenerarYReiniciarResult = {
+  cierre: CierreMensual;
+  reinicio: ReinicioMesResult;
+};
 
 const BASE = '/api/v1/reinicio';
 
 export const reinicioApi = {
-  // --- Eligibility (migrado desde gastos) ---
+  // --- Eligibility ---
   async fetchMesEligibility(): Promise<ReinicioMesEligibility> {
     const res = await api.get<ReinicioMesEligibility>(`${BASE}/mes/eligibility`);
     return res.data;
   },
 
   // --- Preview mes (sin insertar) ---
+  // OJO: en backend no acepta anio/mes actualmente (según tu código pegado).
+  // Dejamos params listos por compatibilidad futura (no rompe).
   async fetchMesPreview(opts?: { anio?: number; mes?: number }): Promise<ReinicioMesPreview> {
     const params: any = {};
     if (opts?.anio != null) params.anio = opts.anio;
@@ -104,14 +114,23 @@ export const reinicioApi = {
   },
 
   // --- Ejecutar reinicio (persistente) ---
-  async postReiniciarMes(opts?: { aplicarPromedios?: boolean }): Promise<ReinicioMesResult> {
-    const body = { aplicar_promedios: !!opts?.aplicarPromedios };
-    const res = await api.post<ReinicioMesResult>(`${BASE}/mes/ejecutar`, body);
+  // Backend usa Query params:
+  //   POST /mes/ejecutar?aplicar_promedios=...&enforce_window=...
+  async postReiniciarMes(opts?: {
+    aplicarPromedios?: boolean;
+    enforceWindow?: boolean;
+  }): Promise<ReinicioMesResult> {
+    const params: any = {
+      aplicar_promedios: !!opts?.aplicarPromedios,
+      enforce_window: !!opts?.enforceWindow,
+    };
+
+    // Sin body; FastAPI lo define como Query.
+    const res = await api.post<ReinicioMesResult>(`${BASE}/mes/ejecutar`, null, { params });
     return res.data;
   },
 
-  // --- Preview cierre (MES ACTUAL M) (sin insertar) ---
-  // "Si cerráramos ahora el mes M"
+  // --- Preview cierre (sin insertar) ---
   async fetchCierrePreview(opts?: { anio?: number; mes?: number }): Promise<CierrePreview> {
     const params: any = {};
     if (opts?.anio != null) params.anio = opts.anio;
@@ -121,31 +140,41 @@ export const reinicioApi = {
     return res.data;
   },
 
-  // --- Generar cierre (persistente) ---
-  async postGenerarCierre(payload?: GenerarCierreRequest): Promise<any> {
-    const body = {
+  // ---------------------------------------------------------------------------
+  // ✅ COMPATIBILIDAD: postGenerarCierre
+  // ---------------------------------------------------------------------------
+  // Tu UI lo llama como si existiera bajo /reinicio/cierre/generar.
+  // Pero en tu proyecto actual, el endpoint operativo para generar cierre es:
+  //   GET /api/v1/cierre_mensual/generar  (cierreMensualApi.generar)
+  //
+  // Por tanto, implementamos postGenerarCierre delegando a cierreMensualApi.generar.
+  async postGenerarCierre(payload?: GenerarCierreRequest): Promise<CierreMensual> {
+    // cierreMensualApi.generar usa GET con params (force, userId, version)
+    const res = await cierreMensualApi.generar({
       force: !!payload?.force,
-      user_id: payload?.user_id ?? undefined,
-      version: payload?.version ?? undefined,
-    };
-    const res = await api.post<any>(`${BASE}/cierre/generar`, body);
-    return res.data;
+      userId: payload?.user_id,
+      version: payload?.version,
+    });
+    return res;
   },
 
-  // --- Generar + reiniciar (persistente) ---
-  async postGenerarYReiniciar(payload?: GenerarYReiniciarRequest): Promise<any> {
-    const body = {
-      cierre: {
-        force: !!payload?.cierre?.force,
-        user_id: payload?.cierre?.user_id ?? undefined,
-        version: payload?.cierre?.version ?? undefined,
-      },
-      reinicio: {
-        aplicar_promedios: !!payload?.reinicio?.aplicar_promedios,
-      },
-    };
-    const res = await api.post<any>(`${BASE}/generar_y_reiniciar`, body);
-    return res.data;
+  // ---------------------------------------------------------------------------
+  // ✅ COMPATIBILIDAD: postGenerarYReiniciar
+  // ---------------------------------------------------------------------------
+  // Ejecuta dos pasos:
+  // 1) Generar cierre (persistente) -> cierreMensualApi.generar
+  // 2) Reiniciar mes (persistente)  -> POST /reinicio/mes/ejecutar (query params)
+  //
+  // Devuelve ambos resultados para que la UI tenga visibilidad.
+  async postGenerarYReiniciar(payload?: GenerarYReiniciarRequest): Promise<GenerarYReiniciarResult> {
+    const cierre = await reinicioApi.postGenerarCierre(payload?.cierre);
+
+    const reinicio = await reinicioApi.postReiniciarMes({
+      aplicarPromedios: !!payload?.reinicio?.aplicar_promedios,
+      enforceWindow: !!payload?.reinicio?.enforce_window,
+    });
+
+    return { cierre, reinicio };
   },
 };
 
@@ -157,13 +186,16 @@ export async function fetchReinicioMesEligibility(): Promise<ReinicioMesEligibil
   return reinicioApi.fetchMesEligibility();
 }
 
-export async function postReiniciarMes(opts?: { aplicarPromedios?: boolean }): Promise<ReinicioMesResult> {
+export async function postReiniciarMes(opts?: {
+  aplicarPromedios?: boolean;
+  enforceWindow?: boolean;
+}): Promise<ReinicioMesResult> {
   return reinicioApi.postReiniciarMes(opts);
 }
 
 // Mantengo esta firma porque tu UI la estaba usando.
-// Si ya migras a fetchMesPreview, puedes dejar de usarla.
+// Con backend actual, el total viene en presupuesto_cotidianos_total.total
 export async function fetchPresupuestoCotidianosTotal(): Promise<number> {
   const prev = await reinicioApi.fetchMesPreview();
-  return Number(prev?.presupuesto_total ?? 0);
+  return Number(prev?.presupuesto_cotidianos_total?.total ?? 0);
 }
