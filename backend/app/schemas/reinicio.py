@@ -11,6 +11,7 @@ from __future__ import annotations
 from typing import Any, Dict, Optional
 from pydantic import BaseModel
 
+from datetime import datetime
 
 class ReinicioMesEligibilityResponse(BaseModel):
     gastos_pendientes: int
@@ -33,25 +34,44 @@ class ReinicioMesExecuteResponse(BaseModel):
     summary: Dict[str, Dict[str, int]]
 
 
-class CierrePreviewOut(BaseModel):
-    """
-    Preview "what-if": si cerráramos el mes M ahora mismo.
-    No inserta nada en DB.
-    """
+class CierreMensualOut(BaseModel):
+    id: str
     anio: int
     mes: int
-    as_of: str  # ISO datetime
+    fecha_cierre: datetime
+    user_id: Optional[int] = None
+    criterio: str
 
+    liquidez_total: float
+
+    ingresos_esperados: float
     ingresos_reales: float
+    desv_ingresos: float
+
+    gastos_gestionables_esperados: float
+    gastos_gestionables_reales: float
+    gastos_cotidianos_esperados: float
+    gastos_cotidianos_reales: float
+    gastos_esperados_total: float
     gastos_reales_total: float
+
+    resultado_esperado: float
     resultado_real: float
+    desv_resultado: float
 
-    ingresos_esperados: Optional[float] = None
-    gastos_esperados_total: Optional[float] = None
-    resultado_esperado: Optional[float] = None
+    desv_gestionables: float
+    desv_cotidianos: float
+    desv_gastos_total: float
 
-    desv_resultado: Optional[float] = None
-    desv_ingresos: Optional[float] = None
-    desv_gastos_total: Optional[float] = None
+    n_recurrentes_ing: int
+    n_recurrentes_gas: int
+    n_unicos_ing: int
+    n_unicos_gas: int
+    n_cotidianos: int
 
-    extras: Optional[Dict[str, Any]] = None
+    # ✅ Compatibilidad (ya NO existen en DB; no deben ser required)
+    version: Optional[int] = None
+    n_pendientes_al_cerrar: Optional[int] = None
+
+    class Config:
+        from_attributes = True  # Pydantic v2 (en v1 sería orm_mode = True)
