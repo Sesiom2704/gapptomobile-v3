@@ -569,12 +569,12 @@ DETAIL_ROWS_SQL = """
 WITH
 params AS (
   SELECT
-    CAST(:user_id AS int)      AS user_id,
-    CAST(:anio AS int)         AS anio,
-    CAST(:mes AS int)          AS mes,
-    {cierre_id_cast}           AS cierre_id,
-    CAST(:start_date AS date)  AS start_date,
-    CAST(:end_date AS date)    AS end_date
+    CAST(:user_id AS int)     AS user_id,
+    CAST(:anio AS int)        AS anio,
+    CAST(:mes AS int)         AS mes,
+    CAST(:cierre_id AS uuid)  AS cierre_id,
+    CAST(:start_date AS date) AS start_date,
+    CAST(:end_date AS date)   AS end_date
 ),
 
 gastos_base AS (
@@ -657,30 +657,32 @@ SELECT
   (SELECT cierre_id FROM params) AS cierre_id,
   (SELECT anio FROM params) AS anio,
   (SELECT mes  FROM params) AS mes,
-  :seg_cot::text AS segmento_id,
+  CAST(:seg_cot AS text) AS segmento_id,
   'COTIDIANOS'::text AS tipo_detalle,
   (SELECT esperado FROM cot_esperado) AS esperado,
   (SELECT real     FROM cot_real)     AS real
+
 UNION ALL
 SELECT
   (SELECT cierre_id FROM params), (SELECT anio FROM params), (SELECT mes FROM params),
-  :seg_vivi::text, 'VIVIENDAS'::text,
+  CAST(:seg_vivi AS text), 'VIVIENDAS'::text,
   (SELECT esperado FROM vivi_esperado),
   (SELECT real     FROM vivi_real)
+
 UNION ALL
 SELECT
   (SELECT cierre_id FROM params), (SELECT anio FROM params), (SELECT mes FROM params),
-  :seg_gest_resto::text, 'GESTIONABLES'::text,
+  CAST(:seg_gest_resto AS text), 'GESTIONABLES'::text,
   (SELECT esperado FROM gest_esperado),
   (SELECT real     FROM gest_real)
+
 UNION ALL
 SELECT
   (SELECT cierre_id FROM params), (SELECT anio FROM params), (SELECT mes FROM params),
-  :seg_aho::text, 'AHORRO'::text,
+  CAST(:seg_aho AS text), 'AHORRO'::text,
   (SELECT esperado FROM aho_esperado),
   (SELECT real     FROM aho_real);
 """
-
 
 def _insert_cierre_detalles_sql_puro(
     db: Session,
