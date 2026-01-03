@@ -5,15 +5,18 @@
 // - Previews (sin insertar):
 //     * GET /mes/preview
 //     * GET /cierre/preview   -> "si cerráramos ahora el mes indicado"
+//     * GET /gastos-ingresos/preview  -> NUEVO (V3): preview reinicio gastos+ingresos
 // - Acciones (persistentes):
 //     * POST /mes/ejecutar    -> usa QUERY PARAMS (FastAPI Query), no body
-//     * POST /cierre/ejecutar -> NUEVO: inserta cabecera + detalle (SQL puro backend)
+//     * POST /cierre/ejecutar -> inserta cabecera + detalle (SQL puro backend)
+//     * POST /gastos-ingresos/ejecutar -> NUEVO (V3): aplica reinicio + (opcional) promedios
 //
 // COMPATIBILIDAD IMPORTANTE:
 // - Tu UI ya usa reinicioApi.postGenerarCierre() y postGenerarYReiniciar().
 // - Se mantienen, sin romper.
 // - Para el cierre "nuevo" recomendado: reinicioApi.postCierreEjecutar({anio, mes})
 // -----------------------------------------------------------------------------
+
 
 import { api } from './api';
 import { cierreMensualApi, type CierreMensual } from './cierreMensualApi';
@@ -94,6 +97,29 @@ export type CierreExecuteResponse = {
   range_end: string;
 };
 
+// ---------------------------------------------------------------------------
+// ✅ NUEVO (V3): reinicio gastos+ingresos preview/ejecutar
+// ---------------------------------------------------------------------------
+
+export type PromedioContenedorPreview = {
+  contenedor_tipo_id: string;
+  subtipos_tipo_ids: string[];
+  valor_promedio: number;
+  n_gastos_afectados: number;
+};
+
+export type ReinicioGastosIngresosPreview = {
+  gastos_a_reiniciar: number;
+  ingresos_a_reiniciar: number;
+  ultimas_cuotas: number;
+  promedios: PromedioContenedorPreview[];
+};
+
+export type ReinicioGastosIngresosExecuteResponse = {
+  updated: any;
+  promedios_actualizados: number;
+};
+
 // Resultado combinado (útil para tu UI si hace “todo en uno”)
 export type GenerarYReiniciarResult = {
   cierre: CierreMensual;
@@ -169,6 +195,35 @@ export const reinicioApi = {
   },
 
   // ---------------------------------------------------------------------------
+  // ✅ NUEVO (V3): Preview reinicio gastos+ingresos (sin insertar)
+  // ---------------------------------------------------------------------------
+  async fetchReinicioGastosIngresosPreview(): Promise<ReinicioGastosIngresosPreview> {
+    const res = await api.get<ReinicioGastosIngresosPreview>(`${BASE}/gastos-ingresos/preview`);
+    return res.data;
+  },
+
+  // ---------------------------------------------------------------------------
+  // ✅ NUEVO (V3): Ejecutar reinicio gastos+ingresos (persistente)
+  // Backend: POST /gastos-ingresos/ejecutar?aplicar_promedios=...&enforce_window=...
+  // ---------------------------------------------------------------------------
+  async postReinicioGastosIngresosEjecutar(opts?: {
+    aplicarPromedios?: boolean; // default recomendado: true
+    enforceWindow?: boolean;
+  }): Promise<ReinicioGastosIngresosExecuteResponse> {
+    const params: any = {
+      aplicar_promedios: opts?.aplicarPromedios !== undefined ? !!opts.aplicarPromedios : true,
+      enforce_window: !!opts?.enforceWindow,
+    };
+
+    const res = await api.post<ReinicioGastosIngresosExecuteResponse>(
+      `${BASE}/gastos-ingresos/ejecutar`,
+      null,
+      { params }
+    );
+    return res.data;
+  },
+
+  // ---------------------------------------------------------------------------
   // ✅ COMPATIBILIDAD: postGenerarCierre
   // ---------------------------------------------------------------------------
   // Tu UI lo llama como si existiera bajo /reinicio/cierre/generar.
@@ -180,7 +235,6 @@ export const reinicioApi = {
     const res = await cierreMensualApi.generar({
       force: !!payload?.force,
       userId: payload?.user_id,
-
     });
     return res;
   },

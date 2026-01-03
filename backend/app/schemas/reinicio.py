@@ -11,7 +11,7 @@ Compatibilidad Pydantic v2:
 
 from __future__ import annotations
 
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 from pydantic import BaseModel, ConfigDict
 
 
@@ -50,6 +50,51 @@ class ReinicioMesExecuteResponse(BaseModel):
 
     updated: Dict[str, Any]
     summary: Dict[str, Dict[str, int]]
+
+
+# ---------------------------------------------------------------------------
+# Reinicio gastos + ingresos (nuevo: preview + ejecutar)
+# ---------------------------------------------------------------------------
+
+class PromedioContenedorPreview(BaseModel):
+    """
+    Representa un contenedor PROM-3M y el valor que se aplicaría.
+    """
+    model_config = ConfigDict(from_attributes=True)
+
+    contenedor_tipo_id: str
+    subtipos_tipo_ids: List[str]
+    valor_promedio: float
+    n_gastos_afectados: int
+
+
+class ReinicioGastosIngresosPreviewResponse(BaseModel):
+    """
+    Preview (dry-run) del reinicio de gastos + ingresos:
+      1.1 cuántos gastos se reinician (cambios esperados)
+      1.2 cuántos ingresos se reinician (cambios esperados)
+      1.3 cuántas cuotas están en su última cuota
+      1.4 promedios que se insertarían en sus contenedores
+    """
+    model_config = ConfigDict(from_attributes=True)
+
+    gastos_a_reiniciar: int
+    ingresos_a_reiniciar: int
+    ultimas_cuotas: int
+    promedios: List[PromedioContenedorPreview]
+
+
+class ReinicioGastosIngresosExecuteResponse(BaseModel):
+    """
+    Resultado de ejecutar reinicio de gastos + ingresos.
+    Incluye:
+    - updated: contadores de cambios aplicados (mismo estilo que reinicio mes)
+    - promedios_actualizados: cuántos gastos contenedor se actualizaron por PROM-3M
+    """
+    model_config = ConfigDict(from_attributes=True)
+
+    updated: Dict[str, Any]
+    promedios_actualizados: int
 
 
 # ---------------------------------------------------------------------------

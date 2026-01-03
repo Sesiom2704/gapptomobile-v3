@@ -7,13 +7,20 @@ Incluye:
 - Preview de cierre mensual (what-if) SIN insertar
 - Ejecutar cierre mensual (insertar cabecera + detalle)
 
+NUEVO (V3):
+- Preview + ejecutar reinicio de gastos/ingresos con:
+  - #gastos a reiniciar
+  - #ingresos a reiniciar
+  - #últimas cuotas (cuotas_restantes == 1 en gastos con cuotas>1)
+  - promedios PROM-3M por contenedor y n_afectados
+
 CAMBIO IMPORTANTE:
 - Rangos de fecha son half-open: [start, end)
   Ejemplo: dic 2025 => [2025-12-01, 2026-01-01)
 
 Notas:
 - Se normaliza periodicidad: UPPER(REPLACE(periodicidad,'_',' ')) para tolerar 'PAGO_UNICO'.
-- Inserción detalle:
+- Inserción detalle cierre:
     - 4 filas: COT, VIVI, GEST-RESTO, AHO
     - NO usa n_items (columna eliminada)
     - NO depende de gen_random_uuid()/uuid_generate_v4() (Render suele no tener extensiones)
@@ -23,7 +30,7 @@ from __future__ import annotations
 
 from calendar import monthrange
 from datetime import date, datetime, timezone
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -37,6 +44,9 @@ from backend.app.schemas.reinicio import (
     CierreExecuteResponse,
     CierrePreviewOut,
     PresupuestoCotidianosTotalResponse,
+    PromedioContenedorPreview,
+    ReinicioGastosIngresosExecuteResponse,
+    ReinicioGastosIngresosPreviewResponse,
     ReinicioMesEligibilityResponse,
     ReinicioMesExecuteResponse,
     ReinicioMesPreviewResponse,
@@ -58,6 +68,31 @@ SEG_GEST_RESTO = "GEST-RESTO"
 TING_AHO = "TING-2IB5N9"
 
 PERIOD_MESES = {"TRIMESTRAL": 3, "SEMESTRAL": 6, "ANUAL": 12}
+
+# --- PROM-3M (mismos IDs que tenías en V2, pero ahora se usan por user_id) ---
+COT_TIPOS = {
+    "COMIDA":       "COM-TIPOGASTO-311A33BD",
+    "ELECTRICIDAD": "ELE-TIPOGASTO-47CC77E5",
+    "GASOLINA":     "TIP-GASOLINA-SW1ZQO",
+    "ROPA":         "ROP-TIPOGASTO-S227BB",
+    "RESTAURANTES": "RES-TIPOGASTO-26ROES",
+    "TRANSPORTE":   "TRA-TIPOGASTO-RB133Z",
+    "HOTELES":      "HOT-TIPOGASTO-357FDG",
+    "PEAJES":       "PEA-TIPOGASTO-7HDY89",
+    "MANT_VEH":     "MAV-TIPOGASTO-BVC356",
+    "ACTIVIDADES":  "ACT-TIPOGASTO-2X9H1Q",
+}
+
+PROM_GROUPS = {
+    # Vehículo (contenedor GASOLINA)
+    COT_TIPOS["GASOLINA"]: [COT_TIPOS["GASOLINA"], COT_TIPOS["PEAJES"], COT_TIPOS["MANT_VEH"]],
+    # Ocio (contenedor RESTAURANTES)
+    COT_TIPOS["RESTAURANTES"]: [COT_TIPOS["RESTAURANTES"], COT_TIPOS["HOTELES"], COT_TIPOS["ACTIVIDADES"]],
+    # Otros 1:1
+    COT_TIPOS["ELECTRICIDAD"]: [COT_TIPOS["ELECTRICIDAD"]],
+    COT_TIPOS["COMIDA"]:       [COT_TIPOS["COMIDA"]],
+    COT_TIPOS["ROPA"]:         [COT_TIPOS["ROPA"]],
+}
 
 
 # =============================================================================
@@ -116,6 +151,10 @@ def _periodicidad_norm_sql(col):
     - mayúsculas/minúsculas
     """
     return func.upper(func.replace(func.coalesce(col, ""), "_", " "))
+
+
+def _periodicidad_norm_py(v: Optional[str]) -> str:
+    return (v or "").upper().strip().replace("_", " ")
 
 
 # =============================================================================
@@ -184,6 +223,7 @@ def _reiniciar_mes_eligibility_core(db: Session, user_id: int) -> Dict[str, int 
 def _reiniciar_estados_core(db: Session, user_id: int, aplicar_promedios: bool = False) -> dict:
     """
     Reinicio 1:1 con tu comportamiento existente (reseteo mensual, reactivación periódicos, etc.).
+    Nota: aplicar_promedios se mantiene por compatibilidad; en V3 se gestiona por el endpoint nuevo.
     """
     today = date.today()
     counters: Dict[str, Any] = {
@@ -192,7 +232,7 @@ def _reiniciar_estados_core(db: Session, user_id: int, aplicar_promedios: bool =
             "periodicos_reactivados": 0,
             "periodicos_mantenidos": 0,
             "cot_forzados_visibles": 0,
-            "promedios_actualizados": 0,  # se mantiene por compatibilidad
+            "promedios_actualizados": 0,  # compatibilidad
         },
         "ingresos": {
             "mensuales_reseteados": 0,
@@ -210,7 +250,7 @@ def _reiniciar_estados_core(db: Session, user_id: int, aplicar_promedios: bool =
 
     for g in gastos:
         changed = False
-        per = (g.periodicidad or "").upper().strip().replace("_", " ")
+        per = _periodicidad_norm_py(g.periodicidad)
         seg = (g.segmento_id or "").upper().strip()
 
         if per == "MENSUAL":
@@ -271,7 +311,7 @@ def _reiniciar_estados_core(db: Session, user_id: int, aplicar_promedios: bool =
 
     for inc in ingresos:
         changed = False
-        per = (inc.periodicidad or "").upper().strip().replace("_", " ")
+        per = _periodicidad_norm_py(inc.periodicidad)
         base_date = inc.fecha_inicio
 
         if per == "MENSUAL":
@@ -310,7 +350,6 @@ def _reiniciar_estados_core(db: Session, user_id: int, aplicar_promedios: bool =
         if changed:
             inc.modifiedon = func.now()
 
-    # Nota: aquí no ejecuto promedios porque tu snippet original los tenía en otro bloque.
     db.commit()
     return {"updated": counters}
 
@@ -330,6 +369,281 @@ def _build_summary(updated: dict) -> dict:
             "Periódicos reactivados": updated["ingresos"]["periodicos_reactivados"],
             "Periódicos mantenidos": updated["ingresos"]["periodicos_mantenidos"],
         },
+    }
+
+
+# =============================================================================
+# PROM-3M (por usuario) - cálculo y aplicación
+# =============================================================================
+
+def _sum_gc_tipo_mes_user(db: Session, user_id: int, tipo_id: str, start: date, end: date) -> float:
+    q = (
+        db.query(func.coalesce(func.sum(models.GastoCotidiano.importe), 0.0))
+        .filter(models.GastoCotidiano.user_id == user_id)
+        .filter(models.GastoCotidiano.tipo_id == tipo_id)
+        .filter(models.GastoCotidiano.pagado == True)
+        .filter(models.GastoCotidiano.fecha >= start)
+        .filter(models.GastoCotidiano.fecha <= end)
+    )
+    return float(q.scalar() or 0.0)
+
+
+def _avg_3m_for_tipo_user(
+    db: Session,
+    user_id: int,
+    tipo_id: str,
+    m1: tuple[date, date],
+    m2: tuple[date, date],
+    m3: tuple[date, date],
+) -> float:
+    (s1, e1), (s2, e2), (s3, e3) = m1, m2, m3
+    v3 = _sum_gc_tipo_mes_user(db, user_id, tipo_id, s3, e3)
+    v2 = _sum_gc_tipo_mes_user(db, user_id, tipo_id, s2, e2)
+    v1 = _sum_gc_tipo_mes_user(db, user_id, tipo_id, s1, e1)
+    used = [v for v in (v3, v2, v1) if v > 0]
+    if not used:
+        return 0.0
+    return round(sum(used) / len(used), 2)
+
+
+def _sum_of_avgs_3m_user(
+    db: Session,
+    user_id: int,
+    tipo_ids: list[str],
+    m1: tuple[date, date],
+    m2: tuple[date, date],
+    m3: tuple[date, date],
+) -> float:
+    total = 0.0
+    for t in (tipo_ids or []):
+        total += _avg_3m_for_tipo_user(db, user_id, t, m1, m2, m3)
+    return round(total, 2)
+
+
+def _compute_promedios_preview_user(db: Session, user_id: int) -> List[Dict[str, Any]]:
+    """
+    Devuelve una lista de dicts:
+      - contenedor_tipo_id
+      - subtipos_tipo_ids
+      - valor_promedio
+      - n_gastos_afectados
+    """
+    today = date.today()
+
+    # Mes -1
+    y1 = today.year
+    m1 = today.month - 1
+    if m1 == 0:
+        m1 = 12
+        y1 -= 1
+    start1, end1 = _month_bounds(y1, m1)
+
+    # Mes -2
+    y2 = y1
+    m2 = m1 - 1
+    if m2 == 0:
+        m2 = 12
+        y2 -= 1
+    start2, end2 = _month_bounds(y2, m2)
+
+    # Mes -3
+    y3 = y2
+    m3 = m2 - 1
+    if m3 == 0:
+        m3 = 12
+        y3 -= 1
+    start3, end3 = _month_bounds(y3, m3)
+
+    m_1 = (start1, end1)
+    m_2 = (start2, end2)
+    m_3 = (start3, end3)
+
+    out: List[Dict[str, Any]] = []
+    for contenedor_tipo, subtipos in PROM_GROUPS.items():
+        valor = _sum_of_avgs_3m_user(db, user_id, subtipos, m_1, m_2, m_3)
+        if valor <= 0:
+            # En preview mostramos igualmente si quieres, pero normalmente es ruido.
+            # Aquí lo omitimos para reducir payload; si lo quieres completo, lo cambiamos.
+            continue
+
+        n_afectados = int(
+            db.query(func.count())
+            .select_from(models.Gasto)
+            .filter(models.Gasto.user_id == user_id)
+            .filter(models.Gasto.tipo_id == contenedor_tipo)
+            .filter(models.Gasto.activo == True)
+            .scalar()
+            or 0
+        )
+
+        out.append(
+            {
+                "contenedor_tipo_id": contenedor_tipo,
+                "subtipos_tipo_ids": list(subtipos),
+                "valor_promedio": float(valor),
+                "n_gastos_afectados": n_afectados,
+            }
+        )
+
+    return out
+
+
+def _apply_promedios_3m_por_tipo_user(db: Session, user_id: int) -> int:
+    """
+    Aplica el valor PROM-3M calculado a los gastos contenedor:
+      - gastos.tipo_id == contenedor_tipo_id
+      - activo=True
+      - user_id = user_id
+    """
+    preview = _compute_promedios_preview_user(db, user_id)
+    total_updates = 0
+
+    for item in preview:
+        contenedor_tipo = item["contenedor_tipo_id"]
+        valor = float(item["valor_promedio"] or 0.0)
+        if valor <= 0:
+            continue
+
+        rows = (
+            db.query(models.Gasto)
+            .filter(models.Gasto.user_id == user_id)
+            .filter(models.Gasto.tipo_id == contenedor_tipo)
+            .filter(models.Gasto.activo == True)
+            .all()
+        )
+        for g in rows:
+            g.importe = valor
+            g.importe_cuota = valor
+            g.modifiedon = func.now()
+            total_updates += 1
+
+    db.flush()
+    return int(total_updates)
+
+
+# =============================================================================
+# Core - preview reinicio gastos/ingresos (dry-run)
+# =============================================================================
+
+def _compute_reinicio_gastos_ingresos_preview(db: Session, user_id: int) -> Dict[str, Any]:
+    """
+    Calcula cuántos registros cambiarían si ejecutamos el reinicio (sin modificar DB).
+
+    IMPORTANTE:
+    - Esto replica el criterio de _reiniciar_estados_core para que el preview sea fiable.
+    - Cuenta "a reiniciar" como "nº de filas que cambiarían al menos un campo".
+    """
+    today = date.today()
+
+    gastos_to_change = 0
+    ingresos_to_change = 0
+
+    # --- Gastos ---
+    gastos = (
+        db.query(models.Gasto)
+        .filter(models.Gasto.user_id == user_id, models.Gasto.activo == True)
+        .all()
+    )
+
+    for g in gastos:
+        per = _periodicidad_norm_py(g.periodicidad)
+        seg = (g.segmento_id or "").upper().strip()
+        changed = False
+
+        if per == "MENSUAL":
+            if g.pagado is not False:
+                changed = True
+
+        elif per not in ("PAGO UNICO", "MENSUAL") and per in PERIOD_MESES:
+            umbral = PERIOD_MESES[per]
+            diff = _months_diff(today, g.fecha)
+            if diff is not None and diff >= umbral:
+                # reactivación
+                if g.pagado is not False:
+                    changed = True
+                if g.kpi is not True:
+                    changed = True
+                new_date = _add_months(g.fecha, umbral)
+                if new_date and new_date != g.fecha:
+                    changed = True
+            else:
+                # mantenido
+                if g.activo is not True:
+                    changed = True
+                if g.pagado is not True:
+                    changed = True
+                if g.kpi is not False:
+                    changed = True
+
+        # COT forzado
+        if seg == SEG_COT:
+            if g.activo is not True:
+                changed = True
+            if per == "MENSUAL" and g.kpi is not True:
+                changed = True
+
+        if changed:
+            gastos_to_change += 1
+
+    # --- Ingresos ---
+    ingresos = (
+        db.query(models.Ingreso)
+        .filter(models.Ingreso.user_id == user_id, models.Ingreso.activo == True)
+        .all()
+    )
+
+    for inc in ingresos:
+        per = _periodicidad_norm_py(inc.periodicidad)
+        base_date = inc.fecha_inicio
+        changed = False
+
+        if per == "MENSUAL":
+            if getattr(inc, "cobrado", None) is not False:
+                changed = True
+
+        elif per not in ("PAGO UNICO", "MENSUAL") and per in PERIOD_MESES:
+            umbral = PERIOD_MESES[per]
+            diff = _months_diff(today, base_date)
+            if diff is not None and diff >= umbral:
+                if getattr(inc, "cobrado", None) is not False:
+                    changed = True
+                if inc.kpi is not True:
+                    changed = True
+                new_bd = _add_months(base_date, umbral) if base_date else None
+                if new_bd and new_bd != inc.fecha_inicio:
+                    changed = True
+            else:
+                if inc.activo is not True:
+                    changed = True
+                if getattr(inc, "cobrado", None) is not True:
+                    changed = True
+                if inc.kpi is not False:
+                    changed = True
+
+        if changed:
+            ingresos_to_change += 1
+
+    # --- Últimas cuotas ---
+    ultimas_cuotas = int(
+        db.query(func.count())
+        .select_from(models.Gasto)
+        .filter(models.Gasto.user_id == user_id)
+        .filter(models.Gasto.activo == True)
+        .filter(models.Gasto.cuotas.isnot(None))
+        .filter(models.Gasto.cuotas > 1)
+        .filter(models.Gasto.cuotas_restantes == 1)
+        .scalar()
+        or 0
+    )
+
+    # --- Promedios (preview) ---
+    promedios = _compute_promedios_preview_user(db, user_id)
+
+    return {
+        "gastos_a_reiniciar": int(gastos_to_change),
+        "ingresos_a_reiniciar": int(ingresos_to_change),
+        "ultimas_cuotas": int(ultimas_cuotas),
+        "promedios": promedios,
     }
 
 
@@ -716,7 +1030,7 @@ def _insert_cierre_detalles_sql_puro(
         "user_id": int(user_id),
         "anio": int(anio),
         "mes": int(mes),
-        "start_date": start_date,  # date nativo (SQLAlchemy lo bindea correctamente)
+        "start_date": start_date,
         "end_date": end_date,
         "seg_cot": SEG_COT,
         "seg_vivi": SEG_VIVI,
@@ -852,6 +1166,56 @@ def mes_ejecutar(
 
 
 # =============================================================================
+# Endpoints - REINICIO gastos/ingresos (nuevo)
+# =============================================================================
+
+@router.get("/gastos-ingresos/preview", response_model=ReinicioGastosIngresosPreviewResponse)
+def reinicio_gastos_ingresos_preview(
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(require_user),
+):
+    snap = _compute_reinicio_gastos_ingresos_preview(db, user_id=current_user.id)
+
+    # Adaptación a schema
+    proms = [
+        PromedioContenedorPreview(**p)
+        for p in (snap.get("promedios") or [])
+    ]
+
+    return ReinicioGastosIngresosPreviewResponse(
+        gastos_a_reiniciar=int(snap["gastos_a_reiniciar"]),
+        ingresos_a_reiniciar=int(snap["ingresos_a_reiniciar"]),
+        ultimas_cuotas=int(snap["ultimas_cuotas"]),
+        promedios=proms,
+    )
+
+
+@router.post("/gastos-ingresos/ejecutar", response_model=ReinicioGastosIngresosExecuteResponse)
+def reinicio_gastos_ingresos_ejecutar(
+    aplicar_promedios: bool = Query(True, description="Si True, aplica PROM-3M a contenedores."),
+    enforce_window: bool = Query(False, description="Si True, bloquea fuera del día 1..5."),
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(require_user),
+):
+    if enforce_window and not _is_in_reinicio_window():
+        raise HTTPException(status_code=409, detail="Fuera de ventana (días 1..5).")
+
+    # 1) ejecuta reinicio estados (gastos/ingresos)
+    result = _reiniciar_estados_core(db, user_id=current_user.id, aplicar_promedios=False)
+
+    # 2) aplica promedios (si procede)
+    proms_updated = 0
+    if aplicar_promedios:
+        proms_updated = _apply_promedios_3m_por_tipo_user(db, user_id=current_user.id)
+        db.commit()  # commit separado para dejar claro el lote PROM-3M
+
+    return ReinicioGastosIngresosExecuteResponse(
+        updated=result["updated"],
+        promedios_actualizados=int(proms_updated),
+    )
+
+
+# =============================================================================
 # Endpoints - CIERRE (preview what-if)
 # =============================================================================
 
@@ -935,13 +1299,7 @@ def cierre_ejecutar(
     """
     Ejecuta el cierre mensual:
     - Inserta cabecera en cierre_mensual
-    - Inserta detalle en cierre_mensual_detalle (4 filas) con cálculo SQL + insert Python
-
-    Reglas detalle:
-    - Rango half-open [start, end)
-    - VIVI esperado = periodicidad != PAGO UNICO
-    - GEST-RESTO excluye COT, VIVI, AHO
-    - AHO real = gastos_AHO - ingresos(tipo_id=TING_AHO)
+    - Inserta detalle en cierre_mensual_detalle (4 filas) con cálculo SQL + insert: Python
 
     Control de duplicado:
     - Si existe cierre para (user_id, anio, mes) => 409
@@ -954,7 +1312,6 @@ def cierre_ejecutar(
     mes_val = mes or now.month
     start_date, end_date = _month_range_date_half_open(anio_val, mes_val)
 
-    # 1) Evitar duplicados por usuario
     existing = (
         db.query(models.CierreMensual)
         .filter(
@@ -967,10 +1324,8 @@ def cierre_ejecutar(
     if existing:
         raise HTTPException(status_code=409, detail="Ya existe un cierre para ese año/mes.")
 
-    # 2) Snapshot con mismas reglas del preview
     snap = _compute_cierre_snapshot_sql(db, user_id=current_user.id, anio=anio_val, mes=mes_val)
 
-    # 3) Insertar cabecera + detalle en una transacción
     try:
         cab = models.CierreMensual(
             anio=anio_val,
@@ -1008,7 +1363,7 @@ def cierre_ejecutar(
         )
 
         db.add(cab)
-        db.flush()  # asegura cab.id disponible
+        db.flush()
 
         inserted = _insert_cierre_detalles_sql_puro(
             db,
