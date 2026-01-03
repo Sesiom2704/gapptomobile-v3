@@ -12,23 +12,19 @@
 //    - decremento: verde
 // -----------------------------------------------------------------------------
 
-
+// mobile_app/screens/cierres/ReiniciarMesPreviewScreen.tsx
 import React, { useCallback, useMemo, useState } from 'react';
-import { View, Text, StyleSheet, Alert, ActivityIndicator, ScrollView, RefreshControl } from 'react-native';
-import { useFocusEffect, useNavigation, useRoute } from '@react-navigation/native';
+import { View, Text, StyleSheet, ActivityIndicator, ScrollView, RefreshControl } from 'react-native';
+import { useFocusEffect, useRoute } from '@react-navigation/native';
 
 import { Screen } from '../../components/layout/Screen';
 import { Header } from '../../components/layout/Header';
 import { OptionCard } from '../../components/cards/OptionCard';
 import { colors, spacing } from '../../theme';
 
-import { reinicioApi, type ReinicioGastosIngresosPreview } from '../../services/reinicioApi';
+import { reinicioApi, type CierrePreview, type ReinicioGastosIngresosPreview } from '../../services/reinicioApi';
 import { EuroformatEuro } from '../../utils/format';
 
-// ✅ Para comparar vs lo insertado actualmente
-import { fetchGastos, type Gasto } from '../../services/gastosApi';
-
-// ✅ Info modal reutilizable (patrón BalanceScreen)
 import { InfoButton, InfoModal, useInfoModal } from '../../components/ui/InfoModal';
 
 type LoadState = 'LOADING' | 'OK' | 'ERROR';
@@ -36,24 +32,12 @@ type LoadState = 'LOADING' | 'OK' | 'ERROR';
 type RouteParams = {
   anio?: number;
   mes?: number;
-  cierreId?: string | null;
 };
-
-function mesNombreES(m: number): string {
-  const names = [
-    'enero', 'febrero', 'marzo', 'abril', 'mayo', 'junio',
-    'julio', 'agosto', 'septiembre', 'octubre', 'noviembre', 'diciembre',
-  ];
-  return names[m - 1] ?? `mes ${m}`;
-}
 
 function pad2(n: number): string {
   return n < 10 ? `0${n}` : `${n}`;
 }
 
-/**
- * "HH:mm - D/MM/YYYY" (fecha/hora local del dispositivo)
- */
 function formatNowSimple(): string {
   const d = new Date();
   const hh = pad2(d.getHours());
@@ -64,33 +48,47 @@ function formatNowSimple(): string {
   return `${hh}:${mm} - ${day}/${month}/${year}`;
 }
 
-function normalizeKey(nombre: any): string {
-  return String(nombre ?? '').trim().toUpperCase();
+function mesNombreES(m: number): string {
+  const names = [
+    'enero','febrero','marzo','abril','mayo','junio',
+    'julio','agosto','septiembre','octubre','noviembre','diciembre',
+  ];
+  return names[m - 1] ?? `mes ${m}`;
 }
 
-function fmtPct(value: number | null): string {
-  if (value == null || !Number.isFinite(value)) return '—';
-  const sign = value > 0 ? '+' : '';
-  return `${sign}${value.toFixed(1)}%`;
+function getPrevMonthRef(anio: number, mes: number): { anio: number; mes: number } {
+  const d = new Date(anio, mes - 1, 1);
+  d.setMonth(d.getMonth() - 1);
+  return { anio: d.getFullYear(), mes: d.getMonth() + 1 };
 }
 
-function deltaColor(pct: number | null): string {
-  if (pct == null || !Number.isFinite(pct) || pct === 0) return colors.textSecondary;
+function fmtPct(value: number | null | undefined): string {
+  const n = typeof value === 'number' ? value : null;
+  if (n == null || !Number.isFinite(n)) return '—';
+  const sign = n > 0 ? '+' : '';
+  return `${sign}${n.toFixed(1)}%`;
+}
+
+function pctColor(value: number | null | undefined): string {
+  const n = typeof value === 'number' ? value : null;
+  if (n == null || !Number.isFinite(n) || n === 0) return colors.textSecondary;
   const green = (colors as any).success ?? (colors as any).actionSuccess ?? '#16a34a';
   const red = (colors as any).danger ?? (colors as any).actionDanger ?? '#b91c1c';
-  return pct > 0 ? red : green; // ✅ incremento rojo, decremento verde
+  return n > 0 ? red : green;
 }
 
-export const ReiniciarMesScreen: React.FC = () => {
-  const navigation = useNavigation<any>();
+export const ReiniciarMesPreviewScreen: React.FC = () => {
   const route = useRoute<any>();
   const params = (route?.params ?? {}) as RouteParams;
+
+  const info = useInfoModal();
 
   const nowPeriod = useMemo(() => {
     const now = new Date();
     return { anio: now.getFullYear(), mes: now.getMonth() + 1 };
   }, []);
 
+  // Periodo “consultado” (si no viene, usamos mes actual)
   const periodo = useMemo(() => {
     return {
       anio: params?.anio ?? nowPeriod.anio,
@@ -98,52 +96,43 @@ export const ReiniciarMesScreen: React.FC = () => {
     };
   }, [params?.anio, params?.mes, nowPeriod.anio, nowPeriod.mes]);
 
+  // Para “preview cierre” usamos M-1 del periodo consultado
+  const prevPeriod = useMemo(() => getPrevMonthRef(periodo.anio, periodo.mes), [periodo.anio, periodo.mes]);
+
   const [state, setState] = useState<LoadState>('LOADING');
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [refreshing, setRefreshing] = useState(false);
 
-  // Preview “gastos-ingresos” (lo que pide el screen: 1.1..1.4)
+  // Card 1: “si cerráramos hoy” -> usamos cierre/preview del mismo periodo consultado
+  const [cierreHoyPreview, setCierreHoyPreview] = useState<CierrePreview | null>(null);
+
+  // Card 2: reinicio gastos/ingresos preview
   const [giPreview, setGiPreview] = useState<ReinicioGastosIngresosPreview | null>(null);
 
-  // Mapa "pasado" por nombre: gasto.nombre -> gasto.importe_cuota
-  const [importeCuotaByNombre, setImporteCuotaByNombre] = useState<Record<string, number>>({});
-
-  // ✅ Info modal (único por pantalla)
-  const info = useInfoModal();
+  // Card 3: preview cierre M-1 (como en cierre mensual)
+  const [cierrePrevPreview, setCierrePrevPreview] = useState<CierrePreview | null>(null);
 
   const load = useCallback(async () => {
     setState('LOADING');
     setErrorMsg(null);
 
     try {
-      const [giPrev, gastosActivos] = await Promise.all([
+      const [cierreHoy, giPrev, cierrePrev] = await Promise.all([
+        reinicioApi.fetchCierrePreview({ anio: periodo.anio, mes: periodo.mes }),
         reinicioApi.fetchReinicioGastosIngresosPreview(),
-        fetchGastos('activos'),
+        reinicioApi.fetchCierrePreview({ anio: prevPeriod.anio, mes: prevPeriod.mes }),
       ]);
 
+      setCierreHoyPreview(cierreHoy ?? null);
       setGiPreview(giPrev ?? null);
-
-      const map: Record<string, number> = {};
-      (gastosActivos ?? []).forEach((g: Gasto) => {
-        const key = normalizeKey(g?.nombre);
-        const cuota = Number(g?.importe_cuota ?? 0);
-
-        // Si hay duplicados por nombre, nos quedamos con el último (o el >0)
-        if (!key) return;
-        if (!Number.isFinite(cuota)) return;
-
-        // Preferimos un valor >0 si existe
-        if (map[key] == null || map[key] === 0) map[key] = cuota;
-      });
-
-      setImporteCuotaByNombre(map);
+      setCierrePrevPreview(cierrePrev ?? null);
 
       setState('OK');
     } catch (e: any) {
-      setErrorMsg(e?.message ?? 'No se ha podido cargar la previsualización del reinicio.');
+      setErrorMsg(e?.message ?? 'No se ha podido cargar la previsualización.');
       setState('ERROR');
     }
-  }, []);
+  }, [periodo.anio, periodo.mes, prevPeriod.anio, prevPeriod.mes]);
 
   useFocusEffect(
     useCallback(() => {
@@ -160,65 +149,46 @@ export const ReiniciarMesScreen: React.FC = () => {
     }
   }, [load]);
 
-  const canExecute = useMemo(() => {
-    // Si llegas aquí ya cumples condiciones de navegación.
-    // Aun así: no ejecutamos sin preview.
-    return !!giPreview;
-  }, [giPreview]);
+  // -----------------------------
+  // Renders de tarjetas
+  // -----------------------------
 
-  const disabledReason = useMemo(() => {
-    if (canExecute) return null;
-    if (!giPreview) return 'Preview de reinicio no disponible';
-    return 'No disponible';
-  }, [canExecute, giPreview]);
+  const renderCardCierreHoy = () => {
+    if (!cierreHoyPreview) return null;
 
-  const confirmarEjecutar = () => {
-    if (!canExecute) return;
+    const rows = [
+      { label: 'Ingresos reales', value: Number(cierreHoyPreview.ingresos_reales ?? 0), mode: 'plus' as const },
+      { label: 'Gastos reales', value: Number(cierreHoyPreview.gastos_reales_total ?? 0), mode: 'minus' as const },
+      { label: 'Resultado real', value: Number(cierreHoyPreview.resultado_real ?? 0), mode: 'signed' as const },
+    ];
 
-    const gastos = giPreview?.gastos_a_reiniciar ?? 0;
-    const ingresos = giPreview?.ingresos_a_reiniciar ?? 0;
-    const ultimas = giPreview?.ultimas_cuotas ?? 0;
-    const nProm = giPreview?.promedios?.length ?? 0;
+    return (
+      <View style={styles.card}>
+        <View style={styles.sectionHeaderRow}>
+          <Text style={styles.cardTitle}>Si cerráramos hoy ({mesNombreES(periodo.mes)} {periodo.anio})</Text>
+        </View>
 
-    Alert.alert(
-      'Reiniciar mes',
-      `Se aplicarán cambios en ${mesNombreES(periodo.mes)} ${periodo.anio}.\n\n` +
-        `• Gastos a reiniciar: ${gastos}\n` +
-        `• Ingresos a reiniciar: ${ingresos}\n` +
-        `• Últimas cuotas: ${ultimas}\n` +
-        `• Promedios a actualizar: ${nProm}\n\n` +
-        `¿Deseas continuar?`,
-      [
-        { text: 'Cancelar', style: 'cancel' },
-        { text: 'Reiniciar', style: 'destructive', onPress: () => void ejecutarReinicio() },
-      ]
+        <View style={styles.tableHeaderRow2}>
+          <Text style={[styles.tableHeaderText, styles.colConcept]}>Concepto</Text>
+          <Text style={[styles.tableHeaderText, styles.colAmount]}>Importe</Text>
+        </View>
+        <View style={styles.divider} />
+
+        {rows.map((r) => (
+          <View key={r.label} style={styles.tableRow2}>
+            <Text style={styles.colConcept}>{r.label}</Text>
+            <Text style={styles.colAmount}>
+              {EuroformatEuro(r.value, r.mode)}
+            </Text>
+          </View>
+        ))}
+
+        <Text style={styles.muted}>As of: {formatNowSimple()}</Text>
+      </View>
     );
   };
 
-  const ejecutarReinicio = async () => {
-    setState('LOADING');
-    setErrorMsg(null);
-
-    try {
-      await reinicioApi.postReinicioGastosIngresosEjecutar({
-        aplicarPromedios: true,
-        enforceWindow: true,
-      });
-
-      await load();
-
-      Alert.alert('Reinicio aplicado', 'Los gastos/ingresos han sido reiniciados correctamente.');
-    } catch (e: any) {
-      setErrorMsg(e?.message ?? 'No se ha podido ejecutar el reinicio.');
-      setState('ERROR');
-    }
-  };
-
-  // ---------------------------------------------------------------------------
-  // (2) Previsualización del reinicio: 2 columnas (Concepto | Cantidad) + InfoButton
-  // ---------------------------------------------------------------------------
-
-  const renderResumenReinicio = () => {
+  const renderCardReinicioResumen = () => {
     if (!giPreview) return null;
 
     const rows: Array<{ label: string; count: number }> = [
@@ -228,29 +198,14 @@ export const ReiniciarMesScreen: React.FC = () => {
     ];
 
     return (
-      <View style={styles.previewCard}>
-        <View style={styles.sectionHeaderRow}>
-          <View style={{ flex: 1 }}>
-            <Text style={styles.previewTitle}>Previsualización del reinicio</Text>
-            <Text style={styles.previewSubtitle}>Resumen de lo que se aplicará al reiniciar.</Text>
-          </View>
+      <View style={styles.card}>
+        <Text style={styles.cardTitle}>Reinicio del mes (resumen)</Text>
 
-          <InfoButton
-            align="title"
-            onPress={() =>
-              info.open(
-                'Previsualización del reinicio',
-                'Resumen de conteos: gastos e ingresos que se reinician y cuántas últimas cuotas se detectan.'
-              )
-            }
-          />
+        <View style={styles.tableHeaderRow2}>
+          <Text style={[styles.tableHeaderText, styles.colConcept]}>Concepto</Text>
+          <Text style={[styles.tableHeaderText, styles.colCount]}>Cantidad</Text>
         </View>
-
-        <View style={styles.tableHeaderRow}>
-          <Text style={[styles.colConcept, styles.tableHeaderText]}>Concepto</Text>
-          <Text style={[styles.colCount, styles.tableHeaderText]}>Cantidad</Text>
-        </View>
-        <View style={styles.previewDivider} />
+        <View style={styles.divider} />
 
         {rows.map((r) => (
           <View key={r.label} style={styles.tableRow2}>
@@ -258,113 +213,77 @@ export const ReiniciarMesScreen: React.FC = () => {
             <Text style={styles.colCount}>{String(r.count)}</Text>
           </View>
         ))}
-
-        <Text style={styles.previewMuted}>As of: {formatNowSimple()}</Text>
       </View>
     );
   };
 
-  // ---------------------------------------------------------------------------
-  // (3)(4)(5) Promedios: Contenedor (nombre) | Importe | Dif mes
-  // ---------------------------------------------------------------------------
-
-  const renderPromedios = () => {
+  const renderCardPromedios = () => {
     if (!giPreview) return null;
-
     const proms = Array.isArray(giPreview.promedios) ? giPreview.promedios : [];
-    if (proms.length === 0) {
-      return (
-        <View style={styles.previewCard}>
-          <View style={styles.sectionHeaderRow}>
-            <Text style={styles.previewTitle}>Promedios a insertar</Text>
-            <InfoButton
-              align="title"
-              onPress={() =>
-                info.open(
-                  'Promedios a insertar',
-                  'Promedios calculados (PROM-3M) que se aplicarán sobre contenedores. Se comparan con el importe actual (importe_cuota) para ver la variación porcentual.'
-                )
-              }
-            />
-          </View>
-
-          <Text style={[styles.previewMuted, { marginTop: 6 }]}>
-            No hay promedios calculados (0). Si esperabas verlos, revisa que existan gastos COT pagados en los últimos 3 meses.
-          </Text>
-        </View>
-      );
-    }
 
     return (
-      <View style={styles.previewCard}>
+      <View style={styles.card}>
+        <Text style={styles.cardTitle}>Reinicio del mes (promedios)</Text>
+
+        {proms.length === 0 ? (
+          <Text style={styles.muted}>No hay promedios calculados.</Text>
+        ) : (
+          <>
+            <View style={styles.tableHeaderRow3}>
+              <Text style={[styles.tableHeaderText, styles.colConcept]}>Contenedor</Text>
+              <Text style={[styles.tableHeaderText, styles.colAmount]}>Importe</Text>
+              <Text style={[styles.tableHeaderText, styles.colDiff]}>Dif mes</Text>
+            </View>
+            <View style={styles.divider} />
+
+            {proms.map((p, idx) => {
+              const nombre = String(p.contenedor_nombre ?? p.contenedor_tipo_id ?? `Contenedor ${idx + 1}`);
+              const val = Number(p.valor_promedio ?? 0);
+              const difPct = p.dif_mes_pct;
+
+              return (
+                <View key={`${nombre}-${idx}`} style={styles.tableRow3}>
+                  <Text style={styles.colConcept}>{nombre}</Text>
+                  <Text style={styles.colAmount}>{EuroformatEuro(val, 'normal')}</Text>
+                  <Text style={[styles.colDiff, { color: pctColor(difPct) }]}>{fmtPct(difPct)}</Text>
+                </View>
+              );
+            })}
+          </>
+        )}
+      </View>
+    );
+  };
+
+  const renderCardCierrePrev = () => {
+    if (!cierrePrevPreview) return null;
+
+    const rows = [
+      { label: 'Ingresos reales', value: Number(cierrePrevPreview.ingresos_reales ?? 0), mode: 'plus' as const },
+      { label: 'Gastos reales', value: Number(cierrePrevPreview.gastos_reales_total ?? 0), mode: 'minus' as const },
+      { label: 'Resultado real', value: Number(cierrePrevPreview.resultado_real ?? 0), mode: 'signed' as const },
+    ];
+
+    return (
+      <View style={styles.card}>
         <View style={styles.sectionHeaderRow}>
-          <View style={{ flex: 1 }}>
-            <Text style={styles.previewTitle}>Promedios a insertar</Text>
-            <Text style={styles.previewSubtitle}>
-              Se actualizarán contenedores con el promedio (PROM-3M) y se compara contra el importe actual.
+          <Text style={styles.cardTitle}>Previsualización cierre ({mesNombreES(prevPeriod.mes)} {prevPeriod.anio})</Text>
+        </View>
+
+        <View style={styles.tableHeaderRow2}>
+          <Text style={[styles.tableHeaderText, styles.colConcept]}>Concepto</Text>
+          <Text style={[styles.tableHeaderText, styles.colAmount]}>Importe</Text>
+        </View>
+        <View style={styles.divider} />
+
+        {rows.map((r) => (
+          <View key={r.label} style={styles.tableRow2}>
+            <Text style={styles.colConcept}>{r.label}</Text>
+            <Text style={styles.colAmount}>
+              {EuroformatEuro(r.value, r.mode)}
             </Text>
           </View>
-
-          <InfoButton
-            align="title"
-            onPress={() =>
-              info.open(
-                'Promedios a insertar',
-                '“Contenedor” es el nombre del gasto. “Importe” es el promedio calculado. “Dif mes” muestra la variación porcentual vs el importe actual (importe_cuota) del gasto activo con el mismo nombre.'
-              )
-            }
-          />
-        </View>
-
-        <View style={styles.tableHeaderRow3}>
-          <Text style={[styles.colConcept, styles.tableHeaderText]}>Contenedor</Text>
-          <Text style={[styles.colAmountSimple, styles.tableHeaderText]}>Importe</Text>
-          <Text style={[styles.colDelta, styles.tableHeaderText]}>Dif mes</Text>
-        </View>
-        <View style={styles.previewDivider} />
-
-        {proms.map((p: any, idx: number) => {
-          // ✅ Preferimos nombre (lo que necesitas)
-          // Fallbacks para no romper mientras ajustas router/backend.
-          const nombreRaw =
-            p?.nombre ??
-            p?.gasto_nombre ??
-            p?.contenedor_nombre ??
-            p?.contenedor ??
-            p?.contenedor_tipo_id ??
-            `Contenedor ${idx + 1}`;
-
-          const nombre = String(nombreRaw);
-          const key = normalizeKey(nombre);
-
-          const n = Number(p?.n_gastos_afectados ?? 0);
-          const futuro = Number(p?.valor_promedio ?? 0);
-
-          const pasado = Number(importeCuotaByNombre[key] ?? 0);
-          const difPct =
-            pasado > 0 && Number.isFinite(pasado) && Number.isFinite(futuro)
-              ? ((futuro - pasado) / pasado) * 100
-              : null;
-
-          return (
-            <View key={`${key}-${idx}`} style={styles.tableRow3}>
-              <Text style={styles.colConcept}>{nombre}</Text>
-
-              {/* Importe: sin colores “extra”, siempre positivo */}
-              <Text style={styles.colAmountSimple}>
-                {EuroformatEuro(futuro, 'normal')}
-              </Text>
-
-              <Text style={[styles.colDelta, { color: deltaColor(difPct) }]}>
-                {fmtPct(difPct)}
-              </Text>
-            </View>
-          );
-        })}
-
-        <Text style={styles.previewMuted}>
-          Nota: “Dif mes” compara el promedio (futuro) vs el importe_cuota actual del gasto activo con el mismo nombre.
-        </Text>
+        ))}
       </View>
     );
   };
@@ -374,7 +293,7 @@ export const ReiniciarMesScreen: React.FC = () => {
       return (
         <View style={styles.center}>
           <ActivityIndicator size="small" color={colors.primary} />
-          <Text style={styles.helperText}>Cargando previsualización…</Text>
+          <Text style={styles.helperText}>Cargando…</Text>
         </View>
       );
     }
@@ -395,31 +314,23 @@ export const ReiniciarMesScreen: React.FC = () => {
 
     return (
       <View style={styles.content}>
-        <Text style={styles.h1}>Reiniciar mes</Text>
-        <Text style={styles.subtitle}>
-          Previsualiza los cambios y ejecútalos cuando estés listo.
-        </Text>
+        <View style={styles.titleRow}>
+          <Text style={styles.h1}>Previsualización</Text>
+          <InfoButton
+            align="title"
+            onPress={() =>
+              info.open(
+                'Previsualización (Mes a mes)',
+                'Esta pantalla es informativa:\n\n1) “Si cerráramos hoy”: foto del periodo consultado si lo cerraras ahora.\n2) “Reinicio del mes”: conteos y promedios que se aplicarían en un reinicio.\n3) “Previsualización cierre”: valores que se insertarían al generar/persistir el cierre del mes anterior.'
+              )
+            }
+          />
+        </View>
 
-        {/* ✅ Eliminado: renderMesInfo() */}
-
-        {renderResumenReinicio()}
-        {renderPromedios()}
-
-        <OptionCard
-          iconName="repeat-outline"
-          title="Aplicar reinicio"
-          description={
-            canExecute
-              ? 'Aplicará el reinicio de gastos/ingresos y actualizará promedios en contenedores.'
-              : (disabledReason ?? 'No disponible')
-          }
-          onPress={confirmarEjecutar}
-          state={canExecute ? 'enabled' : 'disabled'}
-          onDisabledPress={() => Alert.alert('No disponible', disabledReason ?? 'No cumples las condiciones.')}
-          showChevron={false}
-        />
-
-        <Text style={styles.pullHint}>Desliza hacia abajo para recomprobar.</Text>
+        {renderCardCierreHoy()}
+        {renderCardReinicioResumen()}
+        {renderCardPromedios()}
+        {renderCardCierrePrev()}
       </View>
     );
   };
@@ -427,7 +338,12 @@ export const ReiniciarMesScreen: React.FC = () => {
   return (
     <Screen withHeaderBackground>
       <View style={styles.topArea}>
-        <Header title="Reiniciar mes" subtitleYear={periodo.anio} subtitleMonth={periodo.mes} showBack />
+        <Header
+          title="Mes a mes"
+          subtitleYear={periodo.anio}
+          subtitleMonth={periodo.mes}
+          showBack
+        />
       </View>
 
       <ScrollView
@@ -437,7 +353,6 @@ export const ReiniciarMesScreen: React.FC = () => {
         {renderBody()}
       </ScrollView>
 
-      {/* ✅ Modal global de info */}
       <InfoModal visible={info.visible} title={info.title} text={info.text} onClose={info.close} />
     </Screen>
   );
@@ -450,7 +365,6 @@ const styles = StyleSheet.create({
     paddingTop: spacing.sm,
     paddingBottom: spacing.lg,
   },
-
   scrollContent: {
     paddingHorizontal: spacing.lg,
     paddingTop: spacing.lg,
@@ -458,148 +372,50 @@ const styles = StyleSheet.create({
     backgroundColor: '#F5F5F7',
     flexGrow: 1,
   },
-
   content: { gap: spacing.md },
+  center: { alignItems: 'center', justifyContent: 'center', gap: spacing.md, paddingTop: spacing.xl },
 
-  center: {
+  titleRow: {
+    flexDirection: 'row',
     alignItems: 'center',
-    justifyContent: 'center',
-    gap: spacing.md,
-    paddingTop: spacing.xl,
+    justifyContent: 'space-between',
   },
 
   h1: {
-    fontSize: 26,
-    fontWeight: '700',
+    fontSize: 22,
+    fontWeight: '800',
     color: colors.textPrimary,
-    textAlign: 'center',
-    marginBottom: spacing.xs,
-  },
-  subtitle: {
-    fontSize: 14,
-    color: colors.textSecondary,
-    textAlign: 'center',
-    marginBottom: spacing.md,
-    lineHeight: 20,
   },
 
   helperText: { fontSize: 13, color: colors.textSecondary },
-  errorText: {
-    fontSize: 14,
-    color: colors.actionDanger,
-    textAlign: 'center',
-    marginBottom: spacing.md,
-  },
+  errorText: { fontSize: 14, color: colors.actionDanger, textAlign: 'center', marginBottom: spacing.md },
 
-  // Preview cards
-  previewCard: {
+  card: {
     backgroundColor: '#FFFFFF',
     borderRadius: 14,
     padding: spacing.lg,
     borderWidth: 1,
     borderColor: '#E6E6EA',
   },
+  sectionHeaderRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: spacing.sm },
+  cardTitle: { fontSize: 14, fontWeight: '800', color: colors.textPrimary, textTransform: 'capitalize' },
 
-  // Header por sección: título izquierda, "i" derecha
-  sectionHeaderRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    gap: 10,
-    marginBottom: spacing.sm,
-  },
+  muted: { marginTop: 10, fontSize: 12, color: colors.textSecondary, lineHeight: 16 },
 
-  previewTitle: {
-    fontSize: 14,
-    fontWeight: '800',
-    color: colors.textPrimary,
-    textTransform: 'capitalize',
-  },
-  previewSubtitle: {
-    marginTop: 4,
-    fontSize: 12,
-    color: colors.textSecondary,
-    lineHeight: 16,
-  },
-  previewMuted: {
-    marginTop: 10,
-    fontSize: 12,
-    color: colors.textSecondary,
-    lineHeight: 16,
-  },
+  divider: { height: 1, backgroundColor: '#E6E6EA', marginVertical: spacing.xs },
 
-  // Tabla base
-  tableHeaderText: {
-    fontSize: 11,
-    color: colors.textSecondary,
-    fontWeight: '700',
-  },
-  previewDivider: {
-    height: 1,
-    backgroundColor: '#E6E6EA',
-    marginVertical: spacing.xs,
-  },
+  tableHeaderText: { fontSize: 11, color: colors.textSecondary, fontWeight: '700' },
 
-  // 2 columnas (resumen reinicio)
-  tableHeaderRow: {
-    flexDirection: 'row',
-    alignItems: 'baseline',
-    justifyContent: 'space-between',
-    paddingVertical: 6,
-  },
-  tableRow2: {
-    flexDirection: 'row',
-    alignItems: 'baseline',
-    justifyContent: 'space-between',
-    paddingVertical: 8,
-  },
+  tableHeaderRow2: { flexDirection: 'row', alignItems: 'baseline', justifyContent: 'space-between', paddingVertical: 6 },
+  tableRow2: { flexDirection: 'row', alignItems: 'baseline', justifyContent: 'space-between', paddingVertical: 8 },
 
-  // 3 columnas (promedios + dif)
-  tableHeaderRow3: {
-    flexDirection: 'row',
-    alignItems: 'baseline',
-    justifyContent: 'space-between',
-    paddingVertical: 6,
-  },
-  tableRow3: {
-    flexDirection: 'row',
-    alignItems: 'baseline',
-    justifyContent: 'space-between',
-    paddingVertical: 8,
-  },
+  tableHeaderRow3: { flexDirection: 'row', alignItems: 'baseline', justifyContent: 'space-between', paddingVertical: 6 },
+  tableRow3: { flexDirection: 'row', alignItems: 'baseline', justifyContent: 'space-between', paddingVertical: 8 },
 
-  colConcept: {
-    flex: 1,
-    fontSize: 12,
-    color: colors.textSecondary,
-    paddingRight: 10,
-  },
-  colCount: {
-    width: 80,
-    textAlign: 'center',
-    fontSize: 12,
-    color: colors.textSecondary,
-    fontWeight: '700',
-  },
-
-  // Importe simple (sin colores)
-  colAmountSimple: {
-    width: 120,
-    textAlign: 'right',
-    fontSize: 13,
-    fontWeight: '800',
-    color: colors.textPrimary,
-  },
-
-  // Dif mes
-  colDelta: {
-    width: 80,
-    textAlign: 'right',
-    fontSize: 12,
-    fontWeight: '800',
-  },
-
-  pullHint: { fontSize: 11, color: colors.textSecondary, textAlign: 'center', marginTop: 2 },
+  colConcept: { flex: 1, fontSize: 12, color: colors.textSecondary, paddingRight: 10 },
+  colCount: { width: 90, textAlign: 'right', fontSize: 12, color: colors.textSecondary, fontWeight: '800' },
+  colAmount: { width: 120, textAlign: 'right', fontSize: 13, fontWeight: '800', color: colors.textPrimary },
+  colDiff: { width: 80, textAlign: 'right', fontSize: 12, fontWeight: '900', color: colors.textSecondary },
 });
 
-export default ReiniciarMesScreen;
+export default ReiniciarMesPreviewScreen;

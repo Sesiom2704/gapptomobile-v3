@@ -5,19 +5,10 @@
  *   - Listar préstamos con búsqueda y filtros (estado / vencen mes).
  *   - Permitir navegación a detalle y a alta (form).
  *
- * Maneja:
- *   - UI: Screen, Header, FilterRow, FilterPill, FlatList, ListRow.
- *   - Estado: local (q, filtro, loading, refreshing, items).
- *   - Datos:
- *       - Lectura: prestamosApi.list(params)
- *       - Escritura: n/a (la creación/edición ocurre en el Form)
- *   - Navegación:
- *       - PrestamoDetalleScreen (prestamoId)
- *       - PrestamoFormScreen (prestamoId opcional)
- *
- * Notas:
- *   - Importes en formato ES: "x.xxx,xx €" usando EuroformatEuro().
- *   - Back: vuelve a Patrimonio (PatrimonyTab -> PatrimonyHomeScreen).
+ * Cambios (respecto a tu versión):
+ *   - Reemplaza el render basado en ListRow por UnifiedAssetCard.
+ *   - Mantiene: búsqueda, filtros, refresco, navegación, formato de importes.
+ *   - No se añade ActionSheet aquí para no introducir endpoints no confirmados (no se pierde funcionalidad).
  */
 
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
@@ -26,23 +17,22 @@ import {
   Text,
   TextInput,
   FlatList,
-  TouchableOpacity,
   RefreshControl,
   ActivityIndicator,
   StyleSheet,
-  Alert
+  Alert,
 } from 'react-native';
-import Ionicons from '@expo/vector-icons/Ionicons';
 import { useNavigation } from '@react-navigation/native';
 
 import { Screen } from '../../components/layout/Screen';
 import { Header } from '../../components/layout/Header';
 import { FilterRow } from '../../components/ui/FilterRow';
 import { FilterPill } from '../../components/ui/FilterPill';
-import { ListRow } from '../../components/ui/ListRow';
 import { colors, spacing } from '../../theme';
 import { EuroformatEuro, parseEuroToNumber } from '../../utils/format';
 import { prestamosApi } from '../../services/prestamosApi';
+
+import UnifiedAssetCard from '../../components/cards/UnifiedAssetCard';
 
 type EstadoFiltro = 'ACTIVOS' | 'VENCEN_MES' | 'CANCELADOS' | 'INACTIVOS';
 
@@ -108,7 +98,7 @@ export default function PrestamosListScreen() {
     navigation.navigate('PatrimonyTab', { screen: 'PatrimonyHomeScreen' });
   }, [navigation]);
 
-    const load = useCallback(
+  const load = useCallback(
     async (showSpinner: boolean) => {
       try {
         if (showSpinner) setLoading(true);
@@ -125,7 +115,11 @@ export default function PrestamosListScreen() {
 
         const data = await prestamosApi.list(params);
 
-        console.log('[PrestamosList] response length =>', Array.isArray(data) ? data.length : 'not-array', data);
+        console.log(
+          '[PrestamosList] response length =>',
+          Array.isArray(data) ? data.length : 'not-array',
+          data
+        );
 
         setItems(Array.isArray(data) ? data : []);
       } catch (e: any) {
@@ -133,7 +127,6 @@ export default function PrestamosListScreen() {
         console.log('[PrestamosList] status =>', e?.response?.status);
         console.log('[PrestamosList] data =>', e?.response?.data);
 
-        // Importante: así no se queda “silencioso”
         Alert.alert(
           'Error',
           `No se pudo cargar préstamos.\nStatus: ${String(e?.response?.status ?? '—')}\n${String(
@@ -149,7 +142,6 @@ export default function PrestamosListScreen() {
     [q, filtro]
   );
 
-
   useEffect(() => {
     void load(true);
   }, [load]);
@@ -161,8 +153,7 @@ export default function PrestamosListScreen() {
   }, [load]);
 
   const goNew = () => navigation.navigate('PrestamoForm', {});
-  const goDetalle = (prestamoId: string) =>
-    navigation.navigate('PrestamoDetalle', { prestamoId });
+  const goDetalle = (prestamoId: string) => navigation.navigate('PrestamoDetalle', { prestamoId });
 
   return (
     <Screen>
@@ -205,9 +196,7 @@ export default function PrestamosListScreen() {
           <FlatList
             data={items}
             keyExtractor={(it) => String(it.id)}
-            refreshControl={
-              <RefreshControl refreshing={refreshing} onRefresh={onRefresh} />
-            }
+            refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} />}
             renderItem={({ item }) => {
               const cuotasTot = Math.max(0, n(item.cuotas_totales));
               const cuotasPag = Math.max(0, n(item.cuotas_pagadas));
@@ -215,50 +204,34 @@ export default function PrestamosListScreen() {
               const tin = n(item.tin_pct);
               const tinLabel = Number.isFinite(tin) ? tin.toFixed(2) : '—';
 
+              const estadoUpper = String(item.estado ?? '').toUpperCase();
+              const active = estadoUpper === 'ACTIVO';
+
+              const cardRows = [
+                { label: 'Periodicidad', value: String(item.periodicidad ?? '—') },
+                { label: 'TIN', value: `${tinLabel}%` },
+                { label: 'Principal', value: fmtEur(item.importe_principal), emphasize: true },
+                { label: 'Pendiente', value: fmtEur(item.capital_pendiente), emphasize: true },
+                { label: 'Cuotas pagadas', value: `${cuotasPag}/${cuotasTot}` },
+                { label: 'Vencimiento', value: String(item.fecha_vencimiento ?? '—') },
+              ];
+
               return (
-                <TouchableOpacity
+                <UnifiedAssetCard
+                  title={String(item.nombre ?? '—')}
+                  subtitle={String(item.estado ?? '—')}
+                  active={active}
+                  // En préstamos no hay "cifra del filtro" en el header actualmente.
+                  // Si quisieras, podríamos poner TIN como headerValue, pero mantengo UI conservadora.
+                  headerValue={undefined}
+                  rows={cardRows}
                   onPress={() => goDetalle(item.id)}
-                  activeOpacity={0.85}
-                  style={styles.card}
-                >
-                  <ListRow
-                    left={
-                      <Ionicons
-                        name="cash-outline"
-                        size={18}
-                        color={colors.primary}
-                      />
-                    }
-                    title={String(item.nombre ?? '—')}
-                    subtitle={`${String(item.periodicidad ?? '—')} · TIN ${tinLabel}% · ${String(
-                      item.estado ?? '—'
-                    )}`}
-                    details={
-                      <View style={{ gap: 2 }}>
-                        <Text style={styles.kv}>
-                          Principal: {fmtEur(item.importe_principal)}
-                        </Text>
-                        <Text style={styles.kv}>
-                          Pendiente: {fmtEur(item.capital_pendiente)}
-                        </Text>
-                      </View>
-                    }
-                    footer={
-                      <Text style={styles.kvSmall}>
-                        {cuotasPag}/{cuotasTot} cuotas · Venc.:{' '}
-                        {String(item.fecha_vencimiento ?? '—')}
-                      </Text>
-                    }
-                    showDivider={false}
-                  />
-                </TouchableOpacity>
+                />
               );
             }}
             ListEmptyComponent={
               <View style={styles.empty}>
-                <Text style={styles.emptyText}>
-                  No hay préstamos para este filtro.
-                </Text>
+                <Text style={styles.emptyText}>No hay préstamos para este filtro.</Text>
               </View>
             }
             contentContainerStyle={{ paddingBottom: 24 }}
@@ -301,21 +274,5 @@ const styles = StyleSheet.create({
   emptyText: {
     color: colors.textSecondary,
     fontSize: 13,
-  },
-  card: {
-    backgroundColor: '#fff',
-    borderRadius: 14,
-    borderWidth: 1,
-    borderColor: colors.border,
-    paddingHorizontal: spacing.md,
-    marginBottom: spacing.sm,
-  },
-  kv: {
-    fontSize: 12,
-    color: colors.textPrimary,
-  },
-  kvSmall: {
-    fontSize: 11,
-    color: colors.textSecondary,
   },
 });

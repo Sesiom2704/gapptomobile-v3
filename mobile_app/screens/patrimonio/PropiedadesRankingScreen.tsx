@@ -3,26 +3,13 @@
  *
  * Responsabilidad:
  *   - Listado de propiedades (activas e inactivas) ordenadas por KPI (Bruto / Cap Rate / NOI).
- *   - Visualización tipo “ranking” con tarjeta unificada (PropertyRankingCard).
+ *   - Visualización “ranking” con tarjeta unificada (UnifiedAssetCard).
  *   - Acciones contextuales por propiedad mediante ActionSheet (ver detalle, editar, activar/inactivar, eliminar).
  *
- * Cambios solicitados (aplicados):
- *   1) El ranking PRIORIZA propiedades activas:
- *        - Primero activas, luego inactivas.
- *        - Dentro de cada grupo, ordena por el KPI seleccionado (desc).
- *   2) Estado inactiva:
- *        - No usamos badge/overlay.
- *        - La propiedad inactiva se muestra como subtítulo: "(INACTIVADA)" con fuente más pequeña.
- *        - La tarjeta tiene un estilo visual tenue (disabledStyle) sin romper navegación ni opciones.
- *   3) Valor de mercado:
- *        - Se obtiene desde patrimonio_compra (endpoint /patrimonios/{id}/compra).
- *        - Se muestra "a fecha: <valor_mercado_fecha>" si existe.
- *
- * Requisito de integración:
- *   - Este fichero asume que PropertyRankingCard ya soporta props:
- *       - subtitle?: string
- *       - disabledStyle?: boolean
- *     (tal como se preparó en el componente).
+ * Cambios (respecto a tu versión):
+ *   - Reemplaza PropertyRankingCard por UnifiedAssetCard.
+ *   - Mantiene ranking: activas primero, luego inactivas; dentro, KPI desc.
+ *   - Mantiene: carga KPIs, carga compra (valor_mercado y fecha), refresco, navegación, ActionSheet.
  */
 
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
@@ -45,7 +32,8 @@ import { api } from '../../services/api';
 import { ActionSheet, ActionSheetAction } from '../../components/modals/ActionSheet';
 import FilterRow from '../../components/ui/FilterRow';
 import Chip from '../../components/ui/Chip';
-import PropertyRankingCard from '../../components/cards/PropertyRankingCard';
+
+import UnifiedAssetCard from '../../components/cards/UnifiedAssetCard';
 
 import screenStyles from '../styles/screenStyles';
 
@@ -91,7 +79,6 @@ function fmtEur(n: number | null | undefined): string {
 }
 
 function getTitle(p: PatrimonioRow): string {
-  // En vuestro flujo se estaba usando referencia como “título humano”, con fallback al id.
   return (p.referencia || p.id || 'PROPIEDAD').toString();
 }
 
@@ -164,9 +151,7 @@ export const PropiedadesRankingScreen: React.FC<Props> = ({ navigation }) => {
       // ✅ NO filtramos por activas: deben aparecer todas.
       const props = await patrimonioApi.listPatrimonios();
 
-      // Enriquecemos con:
-      // - KPIs (analytics)
-      // - compra.valor_mercado y compra.valor_mercado_fecha (patrimonio_compra)
+      // Enriquecemos con KPIs + compra (valor mercado y fecha)
       const enriched: RowVM[] = await Promise.all(
         (props ?? []).map(async (p) => {
           const [kpis, compra] = await Promise.all([fetchKpis(p.id), fetchCompra(p.id)]);
@@ -219,10 +204,7 @@ export const PropiedadesRankingScreen: React.FC<Props> = ({ navigation }) => {
       const aActive = isActive(a);
       const bActive = isActive(b);
 
-      // 1) priorizar activas
       if (aActive !== bActive) return aActive ? -1 : 1;
-
-      // 2) dentro del grupo, ordenar por KPI desc
       return getMetricValue(b) - getMetricValue(a);
     });
   }, [rows, metric]);
@@ -276,11 +258,6 @@ export const PropiedadesRankingScreen: React.FC<Props> = ({ navigation }) => {
 
     const activo = selectedRow.activo !== false;
 
-    const verde = '#16a34a';
-    const rojo = '#b91c1c';
-    const amarillo = '#eab308';
-    const gris = '#4b5563';
-
     const acciones: ActionSheetAction[] = [
       {
         label: 'Ver detalle',
@@ -289,7 +266,7 @@ export const PropiedadesRankingScreen: React.FC<Props> = ({ navigation }) => {
           navigation.navigate('PropiedadDetalle', { patrimonioId: selectedRow.id });
         },
         iconName: 'information-circle-outline',
-        color: gris,
+        color: colors.actionNeutral,
       },
       {
         label: 'Editar',
@@ -298,11 +275,10 @@ export const PropiedadesRankingScreen: React.FC<Props> = ({ navigation }) => {
           navigation.navigate('PropiedadForm', { mode: 'edit', patrimonioId: selectedRow.id });
         },
         iconName: 'create-outline',
-        color: amarillo,
+        color: colors.actionWarning,
       },
     ];
 
-    // Acción activar/inactivar se mantiene en el ActionSheet (no es “badge/botón” en la tarjeta).
     if (activo) {
       acciones.push({
         label: 'Inactivar',
@@ -310,7 +286,7 @@ export const PropiedadesRankingScreen: React.FC<Props> = ({ navigation }) => {
           await toggleActivo(selectedRow, false);
         },
         iconName: 'close-circle-outline',
-        color: amarillo,
+        color: colors.actionWarning,
       });
     } else {
       acciones.push({
@@ -319,7 +295,7 @@ export const PropiedadesRankingScreen: React.FC<Props> = ({ navigation }) => {
           await toggleActivo(selectedRow, true);
         },
         iconName: 'checkmark-circle-outline',
-        color: verde,
+        color: colors.actionSuccess,
       });
     }
 
@@ -327,7 +303,7 @@ export const PropiedadesRankingScreen: React.FC<Props> = ({ navigation }) => {
       label: 'Eliminar',
       onPress: () => confirmarEliminar(selectedRow),
       iconName: 'trash-outline',
-      color: rojo,
+      color: colors.actionDanger,
       destructive: true,
     });
 
@@ -372,8 +348,6 @@ export const PropiedadesRankingScreen: React.FC<Props> = ({ navigation }) => {
           const direccion = getDireccion(p);
 
           const isInactive = p.activo === false;
-
-          // ✅ Subtítulo (fuente más pequeña) si está inactiva
           const subtitle = isInactive ? '(INACTIVADA)' : undefined;
 
           const participacion = safeNum(p.participacion_pct);
@@ -382,36 +356,49 @@ export const PropiedadesRankingScreen: React.FC<Props> = ({ navigation }) => {
           const supUtil = safeNum(p.superficie_m2);
           const supConst = safeNum(p.superficie_construida);
 
-          // ✅ Valor mercado desde patrimonio_compra + fecha
           const valorMercado = safeNum(p.__valor_mercado);
           const valorMercadoFecha = p.__valor_mercado_fecha ? formatFechaCorta(p.__valor_mercado_fecha) : null;
 
           const valorMercadoValue =
             valorMercado == null
               ? '—'
-              : `${EuroformatEuro(valorMercado, 'normal')}${valorMercadoFecha ? ` a fecha: ${valorMercadoFecha}` : ''}`;
+              : `${EuroformatEuro(valorMercado, 'normal')}${
+                  valorMercadoFecha ? ` a fecha: ${valorMercadoFecha}` : ''
+                }`;
 
-          const metricValue =
+          // ✅ CIFRA del filtro (sin mostrar el tipo)
+          const headerValue =
             metric === 'noi'
               ? fmtEur(p.__kpis?.noi ?? null)
               : metric === 'bruto'
                 ? fmtPct(p.__kpis?.rendimiento_bruto_pct ?? null)
                 : fmtPct(p.__kpis?.cap_rate_pct ?? null);
 
+          const cardRows = [
+            {
+              label: 'Participación',
+              value: participacion == null ? '—' : `${participacion.toFixed(0)}%`,
+            },
+            {
+              label: 'Superficie',
+              value: `${supUtil == null ? '—' : `${supUtil.toFixed(2)} m²`} · ${
+                supConst == null ? '—' : `${supConst.toFixed(2)} m²`
+              }`,
+            },
+            { label: 'Adquisición', value: fechaAdq },
+            { label: 'Valor mercado', value: valorMercadoValue, emphasize: true },
+            { label: 'Dirección', value: direccion || '—' },
+          ];
+
           return (
-            <PropertyRankingCard
+            <UnifiedAssetCard
               key={p.id}
               title={title}
               subtitle={subtitle}
-              disabledStyle={isInactive}
-              kpiValue={metricValue}
-              rankPosition={idx + 1}
-              participacionValue={participacion == null ? '—' : `${participacion.toFixed(0)}%`}
-              supConstValue={supConst == null ? '—' : `${supConst.toFixed(2)} m²`}
-              adquisicionValue={fechaAdq}
-              supUtilValue={supUtil == null ? '—' : `${supUtil.toFixed(2)} m²`}
-              valorMercadoValue={valorMercadoValue}
-              direccion={direccion || '—'}
+              active={!isInactive}
+              headerValue={headerValue}
+              leading={{ kind: 'rank', value: idx + 1 }}
+              rows={cardRows}
               onPress={() => navigation.navigate('PropiedadDetalle', { patrimonioId: p.id })}
               onOptionsPress={() => openOptions(p)}
             />

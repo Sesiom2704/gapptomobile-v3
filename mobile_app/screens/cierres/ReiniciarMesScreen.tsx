@@ -227,9 +227,25 @@ export const ReiniciarMesScreen: React.FC = () => {
         enforceWindow: true,
       });
 
-      await load();
-      Alert.alert('Reinicio aplicado', 'Los gastos/ingresos han sido reiniciados correctamente.');
-      // navigation.goBack();
+      // Si quieres mantener el reload local, ok (no es obligatorio si sales de la pantalla)
+      // await load();
+
+      Alert.alert('Reinicio aplicado', 'Los gastos/ingresos han sido reiniciados correctamente.', [
+        {
+          text: 'OK',
+          onPress: () => {
+            navigation.navigate('DayToDayTab', {
+              screen: 'GastosList',
+              params: {
+                initialFiltro: 'cotidiano',
+                fromDiaADia: true,
+                returnToTab: 'MonthTab',
+                returnToScreen: 'MonthHomeScreen',
+              },
+            });
+          },
+        },
+      ]);
     } catch (e: any) {
       setErrorMsg(e?.message ?? 'No se ha podido ejecutar el reinicio.');
       setState('ERROR');
@@ -323,7 +339,7 @@ export const ReiniciarMesScreen: React.FC = () => {
             onPress={() =>
               info.open(
                 'Promedios a insertar',
-                'PROM-3M por contenedor. “Importe” es el promedio calculado. “Dif mes” compara el promedio con el importe_cuota actual del contenedor (si está disponible). Incremento se muestra en rojo y decremento en verde.'
+                'PROM-3M por contenedor. “Importe” es el promedio calculado. “Dif mes” compara el promedio con el importe_cuota actual del contenedor (si está disponible). Incremento se muestra en rojo y decremento en verde. Nota: “Dif mes” se calcula como (promedio - importe_cuota_actual) / importe_cuota_actual.'
               )
             }
           />
@@ -356,10 +372,6 @@ export const ReiniciarMesScreen: React.FC = () => {
             </View>
           );
         })}
-
-        <Text style={styles.muted}>
-          Nota: “Dif mes” se calcula como (promedio - importe_cuota_actual) / importe_cuota_actual.
-        </Text>
       </View>
     );
   };
