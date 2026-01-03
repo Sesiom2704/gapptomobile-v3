@@ -134,6 +134,10 @@ class IngresoSchema(BaseModel):
     inactivatedon: Optional[datetime] = None
     cuenta_id: Optional[str] = None
 
+    ultimo_ingreso_on: Optional[datetime] = None
+    user_id: Optional[str] = None
+    user_nombre: Optional[str] = None
+
     model_config = ConfigDict(from_attributes=True)
 
 

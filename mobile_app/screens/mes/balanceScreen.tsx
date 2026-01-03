@@ -2,16 +2,21 @@
 /**
  * RESPONSABILIDAD (sin romper nada):
  * - Mostrar balance del mes, saldos por cuentas, pendientes, últimos movimientos y KPIs de liquidez.
- * - Permitir "Nuevo movimiento entre cuentas" (panel plegable).
+ * - Permitir "Nuevo movimiento entre cuentas" (ahora en MODAL con overlay, cerrable tocando fuera).
  * - Permitir "Info/Ajuste liquidez" por cuenta (modal).
  *
- * NUEVO (requisito):
- * - Añadir botón de información (InfoButton) al COMIENZO (cabecera) de cada tarjeta/sección,
- *   igual que en Resumen: el icono "i" abre InfoModal con contexto.
+ * CAMBIOS (requisitos):
+ * 1) Al ajustar liquidez: en comentarios guardar "Ajuste de liquidez manual".
+ * 2) En "Pendiente de cobro/pago":
+ *    - Impacto Neto: si es negativo en rojo; si es positivo en verde (0 neutro).
+ *    - Quitar el texto "(si se cobra todo y se ...)" y poner un botón de info a la derecha
+ *      que al pulsar muestre ese mensaje (usando InfoModal global).
+ * 3) "Nuevo movimiento entre cuentas":
+ *    - Pasar a Modal con overlay. Si pulsas fuera del formulario, cierra igual que la "X".
  *
  * NOTAS:
- * - No se modifica la navegación existente.
- * - No se altera la lógica de negocio; solo UI + estado del modal info.
+ * - No se toca lógica de negocio (APIs, cálculos, navegación), salvo el comentario del ajuste (requisito 1).
+ * - Se reutiliza InfoModal global ya existente para el botón de info del Impacto neto.
  */
 
 // mobile_app/screens/mes/BalanceScreen.tsx
@@ -93,7 +98,7 @@ const BalanceScreen: React.FC = () => {
   const info = useInfoModal();
 
   // -------------------------
-  // Estado "Nuevo movimiento"
+  // Estado "Nuevo movimiento" (ahora modal)
   // -------------------------
   const [showTransferBox, setShowTransferBox] = useState(false);
   const [origenId, setOrigenId] = useState<string | null>(null);
@@ -150,6 +155,20 @@ const BalanceScreen: React.FC = () => {
   const gastosPendientesTotal = balance?.gastos_pendientes_total ?? 0;
   const impactoNetoPendiente = ingresosPendientesTotal - gastosPendientesTotal;
 
+  /**
+   * ✅ Requisito (2):
+   * Color del Impacto Neto según signo:
+   * - < 0: rojo (danger)
+   * - > 0: verde (success)
+   * - = 0: neutro (textPrimary)
+   */
+  const impactoNetoColor =
+    impactoNetoPendiente < 0
+      ? colors.danger
+      : impactoNetoPendiente > 0
+        ? colors.success
+        : colors.textPrimary;
+
   const indicadoresLiquidez = useMemo(() => {
     if (!cuentas.length) {
       return { cuentasNegativas: 0, cuentasConPocoSaldo: 0, liquidezDisponible: 0 };
@@ -201,7 +220,7 @@ const BalanceScreen: React.FC = () => {
   };
 
   // -------------------------
-  // Nuevo movimiento entre cuentas
+  // Nuevo movimiento entre cuentas (Modal)
   // -------------------------
   const handleOpenTransfer = () => {
     setShowTransferBox((prev) => !prev);
@@ -292,7 +311,8 @@ const BalanceScreen: React.FC = () => {
         fecha,
         cuentaId: cuentaSeleccionadaId,
         nuevoSaldo,
-        comentarios: 'Ajuste manual de liquidez desde BalanceScreen',
+        // ✅ Requisito (1): comentario “limpio” y consistente
+        comentarios: 'Ajuste de liquidez manual',
       });
 
       Alert.alert('Saldo actualizado', 'Liquidez ajustada correctamente.');
@@ -324,118 +344,6 @@ const BalanceScreen: React.FC = () => {
           contentContainerStyle={panelStyles.scrollContent}
           refreshControl={<RefreshControl refreshing={refreshing} onRefresh={handleRefresh} />}
         >
-          {/* 🧾 Nuevo movimiento entre cuentas */}
-          {showTransferBox && (
-            <View style={panelStyles.section}>
-              <View style={styles.sectionTitleRow}>
-                <View style={styles.titleWithInfo}>
-                  <Text style={panelStyles.sectionTitle}>Nuevo movimiento entre cuentas</Text>
-                  <InfoButton
-                    align="title"
-                    onPress={() =>
-                      info.open(
-                        'Nuevo movimiento entre cuentas',
-                        'Registra un traspaso entre dos cuentas (origen y destino). El movimiento se guarda dentro del mes.'
-                      )
-                    }
-                  />
-                </View>
-
-                <TouchableOpacity
-                  style={styles.sectionTitleCloseButton}
-                  onPress={handleCancelTransfer}
-                  hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
-                >
-                  <Ionicons name="close" size={20} color={colors.textSecondary} />
-                </TouchableOpacity>
-              </View>
-
-              <View style={panelStyles.card}>
-                {/* Cuenta origen */}
-                <View style={styles.transferField}>
-                  <Text style={styles.transferLabel}>Cuenta origen</Text>
-                  <View style={styles.accountsRow}>
-                    {cuentas.map((cta) => {
-                      const bloqueada = destinoId === cta.cuenta_id;
-
-                      return (
-                        <View key={cta.cuenta_id} style={[styles.accountPillWrapper, bloqueada && { opacity: 0.3 }]}>
-                          <AccountPill
-                            label={cta.anagrama ?? cta.cuenta_id}
-                            subLabel={EuroformatEuro(cta.fin, 'normal')}
-                            selected={origenId === cta.cuenta_id}
-                            onPress={() => {
-                              if (bloqueada) return;
-                              setOrigenId(cta.cuenta_id);
-                            }}
-                            size="small"
-                          />
-                        </View>
-                      );
-                    })}
-                  </View>
-                </View>
-
-                {/* Cuenta destino */}
-                <View style={styles.transferField}>
-                  <Text style={styles.transferLabel}>Cuenta destino</Text>
-                  <View style={styles.accountsRow}>
-                    {cuentas.map((cta) => {
-                      const bloqueada = origenId === cta.cuenta_id;
-
-                      return (
-                        <View key={cta.cuenta_id} style={[styles.accountPillWrapper, bloqueada && { opacity: 0.3 }]}>
-                          <AccountPill
-                            label={cta.anagrama ?? cta.cuenta_id}
-                            subLabel={EuroformatEuro(cta.fin, 'normal')}
-                            selected={destinoId === cta.cuenta_id}
-                            onPress={() => {
-                              if (bloqueada) return;
-                              setDestinoId(cta.cuenta_id);
-                            }}
-                            size="small"
-                          />
-                        </View>
-                      );
-                    })}
-                  </View>
-                </View>
-
-                {/* Importe */}
-                <View style={styles.transferField}>
-                  <Text style={styles.transferLabel}>Importe</Text>
-                  <TextInput
-                    style={styles.transferInput}
-                    keyboardType="decimal-pad"
-                    placeholder="Ej. 200,00"
-                    value={importeMovimiento}
-                    onChangeText={setImporteMovimiento}
-                  />
-                </View>
-
-                {/* Comentarios */}
-                <View style={styles.transferField}>
-                  <Text style={styles.transferLabel}>Comentarios (opcional)</Text>
-                  <TextInput
-                    style={[styles.transferInput, styles.transferInputMultiline]}
-                    placeholder="Ej. Traspaso mensual al ahorro"
-                    value={comentariosMovimiento}
-                    onChangeText={setComentariosMovimiento}
-                    multiline
-                  />
-                </View>
-
-                {/* Guardar */}
-                <View style={styles.transferButtonsRow}>
-                  <TouchableOpacity style={styles.transferSaveButton} onPress={handleSaveTransfer}>
-                    <Ionicons name="swap-horizontal-outline" size={16} color="#fff" style={{ marginRight: 6 }} />
-                    <Text style={styles.transferSaveButtonText}>Guardar movimiento</Text>
-                  </TouchableOpacity>
-                </View>
-              </View>
-            </View>
-          )}
-
           {/* 🔹 Resumen del mes */}
           <View style={panelStyles.section}>
             <View style={styles.sectionHeaderRow}>
@@ -578,11 +486,24 @@ const BalanceScreen: React.FC = () => {
                 </View>
               </View>
 
+              {/* ✅ Requisito (2): color por signo + info button a la derecha */}
               <View style={styles.pendienteResumenRow}>
                 <Text style={styles.pendienteResumenLabel}>Impacto neto</Text>
-                <Text style={styles.pendienteResumenValue}>
-                  {EuroformatEuro(impactoNetoPendiente, 'signed')} (si se cobra todo y se pagan todos)
-                </Text>
+
+                <View style={styles.pendienteResumenRight}>
+                  <Text style={[styles.pendienteResumenValue, { color: impactoNetoColor }]}>
+                    {EuroformatEuro(impactoNetoPendiente, 'signed')}
+                  </Text>
+
+                  {/* Botón de info alineado a la derecha (muestra el mensaje solicitado) */}
+                  <TouchableOpacity
+                    style={styles.pendienteInfoButton}
+                    hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                    onPress={() => info.open('Impacto neto', 'Si se cobra todo y se pagan todos')}
+                  >
+                    <Ionicons name="information-circle-outline" size={18} color={colors.textSecondary} />
+                  </TouchableOpacity>
+                </View>
               </View>
             </View>
           </View>
@@ -684,6 +605,148 @@ const BalanceScreen: React.FC = () => {
             </View>
           </View>
         </ScrollView>
+
+        {/* =========================================
+            ✅ Requisito (3): Modal "Nuevo movimiento"
+            - Tocar fuera cierra igual que la X
+            - Misma UI y validaciones de antes
+           ========================================= */}
+        <Modal
+          visible={showTransferBox}
+          transparent
+          animationType="fade"
+          onRequestClose={handleCancelTransfer}
+        >
+          {/* Overlay: cualquier toque fuera del formulario cancela */}
+          <TouchableWithoutFeedback onPress={handleCancelTransfer}>
+            <View style={styles.transferOverlay}>
+              {/* Contenedor interno: evita que el toque “atraviese” y cierre */}
+              <TouchableWithoutFeedback onPress={() => {}}>
+                <View style={styles.transferModalCardWrapper}>
+                  <ScrollView
+                    keyboardShouldPersistTaps="handled"
+                    contentContainerStyle={styles.transferModalScrollContent}
+                  >
+                    <View style={panelStyles.section}>
+                      <View style={styles.sectionTitleRow}>
+                        <View style={styles.titleWithInfo}>
+                          <Text style={panelStyles.sectionTitle}>Nuevo movimiento entre cuentas</Text>
+                          <InfoButton
+                            align="title"
+                            onPress={() =>
+                              info.open(
+                                'Nuevo movimiento entre cuentas',
+                                'Registra un traspaso entre dos cuentas (origen y destino). El movimiento se guarda dentro del mes.'
+                              )
+                            }
+                          />
+                        </View>
+
+                        <TouchableOpacity
+                          style={styles.sectionTitleCloseButton}
+                          onPress={handleCancelTransfer}
+                          hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                        >
+                          <Ionicons name="close" size={20} color={colors.textSecondary} />
+                        </TouchableOpacity>
+                      </View>
+
+                      <View style={panelStyles.card}>
+                        {/* Cuenta origen */}
+                        <View style={styles.transferField}>
+                          <Text style={styles.transferLabel}>Cuenta origen</Text>
+                          <View style={styles.accountsRow}>
+                            {cuentas.map((cta) => {
+                              const bloqueada = destinoId === cta.cuenta_id;
+
+                              return (
+                                <View
+                                  key={cta.cuenta_id}
+                                  style={[styles.accountPillWrapper, bloqueada && { opacity: 0.3 }]}
+                                >
+                                  <AccountPill
+                                    label={cta.anagrama ?? cta.cuenta_id}
+                                    subLabel={EuroformatEuro(cta.fin, 'normal')}
+                                    selected={origenId === cta.cuenta_id}
+                                    onPress={() => {
+                                      if (bloqueada) return;
+                                      setOrigenId(cta.cuenta_id);
+                                    }}
+                                    size="small"
+                                  />
+                                </View>
+                              );
+                            })}
+                          </View>
+                        </View>
+
+                        {/* Cuenta destino */}
+                        <View style={styles.transferField}>
+                          <Text style={styles.transferLabel}>Cuenta destino</Text>
+                          <View style={styles.accountsRow}>
+                            {cuentas.map((cta) => {
+                              const bloqueada = origenId === cta.cuenta_id;
+
+                              return (
+                                <View
+                                  key={cta.cuenta_id}
+                                  style={[styles.accountPillWrapper, bloqueada && { opacity: 0.3 }]}
+                                >
+                                  <AccountPill
+                                    label={cta.anagrama ?? cta.cuenta_id}
+                                    subLabel={EuroformatEuro(cta.fin, 'normal')}
+                                    selected={destinoId === cta.cuenta_id}
+                                    onPress={() => {
+                                      if (bloqueada) return;
+                                      setDestinoId(cta.cuenta_id);
+                                    }}
+                                    size="small"
+                                  />
+                                </View>
+                              );
+                            })}
+                          </View>
+                        </View>
+
+                        {/* Importe */}
+                        <View style={styles.transferField}>
+                          <Text style={styles.transferLabel}>Importe</Text>
+                          <TextInput
+                            style={styles.transferInput}
+                            keyboardType="decimal-pad"
+                            placeholder="Ej. 200,00"
+                            value={importeMovimiento}
+                            onChangeText={setImporteMovimiento}
+                          />
+                        </View>
+
+                        {/* Comentarios */}
+                        <View style={styles.transferField}>
+                          <Text style={styles.transferLabel}>Comentarios (opcional)</Text>
+                          <TextInput
+                            style={[styles.transferInput, styles.transferInputMultiline]}
+                            placeholder="Ej. Traspaso mensual al ahorro"
+                            value={comentariosMovimiento}
+                            onChangeText={setComentariosMovimiento}
+                            multiline
+                          />
+                        </View>
+
+                        {/* Guardar */}
+                        <View style={styles.transferButtonsRow}>
+                          <TouchableOpacity style={styles.transferSaveButton} onPress={handleSaveTransfer}>
+                            <Ionicons name="swap-horizontal-outline" size={16} color="#fff" style={{ marginRight: 6 }} />
+                            <Text style={styles.transferSaveButtonText}>Guardar movimiento</Text>
+                          </TouchableOpacity>
+                        </View>
+                      </View>
+                    </View>
+                  </ScrollView>
+                </View>
+              </TouchableWithoutFeedback>
+            </View>
+          </TouchableWithoutFeedback>
+        </Modal>
 
         {/* Modal de ajuste */}
         <Modal
@@ -974,6 +1037,11 @@ const styles = StyleSheet.create({
     marginTop: 4,
     marginBottom: 2,
   },
+
+  /**
+   * ✅ “Impacto neto”: ahora el valor y el botón de info comparten “lado derecho”.
+   * Mantiene diseño compacto, y el icono queda visualmente alineado a la derecha.
+   */
   pendienteResumenRow: {
     marginTop: 8,
     paddingTop: 8,
@@ -981,9 +1049,20 @@ const styles = StyleSheet.create({
     borderTopColor: colors.border,
     flexDirection: 'row',
     justifyContent: 'space-between',
+    alignItems: 'center',
   },
   pendienteResumenLabel: { fontSize: 11, color: colors.textSecondary },
-  pendienteResumenValue: { fontSize: 12, fontWeight: '600', color: colors.textPrimary },
+  pendienteResumenRight: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  pendienteResumenValue: { fontSize: 12, fontWeight: '600' },
+  pendienteInfoButton: {
+    padding: 2,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
 
   indicatorRow: { flexDirection: 'row', alignItems: 'center', paddingVertical: 6 },
   indicatorIconCircle: {
@@ -1085,6 +1164,9 @@ const styles = StyleSheet.create({
   },
   botonNuevoSaldoText: { fontSize: 12, fontWeight: '600', color: '#fff' },
 
+  // -------------------------
+  // Overlay Modal Ajuste
+  // -------------------------
   adjustOverlay: {
     flex: 1,
     backgroundColor: 'rgba(0,0,0,0.4)',
@@ -1094,6 +1176,19 @@ const styles = StyleSheet.create({
   },
   adjustModalCardWrapper: { width: '100%', maxWidth: 420 },
   adjustModalScrollContent: { flexGrow: 0 },
+
+  // -------------------------
+  // Overlay Modal Transfer (requisito 3)
+  // -------------------------
+  transferOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.4)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    padding: 16,
+  },
+  transferModalCardWrapper: { width: '100%', maxWidth: 520 },
+  transferModalScrollContent: { flexGrow: 0 },
 
   movRow: { flexDirection: 'row', alignItems: 'center', paddingVertical: 6 },
   movIconCircle: {

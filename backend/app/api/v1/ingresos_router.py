@@ -115,8 +115,15 @@ def _serialize_ingreso(obj: Any) -> Dict[str, Any]:
         "createon": getattr(obj, "createon", None),
         "modifiedon": getattr(obj, "modifiedon", None),
         "inactivatedon": getattr(obj, "inactivatedon", None),
+        # ✅ CLAVE: devolverlo
+        "ultimo_ingreso_on": getattr(obj, "ultimo_ingreso_on", None),
+
         "cuenta_id": extract_cuenta_id(obj),
+
+        # ✅ usuario
         "user_id": getattr(obj, "user_id", None),
+        "user_nombre": getattr(getattr(obj, "user", None), "nombre", None)
+                      or getattr(getattr(obj, "user", None), "email", None),
     }
 
 
@@ -558,8 +565,8 @@ def cobrar_ingreso(
     )
     ingreso.modifiedon = func.now()
 
+    ingreso.ultimo_ingreso_on = func.now()
     if not was_cobrado:
-        ingreso.ultimo_ingreso_on = func.now()
         adjust_liquidez(
             db,
             extract_cuenta_id(ingreso),
