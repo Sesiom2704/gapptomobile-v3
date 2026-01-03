@@ -1,118 +1,70 @@
-// mobile_app/types/analytics.ts
+// mobile_app/services/analyticsApi.ts
+import { api } from './api';
+import {
+  DayToDayAnalysisRequest,
+  DayToDayAnalysisResponse,
+  MonthlySummaryResponse,
+} from '../types/analytics';
 
-export type PagoFiltro = 'TODOS' | 'YO' | 'OTRO';
-
-export type DayToDayAnalysisRequest = {
-  fecha?: string;                 // YYYY-MM-DD
-  pago?: PagoFiltro;
-  categoria?: string;
-  tipoId?: string;
-
-  // ✅ NUEVO: ventana para serie mensual (backend: months_back)
-  monthsBack?: number;            // 2..36 (según backend)
+// Params para el resumen mensual (si no pasas nada → mes y año actuales)
+export type MonthlySummaryRequest = {
+  year?: number;
+  month?: number;
 };
 
-export type TodaySummary = {
-  fecha_label: string;
-  total_hoy: number;
-  num_movimientos: number;
-  ticket_medio: number;
-  diff_vs_ayer: string;
-  tendencia: string;
+/**
+ * Llama al endpoint:
+ *   GET /api/v1/analytics/day-to-day
+ *
+ * Mapea parámetros frontend -> backend:
+ *   - tipoId     -> tipo_id
+ *   - monthsBack -> months_back
+ *   - resto (fecha, pago, categoria, etc.) se envían tal cual
+ */
+export async function getDayToDayAnalysis(
+  params: DayToDayAnalysisRequest = {},
+): Promise<DayToDayAnalysisResponse> {
+  const { tipoId, monthsBack, ...rest } = params;
+
+  const response = await api.get<DayToDayAnalysisResponse>(
+    '/api/v1/analytics/day-to-day',
+    {
+      params: {
+        ...rest,
+
+        // backend espera tipo_id
+        ...(tipoId ? { tipo_id: tipoId } : {}),
+
+        // ✅ backend espera months_back
+        ...(typeof monthsBack === 'number' ? { months_back: monthsBack } : {}),
+      },
+    },
+  );
+
+  return response.data;
+}
+
+/**
+ * Llama al endpoint:
+ *   GET /api/v1/analytics/monthly-summary
+ *
+ * Parámetros opcionales:
+ *   - year: año (por defecto, año actual en backend)
+ *   - month: mes 1-12 (por defecto, mes actual en backend)
+ */
+export async function getMonthlySummary(
+  params: MonthlySummaryRequest = {},
+): Promise<MonthlySummaryResponse> {
+  const response = await api.get<MonthlySummaryResponse>(
+    '/api/v1/analytics/monthly-summary',
+    { params },
+  );
+
+  return response.data;
+}
+
+// (Opcional) export por defecto si quieres importar todo junto
+export default {
+  getDayToDayAnalysis,
+  getMonthlySummary,
 };
-
-export type WeekSummary = {
-  total_semana: number;
-  limite_semana: number;
-  proyeccion_fin_semana: number;
-  dias_restantes: number;
-};
-
-export type MonthSummary = {
-  presupuesto_mes: number;
-  gastado_mes: number;
-};
-
-export type CategoryMonth = {
-  key: string;
-  label: string;
-  importe: number;
-  porcentaje: number;
-};
-
-export type CategoryKpi = {
-  tickets: number;
-  ticket_medio: number;
-  variacion_importe_pct: number;
-  variacion_tickets_pct: number;
-  peso_sobre_total_gasto: number;
-};
-
-export type ProviderItem = {
-  nombre: string;
-  importe: number;
-  num_compras: number;
-  tendencia: 'UP' | 'DOWN' | 'FLAT';
-};
-
-export type Last7DayItem = {
-  label: string;
-  fecha?: string;
-  importe: number;
-};
-
-// ------------------------------------------------------------------
-// ✅ NUEVO: Series para gráficas + KPIs de evolución (backend nuevo)
-// ------------------------------------------------------------------
-export type DailySeriesItem = {
-  fecha: string;   // YYYY-MM-DD
-  dia: number;     // 1..31
-  importe: number;
-};
-
-export type MonthlySeriesItem = {
-  year: number;
-  month: number;   // 1..12
-  label: string;   // "YYYY-MM"
-  importe: number;
-  tickets: number;
-};
-
-export type EvolutionKpis = {
-  variacion_mes_pct: number;
-  variacion_mes_abs: number;
-
-  media_3m: number;
-  media_6m: number;
-  media_12m: number;
-
-  tendencia: 'UP' | 'DOWN' | 'FLAT';
-  tendencia_detalle: string;
-
-  max_mes_label?: string | null;
-  max_mes_importe?: number | null;
-  min_mes_label?: string | null;
-  min_mes_importe?: number | null;
-};
-
-// ------------------------------------------------------------------
-// Response principal
-// ------------------------------------------------------------------
-export type DayToDayAnalysisResponse = {
-  today: TodaySummary;
-  week: WeekSummary;
-  month: MonthSummary;
-  categorias_mes: CategoryMonth[];
-  category_kpis: Record<string, CategoryKpi>;
-  proveedores_por_categoria: Record<string, ProviderItem[]>;
-  ultimos_7_dias: Last7DayItem[];
-  alertas: string[];
-
-  // ✅ NUEVO (opcionales para no romper)
-  serie_diaria_mes?: DailySeriesItem[];
-  serie_mensual?: MonthlySeriesItem[];
-  kpis_evolucion?: EvolutionKpis;
-};
-
-// Si tienes MonthlySummaryResponse en este mismo fichero, lo dejas tal cual.
-export type MonthlySummaryResponse = any;

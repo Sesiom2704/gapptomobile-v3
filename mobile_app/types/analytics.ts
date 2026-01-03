@@ -55,6 +55,46 @@ export interface Last7DayItem {
   importe: number;
 }
 
+/**
+ * ✅ NUEVO (backend): serie diaria del mes (para gráfica mensual)
+ */
+export interface DailySeriesItem {
+  fecha: string; // YYYY-MM-DD
+  dia: number; // 1..31
+  importe: number;
+}
+
+/**
+ * ✅ NUEVO (backend): serie mensual (últimos N meses)
+ */
+export interface MonthlySeriesItem {
+  year: number;
+  month: number; // 1..12
+  label: string; // "YYYY-MM"
+  importe: number;
+  tickets: number;
+}
+
+/**
+ * ✅ NUEVO (backend): KPIs de evolución sobre la serie mensual
+ */
+export interface EvolutionKpis {
+  variacion_mes_pct: number;
+  variacion_mes_abs: number;
+
+  media_3m: number;
+  media_6m: number;
+  media_12m: number;
+
+  tendencia: Tendencia;
+  tendencia_detalle: string;
+
+  max_mes_label?: string | null;
+  max_mes_importe?: number | null;
+  min_mes_label?: string | null;
+  min_mes_importe?: number | null;
+}
+
 export interface DayToDayAnalysisResponse {
   today: TodaySummary;
   week: WeekSummary;
@@ -64,13 +104,31 @@ export interface DayToDayAnalysisResponse {
   proveedores_por_categoria: Record<string, ProviderItem[]>;
   ultimos_7_dias: Last7DayItem[];
   alertas: string[];
+
+  /**
+   * ✅ NUEVO: para análisis mensual con gráficas (backend ya lo devuelve)
+   * OJO: son opcionales para no romper si el backend aún no está desplegado.
+   */
+  serie_diaria_mes?: DailySeriesItem[] | null;
+  serie_mensual?: MonthlySeriesItem[] | null;
+  kpis_evolucion?: EvolutionKpis | null;
 }
 
 export interface DayToDayAnalysisRequest {
   fecha?: string;
   pago?: 'YO' | 'OTRO' | 'TODOS';
   categoria?: string;
+
+  /**
+   * Frontend usa tipoId; backend espera tipo_id
+   */
   tipoId?: string;
+
+  /**
+   * ✅ NUEVO: ventana para serie mensual (backend espera months_back)
+   * Si no se manda: backend usa su default (12).
+   */
+  monthsBack?: number;
 }
 
 // -----------------------------

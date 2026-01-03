@@ -1,34 +1,16 @@
 // mobile_app/screens/dia/DayToDayKpisScreen.tsx
 // -----------------------------------------------------------------------------
 // KPIs Día a Día (pantalla “profundización”)
-// Objetivo:
-// - Reutilizar el endpoint existente GET /api/v1/analytics/day-to-day (getDayToDayAnalysis)
-// - Mostrar KPIs y “lecturas” que NO aparecen en DayToDayAnalysisScreen
-// - Usar InfoButton/InfoModal en TODOS los KPIs/secciones para explicar “qué significa”
 //
-// Nota importante (integración del icono “ojo” en el header del Analysis):
-// - Este archivo NO modifica DayToDayAnalysisScreen.
-// - Para abrir esta pantalla desde el icono del ojo, lo normal es:
-//   1) Registrar la ruta 'DayToDayKpis' en tu navigator (stack/tab).
-//   2) Añadir una acción en el Header de DayToDayAnalysisScreen (icono 'eye-outline')
-//      que haga: navigation.navigate('DayToDayKpis', { fromHome, pagoFiltroActual... })
-// - Como no has pegado el API del componente Header, no puedo asegurar la prop exacta
-//   (rightIcon / onRightPress / renderRight). Te dejo al final un snippet genérico.
+// OBJETIVO (actualizado):
+// - Reutiliza GET /api/v1/analytics/day-to-day (getDayToDayAnalysis)
+// - Muestra KPIs extra + gráficas (7 días, diaria del mes, evolución mensual)
+// - Usa InfoButton/InfoModal en KPIs y secciones para explicar significado
 //
-// Qué hace esta pantalla:
-// - Filtros: “Quién paga” (TODOS/YO/OTRO) y “Modo” (GENERAL/CATEGORIA) + Contenedor/Subgasto
-// - KPIs extra:
-//   - Media diaria últimos 7 días
-//   - Día más alto / día más bajo (últimos 7 días)
-//   - Nº días sin gasto (últimos 7 días)
-//   - Ritmo vs límite semanal (si existe límite_semana)
-//   - Concentración del gasto (Top 1 y Top 3 categorías del mes)
-// - Evolución: LineChart (últimos 7 días) con tooltip al tocar punto
-// - Ranking: Top categorías del mes (con barras nativas) + acceso rápido a detalle
-//
-// Cuando me pases el “API nuevo” específico de KPIs:
-// - Se sustituye la llamada a getDayToDayAnalysis por getDayToDayKpis
-// - Manteniendo la misma UI/estructura y estilos reutilizados
+// IMPORTANTE:
+// - Mantiene funcionalidades existentes.
+// - Los campos nuevos (serie_diaria_mes, serie_mensual, kpis_evolucion) son opcionales.
+//   Si backend aún no está desplegado, la pantalla no falla: simplemente no pinta esas secciones.
 // -----------------------------------------------------------------------------
 
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
@@ -42,7 +24,7 @@ import {
   Dimensions,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
-import { LineChart } from 'react-native-chart-kit';
+import { LineChart, BarChart } from 'react-native-chart-kit';
 import { useNavigation, useRoute } from '@react-navigation/native';
 
 import Header from '../../components/layout/Header';
@@ -52,12 +34,14 @@ import { FilterPill } from '../../components/ui/FilterPill';
 import { FilterRow } from '../../components/ui/FilterRow';
 import { analysisStyles } from '../../components/analysis/analysisStyles';
 
-// Reutilizamos el endpoint existente (hasta que me pases el nuevo API específico de KPIs)
 import { getDayToDayAnalysis } from '../../services/analyticsApi';
 
 import {
   DayToDayAnalysisResponse,
   Last7DayItem,
+  DailySeriesItem,
+  MonthlySeriesItem,
+  EvolutionKpis,
 } from '../../types/analytics';
 
 // ✅ Info (botón i + modal reutilizable)
@@ -84,7 +68,7 @@ const CATEGORY_OPTIONS = [
   { key: 'SUMINISTROS', label: 'Suministros' },
   { key: 'VEHICULOS', label: 'Vehículos' },
   { key: 'ROPA', label: 'Ropa' },
-  { key: 'RESTURACION', label: 'Restauración' },
+  { key: 'RESTURACION', label: 'Restauración' }, // (ojo: en backend tu comentario pone RESTURACION; mantenemos tal cual)
   { key: 'OCIO', label: 'Ocio' },
 ] as const;
 
@@ -145,6 +129,25 @@ function normalizeLast7(ultimos7: Last7DayItem[]) {
   return { labels, values };
 }
 
+// ✅ Serie diaria del mes: labels compactos (1..31)
+function normalizeDailyMonthSeries(items: DailySeriesItem[]) {
+  const labels = items.map((x) => String(x.dia));
+  const values = items.map((x) => safeNum(x.importe));
+  return { labels, values };
+}
+
+// ✅ Serie mensual: labels "MM" (o "YYYY-MM" si prefieres)
+function normalizeMonthlySeries(items: MonthlySeriesItem[]) {
+  const labels = items.map((x) => {
+    // mostramos solo mes para no saturar: "01", "02", ...
+    const mm = String(x.month).padStart(2, '0');
+    return mm;
+  });
+  const values = items.map((x) => safeNum(x.importe));
+  const fullLabels = items.map((x) => x.label);
+  return { labels, values, fullLabels };
+}
+
 // --------------------
 // Tipado route params
 // --------------------
@@ -157,11 +160,13 @@ type DayToDayKpisRouteParams = {
   view?: 'GENERAL' | 'CATEGORIA';
   categoria?: string | null;
   tipoId?: string | null;
+
+  // ✅ opcional: ventana inicial para meses
+  monthsBack?: number;
 };
 
 // --------------------
 // Chart config (base)
-// (NOTA: si tenéis un config compartido, lo movemos a /components/charts/...)
 // --------------------
 const chartConfig: any = {
   backgroundGradientFrom: colors.surface,
@@ -205,6 +210,9 @@ export const DayToDayKpisScreen: React.FC = () => {
   );
   const [filtrosAbiertos, setFiltrosAbiertos] = useState(false);
   const [pagoFiltro, setPagoFiltro] = useState<PagoFiltro>(params.pago ?? 'YO');
+
+  // ✅ Ventana para evolución mensual (months_back en backend)
+  const [monthsBack, setMonthsBack] = useState<number>(params.monthsBack ?? 12);
 
   // Categoría / subtipo
   const [selectedCategoryKey, setSelectedCategoryKey] = useState<string | null>(
@@ -251,7 +259,10 @@ export const DayToDayKpisScreen: React.FC = () => {
       setError(null);
       setTrendTip((t) => ({ ...t, visible: false }));
 
-      const req: any = { pago: pagoFiltro };
+      const req: any = {
+        pago: pagoFiltro,
+        monthsBack, // ✅ frontend -> backend via analyticsApi (monthsBack -> months_back)
+      };
 
       // En modo categoría: aplicamos (tipoId) o (categoria)
       if (selectedView === 'CATEGORIA') {
@@ -259,8 +270,6 @@ export const DayToDayKpisScreen: React.FC = () => {
         else if (selectedCategoryKey) req.categoria = selectedCategoryKey;
       }
 
-      // Hoy por hoy reutilizamos el endpoint existente.
-      // Cuando me pases el API de KPIs, lo sustituimos aquí manteniendo el resto igual.
       const resp = await getDayToDayAnalysis(req);
       setData(resp);
 
@@ -275,7 +284,7 @@ export const DayToDayKpisScreen: React.FC = () => {
     } finally {
       setLoading(false);
     }
-  }, [pagoFiltro, selectedView, selectedCategoryKey, selectedSubtipoId]);
+  }, [pagoFiltro, selectedView, selectedCategoryKey, selectedSubtipoId, monthsBack]);
 
   useEffect(() => {
     fetchData();
@@ -291,6 +300,13 @@ export const DayToDayKpisScreen: React.FC = () => {
   const categoriasMes = data?.categorias_mes ?? [];
   const ultimos7Dias: Last7DayItem[] = data?.ultimos_7_dias ?? [];
   const categoryKpis = data?.category_kpis ?? {};
+
+  // ✅ Nuevos datos (si backend los trae)
+  const serieDiariaMes: DailySeriesItem[] = data?.serie_diaria_mes ?? [];
+  const serieMensual: MonthlySeriesItem[] = data?.serie_mensual ?? [];
+  const kpisEvolucion: EvolutionKpis | null = (data?.kpis_evolucion ?? null) as any;
+
+  const hasMonthlyCharts = Boolean(serieDiariaMes?.length || serieMensual?.length);
 
   const effectiveSelectedCategory = useMemo(() => {
     if (!categoriasMes.length) return null;
@@ -315,7 +331,7 @@ export const DayToDayKpisScreen: React.FC = () => {
     // “Días sin gasto” (importe == 0)
     const zeroDays = vals.filter((x) => x <= 0).length;
 
-    // Máximo / mínimo (considerando 0 como posible mínimo)
+    // Máximo / mínimo
     let maxV = 0;
     let minV = n ? vals[0] : 0;
     let maxIdx = 0;
@@ -333,7 +349,7 @@ export const DayToDayKpisScreen: React.FC = () => {
       }
     }
 
-    // “Volatilidad” simple: desviación estándar (para lectura, no para ciencia)
+    // Volatilidad simple (desviación estándar)
     const variance =
       n > 1 ? vals.reduce((acc, v) => acc + Math.pow(v - avg, 2), 0) / n : 0;
     const std = Math.sqrt(Math.max(0, variance));
@@ -365,10 +381,10 @@ export const DayToDayKpisScreen: React.FC = () => {
     return { top1Pct, top3Pct, top1 };
   }, [categoriasMes]);
 
-  // Ranking categorías (mes) para barras nativas (robustas a tap)
+  // Ranking categorías (mes)
   const topCategorias = useMemo(() => {
     const sorted = [...categoriasMes].sort((a, b) => safeNum(b.importe) - safeNum(a.importe));
-    return sorted.slice(0, 6); // top 6 para no saturar
+    return sorted.slice(0, 6);
   }, [categoriasMes]);
 
   const maxTopCat = useMemo(() => {
@@ -376,18 +392,30 @@ export const DayToDayKpisScreen: React.FC = () => {
     return Math.max(1, ...topCategorias.map((c) => safeNum(c.importe)));
   }, [topCategorias]);
 
-  // Serie para chart
+  // Serie para chart: últimos 7
   const { labels: labels7, values: values7 } = useMemo(
     () => normalizeLast7(ultimos7Dias),
     [ultimos7Dias]
   );
+
+  // ✅ Serie para chart: diaria del mes
+  const { labels: labelsMonthDays, values: valuesMonthDays } = useMemo(() => {
+    if (!serieDiariaMes?.length) return { labels: [], values: [] };
+    return normalizeDailyMonthSeries(serieDiariaMes);
+  }, [serieDiariaMes]);
+
+  // ✅ Serie para chart: mensual (N meses)
+  const { labels: labelsMonths, values: valuesMonths, fullLabels: fullMonthLabels } = useMemo(() => {
+    if (!serieMensual?.length) return { labels: [], values: [], fullLabels: [] as string[] };
+    return normalizeMonthlySeries(serieMensual);
+  }, [serieMensual]);
 
   // Sizing chart
   const width = Dimensions.get('window').width;
   const chartWidth = Math.max(360, width - 24);
   const chartHeight = 220;
 
-  // En modo categoría, intentamos leer el KPI de la categoría seleccionada
+  // En modo categoría: KPI de la categoría seleccionada
   const selectedCategoryKpis = useMemo(() => {
     if (!effectiveSelectedCategory) return null;
     return categoryKpis[effectiveSelectedCategory.key] ?? null;
@@ -486,6 +514,24 @@ export const DayToDayKpisScreen: React.FC = () => {
                       onPress={() => setPagoFiltro('OTRO')}
                     />
                   </FilterRow>
+                </View>
+
+                {/* ✅ Ventana mensual (months_back) */}
+                <View style={{ marginTop: 12 }}>
+                  <Text style={analysisStyles.filterLabel}>Ventana evolución (meses)</Text>
+                  <FilterRow columns={3}>
+                    {[6, 12, 18].map((m) => (
+                      <FilterPill
+                        key={m}
+                        label={`${m}M`}
+                        selected={monthsBack === m}
+                        onPress={() => setMonthsBack(m)}
+                      />
+                    ))}
+                  </FilterRow>
+                  <Text style={analysisStyles.filterHelper}>
+                    Afecta a la evolución mensual (serie de meses y KPIs de tendencia).
+                  </Text>
                 </View>
 
                 {selectedView === 'CATEGORIA' && (
@@ -721,7 +767,9 @@ export const DayToDayKpisScreen: React.FC = () => {
                       </Text>
                     </>
                   ) : (
-                    <Text style={analysisStyles.emptyText}>Aún no hay gastos en el mes para calcular concentración.</Text>
+                    <Text style={analysisStyles.emptyText}>
+                      Aún no hay gastos en el mes para calcular concentración.
+                    </Text>
                   )}
                 </View>
               </View>
@@ -733,7 +781,7 @@ export const DayToDayKpisScreen: React.FC = () => {
                   onInfo={() =>
                     info.open(
                       'Evolución (7 días)',
-                      'Serie diaria del gasto cotidiano. Toca un punto para ver el importe exacto del día.'
+                      'Serie diaria del gasto cotidiano (últimos 7 días). Toca un punto para ver el importe exacto del día.'
                     )
                   }
                 />
@@ -767,7 +815,6 @@ export const DayToDayKpisScreen: React.FC = () => {
                             const lab = labels7[idx] ?? '';
                             const val = Number(dp?.value ?? 0);
 
-                            // Posición “acotada” para que el tooltip no se salga
                             const tipX = Math.max(8, Math.min(chartWidth - 160, Number(dp?.x ?? 0) - 70));
                             const tipY = Math.max(8, Number(dp?.y ?? 0) - 52);
 
@@ -794,6 +841,196 @@ export const DayToDayKpisScreen: React.FC = () => {
                   <Text style={[panelStyles.cardSubtitle, { marginTop: 10 }]}>
                     Tip: si ves “picos”, usa el modo Por categoría para aislar el contenedor que lo provoca.
                   </Text>
+                </View>
+              </View>
+
+              {/* ✅ NUEVO: Evolución diaria del mes */}
+              <View style={panelStyles.section}>
+                <SectionHeader
+                  title="Evolución diaria del mes"
+                  onInfo={() =>
+                    info.open(
+                      'Evolución diaria del mes',
+                      'Serie diaria completa del mes (rellenada con 0 cuando no hay gasto). Permite detectar patrones: fines de semana, semanas de carga, etc.'
+                    )
+                  }
+                />
+
+                <View style={panelStyles.card}>
+                  {serieDiariaMes?.length ? (
+                    <>
+                      <Text style={panelStyles.cardTitle}>
+                        {selectedView === 'CATEGORIA' && effectiveSelectedCategory
+                          ? `Mes · ${effectiveSelectedCategory.label}`
+                          : 'Mes · Global'}
+                      </Text>
+                      <Text style={[panelStyles.cardSubtitle, { marginTop: 4 }]}>
+                        Gráfica diaria del mes actual. Si el mes es largo, desplaza horizontalmente.
+                      </Text>
+
+                      <View style={{ marginTop: 10 }}>
+                        <ScrollView horizontal showsHorizontalScrollIndicator={false}>
+                          <LineChart
+                            data={{ labels: labelsMonthDays, datasets: [{ data: valuesMonthDays }] }}
+                            width={Math.max(chartWidth, labelsMonthDays.length * 18)}
+                            height={chartHeight}
+                            chartConfig={chartConfig}
+                            style={{ borderRadius: 14 }}
+                            withInnerLines={false}
+                            withOuterLines={false}
+                            yAxisLabel=""
+                            yAxisSuffix=""
+                          />
+                        </ScrollView>
+                      </View>
+
+                      <Text style={[panelStyles.cardSubtitle, { marginTop: 10 }]}>
+                        Consejo: combina esto con “Ranking de categorías” para explicar subidas.
+                      </Text>
+                    </>
+                  ) : (
+                    <Text style={analysisStyles.emptyText}>
+                      Este backend aún no devuelve serie diaria del mes (serie_diaria_mes) o no hay datos.
+                    </Text>
+                  )}
+                </View>
+              </View>
+
+              {/* ✅ NUEVO: Evolución mensual + KPIs */}
+              <View style={panelStyles.section}>
+                <SectionHeader
+                  title={`Evolución mensual (${monthsBack} meses)`}
+                  onInfo={() =>
+                    info.open(
+                      'Evolución mensual',
+                      'Serie mensual para ver tendencia y estacionalidad. Incluye KPIs de evolución (MoM, medias móviles, tendencia).'
+                    )
+                  }
+                />
+
+                <View style={panelStyles.card}>
+                  {serieMensual?.length ? (
+                    <>
+                      {/* KPIs evolución */}
+                      {kpisEvolucion ? (
+                        <>
+                          <View style={styles.evoRow}>
+                            <TouchableOpacity
+                              activeOpacity={0.9}
+                              style={styles.evoCard}
+                              onPress={() =>
+                                info.open(
+                                  'Variación vs mes anterior',
+                                  'Diferencia del mes actual respecto al mes anterior (importe absoluto y porcentaje).'
+                                )
+                              }
+                            >
+                              <Text style={styles.evoLabel}>MoM</Text>
+                              <Text style={styles.evoValue}>
+                                {fmtCurrency(kpisEvolucion.variacion_mes_abs)}
+                              </Text>
+                              <Text
+                                style={[
+                                  styles.evoHint,
+                                  safeNum(kpisEvolucion.variacion_mes_abs) >= 0 ? styles.varUp : styles.varDown,
+                                ]}
+                              >
+                                {fmtPct(kpisEvolucion.variacion_mes_pct)}
+                              </Text>
+                            </TouchableOpacity>
+
+                            <TouchableOpacity
+                              activeOpacity={0.9}
+                              style={styles.evoCard}
+                              onPress={() =>
+                                info.open(
+                                  'Media 3 meses',
+                                  'Media de gasto de los últimos 3 meses. Útil para ver el “nivel” reciente.'
+                                )
+                              }
+                            >
+                              <Text style={styles.evoLabel}>Media 3M</Text>
+                              <Text style={styles.evoValue}>{fmtCurrency(kpisEvolucion.media_3m)}</Text>
+                              <Text style={styles.evoHint}>Base 3 meses</Text>
+                            </TouchableOpacity>
+                          </View>
+
+                          <View style={[styles.evoRow, { marginTop: 10 }]}>
+                            <TouchableOpacity
+                              activeOpacity={0.9}
+                              style={styles.evoCard}
+                              onPress={() =>
+                                info.open(
+                                  'Media 6 meses',
+                                  'Media de gasto de los últimos 6 meses. Útil para reducir ruido y ver tendencia.'
+                                )
+                              }
+                            >
+                              <Text style={styles.evoLabel}>Media 6M</Text>
+                              <Text style={styles.evoValue}>{fmtCurrency(kpisEvolucion.media_6m)}</Text>
+                              <Text style={styles.evoHint}>Base 6 meses</Text>
+                            </TouchableOpacity>
+
+                            <TouchableOpacity
+                              activeOpacity={0.9}
+                              style={styles.evoCard}
+                              onPress={() =>
+                                info.open(
+                                  'Tendencia',
+                                  'Indicador cualitativo calculado por backend combinando medias móviles y variación mensual.'
+                                )
+                              }
+                            >
+                              <Text style={styles.evoLabel}>Tendencia</Text>
+                              <Text style={styles.evoValue}>{kpisEvolucion.tendencia}</Text>
+                              <Text style={styles.evoHint} numberOfLines={2}>
+                                {kpisEvolucion.tendencia_detalle}
+                              </Text>
+                            </TouchableOpacity>
+                          </View>
+                        </>
+                      ) : (
+                        <Text style={[panelStyles.cardSubtitle, { marginBottom: 10 }]}>
+                          KPIs de evolución no disponibles (kpis_evolucion).
+                        </Text>
+                      )}
+
+                      {/* Bar chart mensual */}
+                      <Text style={[panelStyles.cardTitle, { marginTop: 12 }]}>Serie mensual</Text>
+                      <Text style={[panelStyles.cardSubtitle, { marginTop: 4 }]}>
+                        Barras por mes (etiquetas = mes). Desliza si es necesario.
+                      </Text>
+
+                      <View style={{ marginTop: 10 }}>
+                        <ScrollView horizontal showsHorizontalScrollIndicator={false}>
+                            <BarChart
+                            data={{
+                                labels: labelsMonths,
+                                datasets: [{ data: valuesMonths }],
+                            }}
+                            width={Math.max(chartWidth, labelsMonths.length * 36)}
+                            height={260}
+                            chartConfig={chartConfig}
+                            style={{ borderRadius: 14 }}
+                            fromZero
+                            withInnerLines={false}
+                            yAxisLabel=""
+                            yAxisSuffix=""
+                            showValuesOnTopOfBars={false}
+                            />
+                        </ScrollView>
+
+                        {/* Etiquetas completas (YYYY-MM) para contexto */}
+                        <Text style={[panelStyles.cardSubtitle, { marginTop: 10 }]}>
+                          Rango: {fullMonthLabels[0] ?? '—'} → {fullMonthLabels[fullMonthLabels.length - 1] ?? '—'}
+                        </Text>
+                      </View>
+                    </>
+                  ) : (
+                    <Text style={analysisStyles.emptyText}>
+                      Este backend aún no devuelve serie mensual (serie_mensual) o no hay datos para la ventana seleccionada.
+                    </Text>
+                  )}
                 </View>
               </View>
 
@@ -866,7 +1103,7 @@ export const DayToDayKpisScreen: React.FC = () => {
                     onInfo={() =>
                       info.open(
                         'KPIs del contenedor',
-                        'Resumen compacto del contenedor seleccionado: tickets, ticket medio, peso sobre el total y variación vs mes anterior (si el backend lo devuelve).'
+                        'Resumen compacto del contenedor seleccionado: tickets, ticket medio, peso sobre el total y variación vs mes anterior.'
                       )
                     }
                   />
@@ -911,7 +1148,7 @@ export const DayToDayKpisScreen: React.FC = () => {
                             onPress={() =>
                               info.open(
                                 'Peso sobre total',
-                                'Porcentaje del gasto total del mes que representa este contenedor. Identifica qué categorías dominan tu mes.'
+                                'Porcentaje del gasto total del mes que representa este contenedor.'
                               )
                             }
                           >
@@ -927,7 +1164,7 @@ export const DayToDayKpisScreen: React.FC = () => {
                             onPress={() =>
                               info.open(
                                 'Variación vs mes anterior',
-                                'Cambio porcentual respecto al mes anterior (mismo contenedor). Si es positivo, está creciendo; si es negativo, está bajando.'
+                                'Cambio porcentual respecto al mes anterior (mismo contenedor).'
                               )
                             }
                           >
@@ -946,7 +1183,7 @@ export const DayToDayKpisScreen: React.FC = () => {
                         </View>
 
                         <Text style={[panelStyles.cardSubtitle, { marginTop: 10 }]}>
-                          Si quieres “más KPIs por proveedor” (top tickets, frecuencia, repetición), me pasas el API y lo montamos aquí.
+                          Si quieres “KPIs por proveedor” (frecuencia, repetición, top tickets), añadimos endpoint y lo montamos aquí.
                         </Text>
                       </>
                     ) : (
@@ -954,6 +1191,19 @@ export const DayToDayKpisScreen: React.FC = () => {
                         No hay KPIs suficientes para este contenedor con el filtro actual.
                       </Text>
                     )}
+                  </View>
+                </View>
+              )}
+
+              {/* (Opcional) Diagnóstico de features nuevas */}
+              {!hasMonthlyCharts && (
+                <View style={[panelStyles.section, { marginBottom: 24 }]}>
+                  <View style={panelStyles.card}>
+                    <Text style={panelStyles.cardTitle}>Nota</Text>
+                    <Text style={[panelStyles.cardSubtitle, { marginTop: 6 }]}>
+                      No se detectan series mensuales (serie_diaria_mes / serie_mensual). Si el backend ya está actualizado,
+                      revisa que el endpoint móvil esté apuntando al mismo entorno (baseURL) y que estés autenticado.
+                    </Text>
                   </View>
                 </View>
               )}
@@ -1205,48 +1455,41 @@ const styles = StyleSheet.create({
     marginBottom: 10,
   },
 
+  // ✅ Evolución (tarjetas)
+  evoRow: {
+    flexDirection: 'row',
+    gap: 10,
+  },
+  evoCard: {
+    flex: 1,
+    backgroundColor: colors.surface,
+    borderRadius: 14,
+    paddingVertical: 10,
+    paddingHorizontal: 10,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: colors.border,
+  },
+  evoLabel: {
+    fontSize: 11,
+    color: colors.textSecondary,
+    fontWeight: '800',
+  },
+  evoValue: {
+    marginTop: 4,
+    fontSize: 16,
+    color: colors.textPrimary,
+    fontWeight: '900',
+  },
+  evoHint: {
+    marginTop: 4,
+    fontSize: 11,
+    color: colors.textMuted,
+  },
+
   varUp: {
-    color: colors.danger, // en vuestra app: UP = “gasto sube” => peligro
+    color: colors.danger, // gasto sube => “peligro”
   },
   varDown: {
     color: colors.success,
   },
 });
-
-/*
-------------------------------------------------------------------------------
-SNIPPET (orientativo) para el icono “ojo” en DayToDayAnalysisScreen
-------------------------------------------------------------------------------
-Como no has pegado el API real del componente Header, te dejo 2 patrones típicos.
-Cuando me pegues Header.tsx, lo adapto al 100% sin suposiciones.
-
-1) Si Header soporta props tipo:
-   <Header rightIcon="eye-outline" onRightPress={...} />
-
-<Header
-  ...
-  rightIcon="eye-outline"
-  onRightPress={() => navigation.navigate('DayToDayKpis', {
-    fromHome,
-    pago: pagoFiltro,
-    view: selectedView,
-    categoria: selectedCategoryKey,
-    tipoId: selectedSubtipoId,
-  })}
-/>
-
-2) Si Header soporta renderRight:
-<Header
-  ...
-  renderRight={() => (
-    <TouchableOpacity onPress={() => navigation.navigate('DayToDayKpis', {...})}>
-      <Ionicons name="eye-outline" size={20} color={colors.textSecondary} />
-    </TouchableOpacity>
-  )}
-/>
-
-Además, recuerda registrar la pantalla en tu navigator:
-- name: 'DayToDayKpis'
-- component: DayToDayKpisScreen
-------------------------------------------------------------------------------
-*/
