@@ -1,92 +1,149 @@
-// mobile_app/screens/cierres/CierreMensualPreviewScreen.tsx
+// mobile_app/screens/cierres/ReiniciarMesScreen.tsx
 // -----------------------------------------------------------------------------
-// Screen: Previews mensuales (Cierre "what-if" + Reinicio)
-// - Preview Cierre: "si cerráramos ahora el mes M" (sin insertar)
-// - Preview Reinicio: eligibility + presupuesto + contenedores (si backend lo da)
-// - SCROLL + PULL TO REFRESH
+// ReiniciarMesScreen (V4)
+//
+// Ajustes:
+// 1) Eliminar tarjeta "Pendientes KPI / presupuesto COT / ventana" (no aplica aquí).
+// 2) Previsualización del reinicio: InfoButton + tabla 2 columnas (Concepto | Cantidad).
+// 3) Promedios a insertar: InfoButton.
+// 4) Contenedor: mostrar nombre (gasto.nombre) en vez de id.
+// 5) Dif mes: comparar futuro (promedio) vs pasado (gastos.importe_cuota) y mostrar %:
+//    - incremento: rojo
+//    - decremento: verde
 // -----------------------------------------------------------------------------
 
+
 import React, { useCallback, useMemo, useState } from 'react';
-import {
-  View,
-  Text,
-  StyleSheet,
-  ActivityIndicator,
-  ScrollView,
-  RefreshControl,
-} from 'react-native';
-import { useFocusEffect, useNavigation } from '@react-navigation/native';
+import { View, Text, StyleSheet, Alert, ActivityIndicator, ScrollView, RefreshControl } from 'react-native';
+import { useFocusEffect, useNavigation, useRoute } from '@react-navigation/native';
 
 import { Screen } from '../../components/layout/Screen';
 import { Header } from '../../components/layout/Header';
 import { OptionCard } from '../../components/cards/OptionCard';
 import { colors, spacing } from '../../theme';
 
-import { reinicioApi, type CierrePreview, type ReinicioMesPreview } from '../../services/reinicioApi';
+import { reinicioApi, type ReinicioGastosIngresosPreview } from '../../services/reinicioApi';
 import { EuroformatEuro } from '../../utils/format';
 
-type Estado = 'LOADING' | 'OK' | 'ERROR';
+// ✅ Para comparar vs lo insertado actualmente
+import { fetchGastos, type Gasto } from '../../services/gastosApi';
+
+// ✅ Info modal reutilizable (patrón BalanceScreen)
+import { InfoButton, InfoModal, useInfoModal } from '../../components/ui/InfoModal';
+
+type LoadState = 'LOADING' | 'OK' | 'ERROR';
+
+type RouteParams = {
+  anio?: number;
+  mes?: number;
+  cierreId?: string | null;
+};
 
 function mesNombreES(m: number): string {
   const names = [
-    'enero','febrero','marzo','abril','mayo','junio',
-    'julio','agosto','septiembre','octubre','noviembre','diciembre',
+    'enero', 'febrero', 'marzo', 'abril', 'mayo', 'junio',
+    'julio', 'agosto', 'septiembre', 'octubre', 'noviembre', 'diciembre',
   ];
   return names[m - 1] ?? `mes ${m}`;
 }
 
-function isInReinicioWindow(now = new Date()): boolean {
-  const d = now.getDate();
-  return d >= 1 && d <= 5;
+function pad2(n: number): string {
+  return n < 10 ? `0${n}` : `${n}`;
 }
 
-function moneyColor(value?: number | null): string {
-  const n = typeof value === 'number' && Number.isFinite(value) ? value : 0;
+/**
+ * "HH:mm - D/MM/YYYY" (fecha/hora local del dispositivo)
+ */
+function formatNowSimple(): string {
+  const d = new Date();
+  const hh = pad2(d.getHours());
+  const mm = pad2(d.getMinutes());
+  const day = d.getDate();
+  const month = pad2(d.getMonth() + 1);
+  const year = d.getFullYear();
+  return `${hh}:${mm} - ${day}/${month}/${year}`;
+}
+
+function normalizeKey(nombre: any): string {
+  return String(nombre ?? '').trim().toUpperCase();
+}
+
+function fmtPct(value: number | null): string {
+  if (value == null || !Number.isFinite(value)) return '—';
+  const sign = value > 0 ? '+' : '';
+  return `${sign}${value.toFixed(1)}%`;
+}
+
+function deltaColor(pct: number | null): string {
+  if (pct == null || !Number.isFinite(pct) || pct === 0) return colors.textSecondary;
   const green = (colors as any).success ?? (colors as any).actionSuccess ?? '#16a34a';
   const red = (colors as any).danger ?? (colors as any).actionDanger ?? '#b91c1c';
-  if (n > 0) return green;
-  if (n < 0) return red;
-  return colors.textPrimary;
+  return pct > 0 ? red : green; // ✅ incremento rojo, decremento verde
 }
 
-export const CierreMensualPreviewScreen: React.FC = () => {
+export const ReiniciarMesScreen: React.FC = () => {
   const navigation = useNavigation<any>();
+  const route = useRoute<any>();
+  const params = (route?.params ?? {}) as RouteParams;
 
-  const now = useMemo(() => new Date(), []);
-  const yearM = now.getFullYear();
-  const monthM = now.getMonth() + 1;
+  const nowPeriod = useMemo(() => {
+    const now = new Date();
+    return { anio: now.getFullYear(), mes: now.getMonth() + 1 };
+  }, []);
 
-  const subtitleLabel = useMemo(() => `${mesNombreES(monthM)} ${yearM}`, [monthM, yearM]);
+  const periodo = useMemo(() => {
+    return {
+      anio: params?.anio ?? nowPeriod.anio,
+      mes: params?.mes ?? nowPeriod.mes,
+    };
+  }, [params?.anio, params?.mes, nowPeriod.anio, nowPeriod.mes]);
 
-  const [estado, setEstado] = useState<Estado>('LOADING');
+  const [state, setState] = useState<LoadState>('LOADING');
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
-
   const [refreshing, setRefreshing] = useState(false);
 
-  const [cierrePreview, setCierrePreview] = useState<CierrePreview | null>(null);
-  const [mesPreview, setMesPreview] = useState<ReinicioMesPreview | null>(null);
+  // Preview “gastos-ingresos” (lo que pide el screen: 1.1..1.4)
+  const [giPreview, setGiPreview] = useState<ReinicioGastosIngresosPreview | null>(null);
 
-  const reinicioWindowOk = useMemo(() => isInReinicioWindow(new Date()), []);
+  // Mapa "pasado" por nombre: gasto.nombre -> gasto.importe_cuota
+  const [importeCuotaByNombre, setImporteCuotaByNombre] = useState<Record<string, number>>({});
+
+  // ✅ Info modal (único por pantalla)
+  const info = useInfoModal();
 
   const load = useCallback(async () => {
+    setState('LOADING');
     setErrorMsg(null);
-    setEstado((prev) => (prev === 'OK' ? prev : 'LOADING'));
 
     try {
-      // 1) Preview cierre (what-if) del mes actual (M)
-      const cierre = await reinicioApi.fetchCierrePreview({ anio: yearM, mes: monthM });
-      setCierrePreview(cierre);
+      const [giPrev, gastosActivos] = await Promise.all([
+        reinicioApi.fetchReinicioGastosIngresosPreview(),
+        fetchGastos('activos'),
+      ]);
 
-      // 2) Preview reinicio mes (sin insertar)
-      const mp = await reinicioApi.fetchMesPreview({ anio: yearM, mes: monthM });
-      setMesPreview(mp);
+      setGiPreview(giPrev ?? null);
 
-      setEstado('OK');
+      const map: Record<string, number> = {};
+      (gastosActivos ?? []).forEach((g: Gasto) => {
+        const key = normalizeKey(g?.nombre);
+        const cuota = Number(g?.importe_cuota ?? 0);
+
+        // Si hay duplicados por nombre, nos quedamos con el último (o el >0)
+        if (!key) return;
+        if (!Number.isFinite(cuota)) return;
+
+        // Preferimos un valor >0 si existe
+        if (map[key] == null || map[key] === 0) map[key] = cuota;
+      });
+
+      setImporteCuotaByNombre(map);
+
+      setState('OK');
     } catch (e: any) {
-      setErrorMsg(e?.message ?? 'No se han podido cargar los previews.');
-      setEstado('ERROR');
+      setErrorMsg(e?.message ?? 'No se ha podido cargar la previsualización del reinicio.');
+      setState('ERROR');
     }
-  }, [yearM, monthM]);
+  }, []);
 
   useFocusEffect(
     useCallback(() => {
@@ -103,148 +160,233 @@ export const CierreMensualPreviewScreen: React.FC = () => {
     }
   }, [load]);
 
-  const irAFlujoCierre = () => navigation.navigate('ReinciarCierreScreen');
+  const canExecute = useMemo(() => {
+    // Si llegas aquí ya cumples condiciones de navegación.
+    // Aun así: no ejecutamos sin preview.
+    return !!giPreview;
+  }, [giPreview]);
 
-  const irAFlujoReinicio = () => {
-    navigation.navigate('ReiniciarMesScreen', {
-      anio: yearM,
-      mes: monthM,
-      cierreId: null,
-    });
+  const disabledReason = useMemo(() => {
+    if (canExecute) return null;
+    if (!giPreview) return 'Preview de reinicio no disponible';
+    return 'No disponible';
+  }, [canExecute, giPreview]);
+
+  const confirmarEjecutar = () => {
+    if (!canExecute) return;
+
+    const gastos = giPreview?.gastos_a_reiniciar ?? 0;
+    const ingresos = giPreview?.ingresos_a_reiniciar ?? 0;
+    const ultimas = giPreview?.ultimas_cuotas ?? 0;
+    const nProm = giPreview?.promedios?.length ?? 0;
+
+    Alert.alert(
+      'Reiniciar mes',
+      `Se aplicarán cambios en ${mesNombreES(periodo.mes)} ${periodo.anio}.\n\n` +
+        `• Gastos a reiniciar: ${gastos}\n` +
+        `• Ingresos a reiniciar: ${ingresos}\n` +
+        `• Últimas cuotas: ${ultimas}\n` +
+        `• Promedios a actualizar: ${nProm}\n\n` +
+        `¿Deseas continuar?`,
+      [
+        { text: 'Cancelar', style: 'cancel' },
+        { text: 'Reiniciar', style: 'destructive', onPress: () => void ejecutarReinicio() },
+      ]
+    );
   };
 
-  const renderCierrePreviewCard = () => {
+  const ejecutarReinicio = async () => {
+    setState('LOADING');
+    setErrorMsg(null);
+
+    try {
+      await reinicioApi.postReinicioGastosIngresosEjecutar({
+        aplicarPromedios: true,
+        enforceWindow: true,
+      });
+
+      await load();
+
+      Alert.alert('Reinicio aplicado', 'Los gastos/ingresos han sido reiniciados correctamente.');
+    } catch (e: any) {
+      setErrorMsg(e?.message ?? 'No se ha podido ejecutar el reinicio.');
+      setState('ERROR');
+    }
+  };
+
+  // ---------------------------------------------------------------------------
+  // (2) Previsualización del reinicio: 2 columnas (Concepto | Cantidad) + InfoButton
+  // ---------------------------------------------------------------------------
+
+  const renderResumenReinicio = () => {
+    if (!giPreview) return null;
+
+    const rows: Array<{ label: string; count: number }> = [
+      { label: 'Gastos a reiniciar', count: Number(giPreview.gastos_a_reiniciar ?? 0) },
+      { label: 'Ingresos a reiniciar', count: Number(giPreview.ingresos_a_reiniciar ?? 0) },
+      { label: 'Últimas cuotas', count: Number(giPreview.ultimas_cuotas ?? 0) },
+    ];
+
     return (
-      <View style={styles.previewBox}>
-        <View style={styles.previewHeaderRow}>
-          <Text style={styles.previewTitle}>Preview cierre mensual</Text>
-          <Text style={styles.previewTag}>{mesNombreES(monthM)} {yearM}</Text>
+      <View style={styles.previewCard}>
+        <View style={styles.sectionHeaderRow}>
+          <View style={{ flex: 1 }}>
+            <Text style={styles.previewTitle}>Previsualización del reinicio</Text>
+            <Text style={styles.previewSubtitle}>Resumen de lo que se aplicará al reiniciar.</Text>
+          </View>
+
+          <InfoButton
+            align="title"
+            onPress={() =>
+              info.open(
+                'Previsualización del reinicio',
+                'Resumen de conteos: gastos e ingresos que se reinician y cuántas últimas cuotas se detectan.'
+              )
+            }
+          />
         </View>
 
-        {!cierrePreview ? (
-          <Text style={styles.previewLine}>Sin datos de preview.</Text>
-        ) : (
-          <>
-            <Text style={styles.previewLine}>
-              Simulación: si cerraras el mes ahora (sin insertar). Corte: {cierrePreview.as_of}
-            </Text>
+        <View style={styles.tableHeaderRow}>
+          <Text style={[styles.colConcept, styles.tableHeaderText]}>Concepto</Text>
+          <Text style={[styles.colCount, styles.tableHeaderText]}>Cantidad</Text>
+        </View>
+        <View style={styles.previewDivider} />
 
-            <View style={[styles.kvRow, { marginTop: 10 }]}>
-              <Text style={styles.kvLabel}>Ingresos acumulados</Text>
-              <Text style={[styles.kvValue, { color: moneyColor(cierrePreview.ingresos_reales) }]}>
-                {EuroformatEuro(cierrePreview.ingresos_reales ?? 0, 'signed')}
-              </Text>
-            </View>
+        {rows.map((r) => (
+          <View key={r.label} style={styles.tableRow2}>
+            <Text style={styles.colConcept}>{r.label}</Text>
+            <Text style={styles.colCount}>{String(r.count)}</Text>
+          </View>
+        ))}
 
-            <View style={styles.kvRow}>
-              <Text style={styles.kvLabel}>Gastos acumulados</Text>
-              <Text style={[styles.kvValue, { color: moneyColor(-Math.abs(cierrePreview.gastos_reales_total ?? 0)) }]}>
-                {EuroformatEuro(-Math.abs(cierrePreview.gastos_reales_total ?? 0), 'signed')}
-              </Text>
-            </View>
-
-            <View style={styles.kvRow}>
-              <Text style={styles.kvLabel}>Resultado simulado</Text>
-              <Text style={[styles.kvValue, { color: moneyColor(cierrePreview.resultado_real) }]}>
-                {EuroformatEuro(cierrePreview.resultado_real ?? 0, 'signed')}
-              </Text>
-            </View>
-
-            {typeof cierrePreview.desv_resultado === 'number' && (
-              <View style={styles.kvRow}>
-                <Text style={styles.kvLabel}>Desviación</Text>
-                <Text style={[styles.kvValue, { color: moneyColor(cierrePreview.desv_resultado) }]}>
-                  {EuroformatEuro(cierrePreview.desv_resultado ?? 0, 'signed')}
-                </Text>
-              </View>
-            )}
-          </>
-        )}
+        <Text style={styles.previewMuted}>As of: {formatNowSimple()}</Text>
       </View>
     );
   };
 
-  const renderReinicioPreviewCard = () => {
-    const elig = mesPreview?.eligibility;
-    const canBackend = !!elig?.can_reiniciar;
-    const canReiniciar = reinicioWindowOk && canBackend;
+  // ---------------------------------------------------------------------------
+  // (3)(4)(5) Promedios: Contenedor (nombre) | Importe | Dif mes
+  // ---------------------------------------------------------------------------
 
-    return (
-      <View style={styles.previewBox}>
-        <View style={styles.previewHeaderRow}>
-          <Text style={styles.previewTitle}>Preview reinicio de mes</Text>
-          <Text style={styles.previewTag}>{mesNombreES(monthM)} {yearM}</Text>
-        </View>
+  const renderPromedios = () => {
+    if (!giPreview) return null;
 
-        {!reinicioWindowOk && (
-          <Text style={styles.previewLine}>Fuera de ventana (1–5). El reinicio no debería ejecutarse.</Text>
-        )}
+    const proms = Array.isArray(giPreview.promedios) ? giPreview.promedios : [];
+    if (proms.length === 0) {
+      return (
+        <View style={styles.previewCard}>
+          <View style={styles.sectionHeaderRow}>
+            <Text style={styles.previewTitle}>Promedios a insertar</Text>
+            <InfoButton
+              align="title"
+              onPress={() =>
+                info.open(
+                  'Promedios a insertar',
+                  'Promedios calculados (PROM-3M) que se aplicarán sobre contenedores. Se comparan con el importe actual (importe_cuota) para ver la variación porcentual.'
+                )
+              }
+            />
+          </View>
 
-        <View style={[styles.kvRow, { marginTop: reinicioWindowOk ? 0 : 8 }]}>
-          <Text style={styles.kvLabel}>Estado backend</Text>
-          <Text style={styles.kvValue}>{canBackend ? 'OK' : 'NO'}</Text>
-        </View>
-
-        <View style={styles.kvRow}>
-          <Text style={styles.kvLabel}>Pendientes KPI (gastos)</Text>
-          <Text style={styles.kvValue}>{Number(elig?.gastos_pendientes ?? 0)}</Text>
-        </View>
-
-        <View style={styles.kvRow}>
-          <Text style={styles.kvLabel}>Pendientes KPI (ingresos)</Text>
-          <Text style={styles.kvValue}>{Number(elig?.ingresos_pendientes ?? 0)}</Text>
-        </View>
-
-        <View style={[styles.kvRow, { marginTop: 6 }]}>
-          <Text style={styles.kvLabel}>Presupuesto para {subtitleLabel}</Text>
-          <Text style={styles.kvValue}>
-            {EuroformatEuro(Number(mesPreview?.presupuesto_total ?? 0), 'signed')}
+          <Text style={[styles.previewMuted, { marginTop: 6 }]}>
+            No hay promedios calculados (0). Si esperabas verlos, revisa que existan gastos COT pagados en los últimos 3 meses.
           </Text>
         </View>
+      );
+    }
 
-        <Text style={[styles.previewLine, { marginTop: 8 }]}>
-          Estado: {canReiniciar ? 'LISTO' : 'BLOQUEADO'}
-        </Text>
-
-        {/* Contenedores (si backend los envía) */}
-        {Array.isArray(mesPreview?.contenedores) && mesPreview!.contenedores.length > 0 && (
-          <View style={{ marginTop: 10 }}>
-            <Text style={styles.previewLine}>Contenedores</Text>
-
-            <View style={styles.grid}>
-              {mesPreview!.contenedores.map((c, idx) => (
-                <View key={`${c.id ?? c.label}-${idx}`} style={styles.gridCell}>
-                  <Text style={styles.gridLabel} numberOfLines={1}>{c.label}</Text>
-                  <Text style={styles.gridValue}>
-                    {EuroformatEuro(Number(c.presupuesto ?? 0), 'normal')}
-                  </Text>
-                </View>
-              ))}
-            </View>
+    return (
+      <View style={styles.previewCard}>
+        <View style={styles.sectionHeaderRow}>
+          <View style={{ flex: 1 }}>
+            <Text style={styles.previewTitle}>Promedios a insertar</Text>
+            <Text style={styles.previewSubtitle}>
+              Se actualizarán contenedores con el promedio (PROM-3M) y se compara contra el importe actual.
+            </Text>
           </View>
-        )}
+
+          <InfoButton
+            align="title"
+            onPress={() =>
+              info.open(
+                'Promedios a insertar',
+                '“Contenedor” es el nombre del gasto. “Importe” es el promedio calculado. “Dif mes” muestra la variación porcentual vs el importe actual (importe_cuota) del gasto activo con el mismo nombre.'
+              )
+            }
+          />
+        </View>
+
+        <View style={styles.tableHeaderRow3}>
+          <Text style={[styles.colConcept, styles.tableHeaderText]}>Contenedor</Text>
+          <Text style={[styles.colAmountSimple, styles.tableHeaderText]}>Importe</Text>
+          <Text style={[styles.colDelta, styles.tableHeaderText]}>Dif mes</Text>
+        </View>
+        <View style={styles.previewDivider} />
+
+        {proms.map((p: any, idx: number) => {
+          // ✅ Preferimos nombre (lo que necesitas)
+          // Fallbacks para no romper mientras ajustas router/backend.
+          const nombreRaw =
+            p?.nombre ??
+            p?.gasto_nombre ??
+            p?.contenedor_nombre ??
+            p?.contenedor ??
+            p?.contenedor_tipo_id ??
+            `Contenedor ${idx + 1}`;
+
+          const nombre = String(nombreRaw);
+          const key = normalizeKey(nombre);
+
+          const n = Number(p?.n_gastos_afectados ?? 0);
+          const futuro = Number(p?.valor_promedio ?? 0);
+
+          const pasado = Number(importeCuotaByNombre[key] ?? 0);
+          const difPct =
+            pasado > 0 && Number.isFinite(pasado) && Number.isFinite(futuro)
+              ? ((futuro - pasado) / pasado) * 100
+              : null;
+
+          return (
+            <View key={`${key}-${idx}`} style={styles.tableRow3}>
+              <Text style={styles.colConcept}>{nombre}</Text>
+
+              {/* Importe: sin colores “extra”, siempre positivo */}
+              <Text style={styles.colAmountSimple}>
+                {EuroformatEuro(futuro, 'normal')}
+              </Text>
+
+              <Text style={[styles.colDelta, { color: deltaColor(difPct) }]}>
+                {fmtPct(difPct)}
+              </Text>
+            </View>
+          );
+        })}
+
+        <Text style={styles.previewMuted}>
+          Nota: “Dif mes” compara el promedio (futuro) vs el importe_cuota actual del gasto activo con el mismo nombre.
+        </Text>
       </View>
     );
   };
 
   const renderBody = () => {
-    if (estado === 'LOADING') {
+    if (state === 'LOADING') {
       return (
         <View style={styles.center}>
           <ActivityIndicator size="small" color={colors.primary} />
-          <Text style={styles.helperText}>Cargando previews…</Text>
+          <Text style={styles.helperText}>Cargando previsualización…</Text>
         </View>
       );
     }
 
-    if (estado === 'ERROR') {
+    if (state === 'ERROR') {
       return (
         <View style={styles.content}>
           <Text style={styles.errorText}>{errorMsg ?? 'Error inesperado.'}</Text>
           <OptionCard
             iconName="refresh-outline"
             title="Reintentar"
-            description="Desliza hacia abajo o pulsa para recargar."
+            description="Vuelve a cargar la previsualización."
             onPress={() => void load()}
           />
         </View>
@@ -253,28 +395,31 @@ export const CierreMensualPreviewScreen: React.FC = () => {
 
     return (
       <View style={styles.content}>
-        <Text style={styles.h1}>Previews</Text>
+        <Text style={styles.h1}>Reiniciar mes</Text>
         <Text style={styles.subtitle}>
-          Pantalla informativa: simula el cierre del mes actual y muestra el estado del reinicio.
+          Previsualiza los cambios y ejecútalos cuando estés listo.
         </Text>
 
-        {renderCierrePreviewCard()}
-        {renderReinicioPreviewCard()}
+        {/* ✅ Eliminado: renderMesInfo() */}
 
-        <View style={{ gap: spacing.md }}>
-          <OptionCard
-            iconName="calendar-outline"
-            title="Abrir flujo de cierre"
-            description="Acciones y flujo de cierre."
-            onPress={irAFlujoCierre}
-          />
-          <OptionCard
-            iconName="repeat-outline"
-            title="Abrir flujo de reinicio"
-            description="Validación y reinicio de estados."
-            onPress={irAFlujoReinicio}
-          />
-        </View>
+        {renderResumenReinicio()}
+        {renderPromedios()}
+
+        <OptionCard
+          iconName="repeat-outline"
+          title="Aplicar reinicio"
+          description={
+            canExecute
+              ? 'Aplicará el reinicio de gastos/ingresos y actualizará promedios en contenedores.'
+              : (disabledReason ?? 'No disponible')
+          }
+          onPress={confirmarEjecutar}
+          state={canExecute ? 'enabled' : 'disabled'}
+          onDisabledPress={() => Alert.alert('No disponible', disabledReason ?? 'No cumples las condiciones.')}
+          showChevron={false}
+        />
+
+        <Text style={styles.pullHint}>Desliza hacia abajo para recomprobar.</Text>
       </View>
     );
   };
@@ -282,17 +427,18 @@ export const CierreMensualPreviewScreen: React.FC = () => {
   return (
     <Screen withHeaderBackground>
       <View style={styles.topArea}>
-        <Header title="Previews mensuales" subtitle={subtitleLabel} showBack />
+        <Header title="Reiniciar mes" subtitleYear={periodo.anio} subtitleMonth={periodo.mes} showBack />
       </View>
 
       <ScrollView
         contentContainerStyle={styles.scrollContent}
-        refreshControl={
-          <RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={colors.primary} />
-        }
+        refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={colors.primary} />}
       >
         {renderBody()}
       </ScrollView>
+
+      {/* ✅ Modal global de info */}
+      <InfoModal visible={info.visible} title={info.title} text={info.text} onClose={info.close} />
     </Screen>
   );
 };
@@ -304,6 +450,7 @@ const styles = StyleSheet.create({
     paddingTop: spacing.sm,
     paddingBottom: spacing.lg,
   },
+
   scrollContent: {
     paddingHorizontal: spacing.lg,
     paddingTop: spacing.lg,
@@ -313,6 +460,7 @@ const styles = StyleSheet.create({
   },
 
   content: { gap: spacing.md },
+
   center: {
     alignItems: 'center',
     justifyContent: 'center',
@@ -334,57 +482,124 @@ const styles = StyleSheet.create({
     marginBottom: spacing.md,
     lineHeight: 20,
   },
+
   helperText: { fontSize: 13, color: colors.textSecondary },
   errorText: {
     fontSize: 14,
-    color: (colors as any).actionDanger ?? (colors as any).danger ?? '#b91c1c',
+    color: colors.actionDanger,
     textAlign: 'center',
     marginBottom: spacing.md,
   },
 
-  previewBox: {
+  // Preview cards
+  previewCard: {
     backgroundColor: '#FFFFFF',
     borderRadius: 14,
     padding: spacing.lg,
     borderWidth: 1,
     borderColor: '#E6E6EA',
   },
-  previewHeaderRow: {
+
+  // Header por sección: título izquierda, "i" derecha
+  sectionHeaderRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 10,
+    marginBottom: spacing.sm,
+  },
+
+  previewTitle: {
+    fontSize: 14,
+    fontWeight: '800',
+    color: colors.textPrimary,
+    textTransform: 'capitalize',
+  },
+  previewSubtitle: {
+    marginTop: 4,
+    fontSize: 12,
+    color: colors.textSecondary,
+    lineHeight: 16,
+  },
+  previewMuted: {
+    marginTop: 10,
+    fontSize: 12,
+    color: colors.textSecondary,
+    lineHeight: 16,
+  },
+
+  // Tabla base
+  tableHeaderText: {
+    fontSize: 11,
+    color: colors.textSecondary,
+    fontWeight: '700',
+  },
+  previewDivider: {
+    height: 1,
+    backgroundColor: '#E6E6EA',
+    marginVertical: spacing.xs,
+  },
+
+  // 2 columnas (resumen reinicio)
+  tableHeaderRow: {
     flexDirection: 'row',
     alignItems: 'baseline',
     justifyContent: 'space-between',
-    marginBottom: 8,
+    paddingVertical: 6,
   },
-  previewTitle: { fontSize: 14, fontWeight: '700', color: colors.textPrimary },
-  previewTag: { fontSize: 11, color: colors.textSecondary },
-  previewLine: { fontSize: 12, color: colors.textSecondary, lineHeight: 18 },
-
-  kvRow: {
+  tableRow2: {
     flexDirection: 'row',
+    alignItems: 'baseline',
     justifyContent: 'space-between',
-    paddingVertical: 5,
-  },
-  kvLabel: { fontSize: 12, color: colors.textSecondary },
-  kvValue: { fontSize: 12, fontWeight: '700', color: colors.textPrimary },
-
-  grid: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    justifyContent: 'space-between',
-    marginTop: 8,
-  },
-  gridCell: {
-    width: '48%',
-    borderWidth: StyleSheet.hairlineWidth,
-    borderColor: '#E6E6EA',
-    borderRadius: 12,
     paddingVertical: 8,
-    paddingHorizontal: 10,
-    marginBottom: 8,
-    backgroundColor: '#FFFFFF',
   },
-  gridLabel: { fontSize: 11, color: colors.textSecondary },
-  gridValue: { marginTop: 2, fontSize: 13, fontWeight: '800', color: colors.textPrimary },
+
+  // 3 columnas (promedios + dif)
+  tableHeaderRow3: {
+    flexDirection: 'row',
+    alignItems: 'baseline',
+    justifyContent: 'space-between',
+    paddingVertical: 6,
+  },
+  tableRow3: {
+    flexDirection: 'row',
+    alignItems: 'baseline',
+    justifyContent: 'space-between',
+    paddingVertical: 8,
+  },
+
+  colConcept: {
+    flex: 1,
+    fontSize: 12,
+    color: colors.textSecondary,
+    paddingRight: 10,
+  },
+  colCount: {
+    width: 80,
+    textAlign: 'center',
+    fontSize: 12,
+    color: colors.textSecondary,
+    fontWeight: '700',
+  },
+
+  // Importe simple (sin colores)
+  colAmountSimple: {
+    width: 120,
+    textAlign: 'right',
+    fontSize: 13,
+    fontWeight: '800',
+    color: colors.textPrimary,
+  },
+
+  // Dif mes
+  colDelta: {
+    width: 80,
+    textAlign: 'right',
+    fontSize: 12,
+    fontWeight: '800',
+  },
+
+  pullHint: { fontSize: 11, color: colors.textSecondary, textAlign: 'center', marginTop: 2 },
 });
 
-export default CierreMensualPreviewScreen;
+export default ReiniciarMesScreen;

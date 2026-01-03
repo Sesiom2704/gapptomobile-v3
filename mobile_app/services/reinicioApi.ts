@@ -106,6 +106,11 @@ export type PromedioContenedorPreview = {
   subtipos_tipo_ids: string[];
   valor_promedio: number;
   n_gastos_afectados: number;
+
+  // ✅ NUEVO
+  contenedor_nombre?: string | null;
+  importe_cuota_actual?: number | null;
+  dif_mes_pct?: number | null;
 };
 
 export type ReinicioGastosIngresosPreview = {

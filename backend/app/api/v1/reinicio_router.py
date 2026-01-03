@@ -476,12 +476,35 @@ def _compute_promedios_preview_user(db: Session, user_id: int) -> List[Dict[str,
             or 0
         )
 
+        # ✅ NUEVO: nombre e importe_cuota actual del contenedor (desde gastos)
+        row = (
+            db.query(models.Gasto.nombre, models.Gasto.importe_cuota)
+            .filter(models.Gasto.user_id == user_id)
+            .filter(models.Gasto.tipo_id == contenedor_tipo)
+            .filter(models.Gasto.activo == True)
+            .order_by(models.Gasto.modifiedon.desc().nullslast(), models.Gasto.createon.desc().nullslast())
+            .first()
+        )
+
+        cont_nombre = row[0] if row else None
+        imp_actual = float(row[1]) if row and row[1] is not None else None
+
+        # ✅ NUEVO: dif mes (%)
+        dif_pct = None
+        if imp_actual is not None and imp_actual > 0:
+            dif_pct = round(((float(valor) - imp_actual) / imp_actual) * 100.0, 2)
+
         out.append(
             {
                 "contenedor_tipo_id": contenedor_tipo,
                 "subtipos_tipo_ids": list(subtipos),
                 "valor_promedio": float(valor),
                 "n_gastos_afectados": n_afectados,
+
+                # ✅ NUEVO
+                "contenedor_nombre": cont_nombre,
+                "importe_cuota_actual": imp_actual,
+                "dif_mes_pct": dif_pct,
             }
         )
 
