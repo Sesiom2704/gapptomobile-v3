@@ -2,16 +2,32 @@
 // -----------------------------------------------------------------------------
 // ReiniciarMesScreen (V4)
 //
-// Ajustes:
-// 1) Eliminar tarjeta "Pendientes KPI / presupuesto COT / ventana" (no aplica aquí).
-// 2) Previsualización del reinicio: InfoButton + tabla 2 columnas (Concepto | Cantidad).
-// 3) Promedios a insertar: InfoButton.
-// 4) Contenedor: mostrar nombre (gasto.nombre) en vez de id.
-// 5) Dif mes: comparar futuro (promedio) vs pasado (gastos.importe_cuota) y mostrar %:
-//    - incremento: rojo
-//    - decremento: verde
+// Cambios (según tu feedback):
+// 1) Eliminar tarjeta "Pendientes KPI / Presupuesto COT total / Ventana" (si entras aquí, ya se cumple).
+// 2) Previsualización del reinicio:
+//    - Solo 2 columnas: Concepto | Cantidad
+//    - Botón de info en cabecera (InfoButton a la derecha)
+//    - Textos explicativos SOLO dentro del modal info (no en subtítulos visibles)
+// 3) Promedios a insertar:
+//    - Botón de info en cabecera
+//    - Tabla: Contenedor(nombre) | Importe(promedio) | Dif mes(%)
+//    - Contenedor: usar p.contenedor_nombre si viene; fallback al id
+//    - Importe: siempre positivo; sin colores extra
+//    - Dif mes: incremento rojo / decremento verde
+//
+// Requisitos de datos:
+// - reinicioApi.fetchReinicioGastosIngresosPreview() debe devolver promedios con:
+//   contenedor_nombre, importe_cuota_actual, dif_mes_pct
 // -----------------------------------------------------------------------------
-
+//
+// Dependencias UI:
+// - Usa InfoButton/InfoModal/useInfoModal como en BalanceScreen.
+// -----------------------------------------------------------------------------
+// Backend esperado:
+// - GET  /api/v1/reinicio/mes/preview  (solo para window+elig si quisieras, aquí lo mantenemos solo para canExecute)
+// - GET  /api/v1/reinicio/gastos-ingresos/preview  (con campos extra)
+// - POST /api/v1/reinicio/gastos-ingresos/ejecutar?aplicar_promedios=true&enforce_window=true
+// -----------------------------------------------------------------------------
 
 import React, { useCallback, useMemo, useState } from 'react';
 import { View, Text, StyleSheet, Alert, ActivityIndicator, ScrollView, RefreshControl } from 'react-native';
@@ -22,27 +38,28 @@ import { Header } from '../../components/layout/Header';
 import { OptionCard } from '../../components/cards/OptionCard';
 import { colors, spacing } from '../../theme';
 
-import { reinicioApi, type ReinicioGastosIngresosPreview } from '../../services/reinicioApi';
+import { reinicioApi, type ReinicioMesPreview, type ReinicioGastosIngresosPreview } from '../../services/reinicioApi';
 import { EuroformatEuro } from '../../utils/format';
 
-// ✅ Para comparar vs lo insertado actualmente
-import { fetchGastos, type Gasto } from '../../services/gastosApi';
-
-// ✅ Info modal reutilizable (patrón BalanceScreen)
+// ✅ Info modal reutilizable (mismo patrón que BalanceScreen)
 import { InfoButton, InfoModal, useInfoModal } from '../../components/ui/InfoModal';
 
 type LoadState = 'LOADING' | 'OK' | 'ERROR';
 
-type RouteParams = {
-  anio?: number;
-  mes?: number;
-  cierreId?: string | null;
-};
-
 function mesNombreES(m: number): string {
   const names = [
-    'enero', 'febrero', 'marzo', 'abril', 'mayo', 'junio',
-    'julio', 'agosto', 'septiembre', 'octubre', 'noviembre', 'diciembre',
+    'enero',
+    'febrero',
+    'marzo',
+    'abril',
+    'mayo',
+    'junio',
+    'julio',
+    'agosto',
+    'septiembre',
+    'octubre',
+    'noviembre',
+    'diciembre',
   ];
   return names[m - 1] ?? `mes ${m}`;
 }
@@ -52,7 +69,7 @@ function pad2(n: number): string {
 }
 
 /**
- * "HH:mm - D/MM/YYYY" (fecha/hora local del dispositivo)
+ * Formato: "HH:mm - D/MM/YYYY"
  */
 function formatNowSimple(): string {
   const d = new Date();
@@ -64,27 +81,35 @@ function formatNowSimple(): string {
   return `${hh}:${mm} - ${day}/${month}/${year}`;
 }
 
-function normalizeKey(nombre: any): string {
-  return String(nombre ?? '').trim().toUpperCase();
+function fmtPct(value: number | null | undefined): string {
+  const n = typeof value === 'number' ? value : null;
+  if (n == null || !Number.isFinite(n)) return '—';
+  const sign = n > 0 ? '+' : '';
+  return `${sign}${n.toFixed(1)}%`;
 }
 
-function fmtPct(value: number | null): string {
-  if (value == null || !Number.isFinite(value)) return '—';
-  const sign = value > 0 ? '+' : '';
-  return `${sign}${value.toFixed(1)}%`;
-}
-
-function deltaColor(pct: number | null): string {
-  if (pct == null || !Number.isFinite(pct) || pct === 0) return colors.textSecondary;
+function pctColor(value: number | null | undefined): string {
+  const n = typeof value === 'number' ? value : null;
+  if (n == null || !Number.isFinite(n) || n === 0) return colors.textSecondary;
+  // ✅ incrementos rojo / decrementos verde (según tu especificación)
   const green = (colors as any).success ?? (colors as any).actionSuccess ?? '#16a34a';
   const red = (colors as any).danger ?? (colors as any).actionDanger ?? '#b91c1c';
-  return pct > 0 ? red : green; // ✅ incremento rojo, decremento verde
+  return n > 0 ? red : green;
 }
+
+type RouteParams = {
+  anio?: number;
+  mes?: number;
+  cierreId?: string | null;
+};
 
 export const ReiniciarMesScreen: React.FC = () => {
   const navigation = useNavigation<any>();
   const route = useRoute<any>();
   const params = (route?.params ?? {}) as RouteParams;
+
+  // ✅ Modal de info único
+  const info = useInfoModal();
 
   const nowPeriod = useMemo(() => {
     const now = new Date();
@@ -102,48 +127,31 @@ export const ReiniciarMesScreen: React.FC = () => {
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [refreshing, setRefreshing] = useState(false);
 
-  // Preview “gastos-ingresos” (lo que pide el screen: 1.1..1.4)
+  // Se mantiene para validar canExecute (window + can_reiniciar)
+  const [mesPreview, setMesPreview] = useState<ReinicioMesPreview | null>(null);
+
+  // Preview principal (conteos + promedios)
   const [giPreview, setGiPreview] = useState<ReinicioGastosIngresosPreview | null>(null);
-
-  // Mapa "pasado" por nombre: gasto.nombre -> gasto.importe_cuota
-  const [importeCuotaByNombre, setImporteCuotaByNombre] = useState<Record<string, number>>({});
-
-  // ✅ Info modal (único por pantalla)
-  const info = useInfoModal();
 
   const load = useCallback(async () => {
     setState('LOADING');
     setErrorMsg(null);
 
     try {
-      const [giPrev, gastosActivos] = await Promise.all([
+      const [mesPrev, giPrev] = await Promise.all([
+        reinicioApi.fetchMesPreview({ anio: periodo.anio, mes: periodo.mes }),
         reinicioApi.fetchReinicioGastosIngresosPreview(),
-        fetchGastos('activos'),
       ]);
 
+      setMesPreview(mesPrev ?? null);
       setGiPreview(giPrev ?? null);
-
-      const map: Record<string, number> = {};
-      (gastosActivos ?? []).forEach((g: Gasto) => {
-        const key = normalizeKey(g?.nombre);
-        const cuota = Number(g?.importe_cuota ?? 0);
-
-        // Si hay duplicados por nombre, nos quedamos con el último (o el >0)
-        if (!key) return;
-        if (!Number.isFinite(cuota)) return;
-
-        // Preferimos un valor >0 si existe
-        if (map[key] == null || map[key] === 0) map[key] = cuota;
-      });
-
-      setImporteCuotaByNombre(map);
 
       setState('OK');
     } catch (e: any) {
       setErrorMsg(e?.message ?? 'No se ha podido cargar la previsualización del reinicio.');
       setState('ERROR');
     }
-  }, []);
+  }, [periodo.anio, periodo.mes]);
 
   useFocusEffect(
     useCallback(() => {
@@ -161,16 +169,30 @@ export const ReiniciarMesScreen: React.FC = () => {
   }, [load]);
 
   const canExecute = useMemo(() => {
-    // Si llegas aquí ya cumples condiciones de navegación.
-    // Aun así: no ejecutamos sin preview.
-    return !!giPreview;
-  }, [giPreview]);
+    const windowOk = !!mesPreview?.ventana_1_5_ok;
+    const eligOk = !!mesPreview?.eligibility?.can_reiniciar;
+    return !!giPreview && !!mesPreview && windowOk && eligOk;
+  }, [giPreview, mesPreview]);
 
   const disabledReason = useMemo(() => {
     if (canExecute) return null;
-    if (!giPreview) return 'Preview de reinicio no disponible';
-    return 'No disponible';
-  }, [canExecute, giPreview]);
+
+    const parts: string[] = [];
+    if (!mesPreview) parts.push('Preview de mes no disponible');
+    if (!giPreview) parts.push('Preview de reinicio no disponible');
+
+    const windowOk = !!mesPreview?.ventana_1_5_ok;
+    const elig = mesPreview?.eligibility;
+
+    if (mesPreview && !windowOk) parts.push('Disponible del día 1 al 5');
+    if (elig && !elig.can_reiniciar) {
+      const g = Number(elig.gastos_pendientes ?? 0);
+      const i = Number(elig.ingresos_pendientes ?? 0);
+      parts.push(`Pendientes KPI: gastos ${g}, ingresos ${i}`);
+    }
+
+    return parts.join(' · ');
+  }, [canExecute, mesPreview, giPreview]);
 
   const confirmarEjecutar = () => {
     if (!canExecute) return;
@@ -206,8 +228,8 @@ export const ReiniciarMesScreen: React.FC = () => {
       });
 
       await load();
-
       Alert.alert('Reinicio aplicado', 'Los gastos/ingresos han sido reiniciados correctamente.');
+      // navigation.goBack();
     } catch (e: any) {
       setErrorMsg(e?.message ?? 'No se ha podido ejecutar el reinicio.');
       setState('ERROR');
@@ -215,7 +237,7 @@ export const ReiniciarMesScreen: React.FC = () => {
   };
 
   // ---------------------------------------------------------------------------
-  // (2) Previsualización del reinicio: 2 columnas (Concepto | Cantidad) + InfoButton
+  // ✅ Card: Previsualización del reinicio (Concepto | Cantidad) + InfoButton
   // ---------------------------------------------------------------------------
 
   const renderResumenReinicio = () => {
@@ -228,44 +250,40 @@ export const ReiniciarMesScreen: React.FC = () => {
     ];
 
     return (
-      <View style={styles.previewCard}>
+      <View style={styles.card}>
         <View style={styles.sectionHeaderRow}>
-          <View style={{ flex: 1 }}>
-            <Text style={styles.previewTitle}>Previsualización del reinicio</Text>
-            <Text style={styles.previewSubtitle}>Resumen de lo que se aplicará al reiniciar.</Text>
-          </View>
-
+          <Text style={styles.cardTitle}>Previsualización del reinicio</Text>
           <InfoButton
             align="title"
             onPress={() =>
               info.open(
                 'Previsualización del reinicio',
-                'Resumen de conteos: gastos e ingresos que se reinician y cuántas últimas cuotas se detectan.'
+                'Resumen de conteos: número de gastos e ingresos que cambiarán al reiniciar y cuántas “últimas cuotas” se detectan (cuotas_restantes == 1 en gastos con cuotas > 1).'
               )
             }
           />
         </View>
 
-        <View style={styles.tableHeaderRow}>
-          <Text style={[styles.colConcept, styles.tableHeaderText]}>Concepto</Text>
-          <Text style={[styles.colCount, styles.tableHeaderText]}>Cantidad</Text>
+        <View style={styles.tableHeaderRow2}>
+          <Text style={[styles.tableHeaderText, styles.colConcept]}>Concepto</Text>
+          <Text style={[styles.tableHeaderText, styles.colCount2]}>Cantidad</Text>
         </View>
-        <View style={styles.previewDivider} />
+        <View style={styles.divider} />
 
         {rows.map((r) => (
           <View key={r.label} style={styles.tableRow2}>
             <Text style={styles.colConcept}>{r.label}</Text>
-            <Text style={styles.colCount}>{String(r.count)}</Text>
+            <Text style={styles.colCount2}>{String(r.count)}</Text>
           </View>
         ))}
 
-        <Text style={styles.previewMuted}>As of: {formatNowSimple()}</Text>
+        <Text style={styles.muted}>As of: {formatNowSimple()}</Text>
       </View>
     );
   };
 
   // ---------------------------------------------------------------------------
-  // (3)(4)(5) Promedios: Contenedor (nombre) | Importe | Dif mes
+  // ✅ Card: Promedios a insertar (Contenedor | Importe | Dif mes) + InfoButton
   // ---------------------------------------------------------------------------
 
   const renderPromedios = () => {
@@ -274,96 +292,73 @@ export const ReiniciarMesScreen: React.FC = () => {
     const proms = Array.isArray(giPreview.promedios) ? giPreview.promedios : [];
     if (proms.length === 0) {
       return (
-        <View style={styles.previewCard}>
+        <View style={styles.card}>
           <View style={styles.sectionHeaderRow}>
-            <Text style={styles.previewTitle}>Promedios a insertar</Text>
+            <Text style={styles.cardTitle}>Promedios a insertar</Text>
             <InfoButton
               align="title"
               onPress={() =>
                 info.open(
                   'Promedios a insertar',
-                  'Promedios calculados (PROM-3M) que se aplicarán sobre contenedores. Se comparan con el importe actual (importe_cuota) para ver la variación porcentual.'
+                  'PROM-3M por contenedor. Se calcula con los gastos cotidianos pagados de los últimos 3 meses (por grupos de tipo).'
                 )
               }
             />
           </View>
 
-          <Text style={[styles.previewMuted, { marginTop: 6 }]}>
-            No hay promedios calculados (0). Si esperabas verlos, revisa que existan gastos COT pagados en los últimos 3 meses.
+          <Text style={styles.muted}>
+            No hay promedios calculados (0). Si esperabas verlos, revisa que existan gastos COT pagados en los últimos 3
+            meses.
           </Text>
         </View>
       );
     }
 
     return (
-      <View style={styles.previewCard}>
+      <View style={styles.card}>
         <View style={styles.sectionHeaderRow}>
-          <View style={{ flex: 1 }}>
-            <Text style={styles.previewTitle}>Promedios a insertar</Text>
-            <Text style={styles.previewSubtitle}>
-              Se actualizarán contenedores con el promedio (PROM-3M) y se compara contra el importe actual.
-            </Text>
-          </View>
-
+          <Text style={styles.cardTitle}>Promedios a insertar</Text>
           <InfoButton
             align="title"
             onPress={() =>
               info.open(
                 'Promedios a insertar',
-                '“Contenedor” es el nombre del gasto. “Importe” es el promedio calculado. “Dif mes” muestra la variación porcentual vs el importe actual (importe_cuota) del gasto activo con el mismo nombre.'
+                'PROM-3M por contenedor. “Importe” es el promedio calculado. “Dif mes” compara el promedio con el importe_cuota actual del contenedor (si está disponible). Incremento se muestra en rojo y decremento en verde.'
               )
             }
           />
         </View>
 
         <View style={styles.tableHeaderRow3}>
-          <Text style={[styles.colConcept, styles.tableHeaderText]}>Contenedor</Text>
-          <Text style={[styles.colAmountSimple, styles.tableHeaderText]}>Importe</Text>
-          <Text style={[styles.colDelta, styles.tableHeaderText]}>Dif mes</Text>
+          <Text style={[styles.tableHeaderText, styles.colConcept]}>Contenedor</Text>
+          <Text style={[styles.tableHeaderText, styles.colAmount]}>Importe</Text>
+          <Text style={[styles.tableHeaderText, styles.colDiff]}>Dif mes</Text>
         </View>
-        <View style={styles.previewDivider} />
+        <View style={styles.divider} />
 
-        {proms.map((p: any, idx: number) => {
-          // ✅ Preferimos nombre (lo que necesitas)
-          // Fallbacks para no romper mientras ajustas router/backend.
-          const nombreRaw =
-            p?.nombre ??
-            p?.gasto_nombre ??
-            p?.contenedor_nombre ??
-            p?.contenedor ??
-            p?.contenedor_tipo_id ??
-            `Contenedor ${idx + 1}`;
-
-          const nombre = String(nombreRaw);
-          const key = normalizeKey(nombre);
-
-          const n = Number(p?.n_gastos_afectados ?? 0);
-          const futuro = Number(p?.valor_promedio ?? 0);
-
-          const pasado = Number(importeCuotaByNombre[key] ?? 0);
-          const difPct =
-            pasado > 0 && Number.isFinite(pasado) && Number.isFinite(futuro)
-              ? ((futuro - pasado) / pasado) * 100
-              : null;
+        {proms.map((p) => {
+          const key = String(p.contenedor_tipo_id ?? Math.random());
+          const contNombre = (p as any).contenedor_nombre ?? p.contenedor_tipo_id ?? '—';
+          const val = Number((p as any).valor_promedio ?? 0);
+          const difPct = (p as any).dif_mes_pct as number | null | undefined;
 
           return (
-            <View key={`${key}-${idx}`} style={styles.tableRow3}>
-              <Text style={styles.colConcept}>{nombre}</Text>
+            <View key={key} style={styles.tableRow3}>
+              <Text style={styles.colConcept}>{String(contNombre)}</Text>
 
-              {/* Importe: sin colores “extra”, siempre positivo */}
-              <Text style={styles.colAmountSimple}>
-                {EuroformatEuro(futuro, 'normal')}
+              <Text style={styles.colAmount}>
+                {EuroformatEuro(val, 'normal')}
               </Text>
 
-              <Text style={[styles.colDelta, { color: deltaColor(difPct) }]}>
+              <Text style={[styles.colDiff, { color: pctColor(difPct) }]}>
                 {fmtPct(difPct)}
               </Text>
             </View>
           );
         })}
 
-        <Text style={styles.previewMuted}>
-          Nota: “Dif mes” compara el promedio (futuro) vs el importe_cuota actual del gasto activo con el mismo nombre.
+        <Text style={styles.muted}>
+          Nota: “Dif mes” se calcula como (promedio - importe_cuota_actual) / importe_cuota_actual.
         </Text>
       </View>
     );
@@ -396,11 +391,7 @@ export const ReiniciarMesScreen: React.FC = () => {
     return (
       <View style={styles.content}>
         <Text style={styles.h1}>Reiniciar mes</Text>
-        <Text style={styles.subtitle}>
-          Previsualiza los cambios y ejecútalos cuando estés listo.
-        </Text>
-
-        {/* ✅ Eliminado: renderMesInfo() */}
+        <Text style={styles.subtitle}>Previsualiza los cambios y ejecútalos cuando estés listo.</Text>
 
         {renderResumenReinicio()}
         {renderPromedios()}
@@ -491,8 +482,8 @@ const styles = StyleSheet.create({
     marginBottom: spacing.md,
   },
 
-  // Preview cards
-  previewCard: {
+  // Base card
+  card: {
     backgroundColor: '#FFFFFF',
     borderRadius: 14,
     padding: spacing.lg,
@@ -500,48 +491,45 @@ const styles = StyleSheet.create({
     borderColor: '#E6E6EA',
   },
 
-  // Header por sección: título izquierda, "i" derecha
+  // Header por sección: título izq, info der
   sectionHeaderRow: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    gap: 10,
     marginBottom: spacing.sm,
   },
 
-  previewTitle: {
+  cardTitle: {
     fontSize: 14,
     fontWeight: '800',
     color: colors.textPrimary,
     textTransform: 'capitalize',
   },
-  previewSubtitle: {
-    marginTop: 4,
-    fontSize: 12,
-    color: colors.textSecondary,
-    lineHeight: 16,
-  },
-  previewMuted: {
+
+  muted: {
     marginTop: 10,
     fontSize: 12,
     color: colors.textSecondary,
     lineHeight: 16,
   },
 
-  // Tabla base
-  tableHeaderText: {
-    fontSize: 11,
-    color: colors.textSecondary,
-    fontWeight: '700',
-  },
-  previewDivider: {
+  divider: {
     height: 1,
     backgroundColor: '#E6E6EA',
     marginVertical: spacing.xs,
   },
 
-  // 2 columnas (resumen reinicio)
-  tableHeaderRow: {
+  // -------------------------
+  // Tablas
+  // -------------------------
+  tableHeaderText: {
+    fontSize: 11,
+    color: colors.textSecondary,
+    fontWeight: '700',
+  },
+
+  // 2 columnas (Concepto | Cantidad)
+  tableHeaderRow2: {
     flexDirection: 'row',
     alignItems: 'baseline',
     justifyContent: 'space-between',
@@ -553,8 +541,15 @@ const styles = StyleSheet.create({
     justifyContent: 'space-between',
     paddingVertical: 8,
   },
+  colCount2: {
+    width: 90,
+    textAlign: 'right',
+    fontSize: 12,
+    color: colors.textSecondary,
+    fontWeight: '800',
+  },
 
-  // 3 columnas (promedios + dif)
+  // 3 columnas (Contenedor | Importe | Dif mes)
   tableHeaderRow3: {
     flexDirection: 'row',
     alignItems: 'baseline',
@@ -574,16 +569,8 @@ const styles = StyleSheet.create({
     color: colors.textSecondary,
     paddingRight: 10,
   },
-  colCount: {
-    width: 80,
-    textAlign: 'center',
-    fontSize: 12,
-    color: colors.textSecondary,
-    fontWeight: '700',
-  },
 
-  // Importe simple (sin colores)
-  colAmountSimple: {
+  colAmount: {
     width: 120,
     textAlign: 'right',
     fontSize: 13,
@@ -591,12 +578,12 @@ const styles = StyleSheet.create({
     color: colors.textPrimary,
   },
 
-  // Dif mes
-  colDelta: {
+  colDiff: {
     width: 80,
     textAlign: 'right',
     fontSize: 12,
-    fontWeight: '800',
+    fontWeight: '900',
+    color: colors.textSecondary,
   },
 
   pullHint: { fontSize: 11, color: colors.textSecondary, textAlign: 'center', marginTop: 2 },

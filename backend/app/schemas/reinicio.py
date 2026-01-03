@@ -67,6 +67,10 @@ class PromedioContenedorPreview(BaseModel):
     valor_promedio: float
     n_gastos_afectados: int
 
+    contenedor_nombre: Optional[str] = None
+    importe_cuota_actual: Optional[float] = None
+    dif_mes_pct: Optional[float] = None
+
 
 class ReinicioGastosIngresosPreviewResponse(BaseModel):
     """
