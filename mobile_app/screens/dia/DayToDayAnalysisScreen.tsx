@@ -285,19 +285,33 @@ export const DayToDayAnalysisScreen: React.FC = () => {
 
   return (
     <>
-      <Header
-        title="Análisis día a día"
-        subtitle="Desglose de tus gastos cotidianos por categoría y proveedor."
-        showBack
-        onBackPress={() => {
-          if (fromHome) {
-            // Volver al tab Home sin dejar pantallas “fantasma” en el stack
-            navigation.navigate('HomeTab');
-          } else {
-            navigation.goBack();
-          }
-        }}
-      />
+    <Header
+      title="Análisis día a día"
+      subtitle="Desglose de tus gastos cotidianos por categoría y proveedor."
+      showBack
+      rightIconName="eye-outline"
+      onRightPress={() =>
+        navigation.navigate('DayToDayKpisScreen', {
+          fromHome,
+          // Arrastramos filtros actuales para que KPIs abra “en el mismo contexto”
+          pago: pagoFiltro,
+          view: selectedView,
+          categoria: selectedCategoryKey,
+          tipoId: selectedSubtipoId,
+
+          // Back consistente (por si luego lo usas en KPIs)
+          returnToTab: fromHome ? 'HomeTab' : 'DayToDayTab',
+          returnToScreen: fromHome ? 'HomeScreen' : 'DayToDayHomeScreen',
+        })
+      }
+      onBackPress={() => {
+        if (fromHome) {
+          navigation.navigate('HomeTab');
+        } else {
+          navigation.goBack();
+        }
+      }}
+    />
 
       <View style={panelStyles.screen}>
         <ScrollView contentContainerStyle={panelStyles.scrollContent}>

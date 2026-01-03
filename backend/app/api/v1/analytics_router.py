@@ -1,4 +1,3 @@
-# backend/app/api/v1/analytics_router.py
 """
 API v1 - ANALYTICS (KPIs, resúmenes y breakdowns por patrimonio)
 
@@ -35,13 +34,20 @@ from datetime import date, datetime
 from decimal import Decimal
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from backend.app.db.session import get_db
 from backend.app.db import models
 from backend.app.api.v1.auth_router import require_user
 
+# ✅ Schemas separados (DTOs de respuesta)
+from backend.app.schemas.analytics import (
+    ResumenOut,
+    BreakdownOut,
+    BreakdownRowOut,
+    KpisOut,
+    PatrimonioSummaryOut,
+)
 
 router = APIRouter(prefix="/analytics", tags=["analytics"])
 
@@ -64,77 +70,6 @@ def _f(x: object, default: float = 0.0) -> float:
         return float(x)  # str u otros
     except Exception:
         return default
-
-
-# =========================================================
-# Pydantic DTOs (respuesta)
-# =========================================================
-
-class ResumenOut(BaseModel):
-    year: int
-    ingresos_ytd: float
-    gastos_ytd: float
-    cashflow_ytd: float
-    promedio_mensual: float
-    meses_contados: int
-
-
-class BreakdownRowOut(BaseModel):
-    tipo: str
-    periodicidad: str
-    cuota: Optional[float] = None
-    meses: int
-    total: float
-
-
-class BreakdownOut(BaseModel):
-    year: int
-    meses_contados: int
-    rows: List[BreakdownRowOut]
-    total_ytd: float
-
-
-class KpisOut(BaseModel):
-    year: int
-    meses_contados: int
-
-    # Base / agregados
-    basis_used: str
-    valor_base: float
-
-    ingresos_anuales: float
-    gastos_operativos_anuales: float
-    noi: float
-
-    cap_rate_pct: Optional[float] = None
-    rendimiento_bruto_pct: Optional[float] = None
-
-    cashflow_anual: float
-    cashflow_mensual: float
-
-    dscr: Optional[float] = None
-    ocupacion_pct: Optional[float] = None
-
-    info: Dict[str, str] = Field(default_factory=dict)
-
-
-# NUEVO: Summary para Home (agregado multi-propiedad)
-class PatrimonioSummaryOut(BaseModel):
-    year: int
-
-    propiedades_count: int
-    valor_mercado_total: float
-
-    noi_total: float
-
-    # % (puede ser null si no hay datos suficientes)
-    rentabilidad_bruta_media_pct: Optional[float] = None
-
-    # Equity agregado (definición: valor_mercado_total - total_inversion_total)
-    equity_total: float
-
-    # Diagnóstico/explicación simple
-    equity_basis: Optional[str] = None
 
 
 # =========================================================

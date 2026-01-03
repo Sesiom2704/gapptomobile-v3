@@ -3,15 +3,19 @@
 from __future__ import annotations
 
 from datetime import date, datetime, timedelta
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 from fastapi import APIRouter, Depends, Query
-from sqlalchemy import func
+from sqlalchemy import func, extract
 from sqlalchemy.orm import Session
 from typing_extensions import Literal
 
 from backend.app.db.session import get_db
 from backend.app.db import models
+
+# ✅ Añadimos auth multi-tenant (como el resto de tu backend)
+from backend.app.api.v1.auth_router import require_user
+
 from backend.app.schemas.day_to_day_analysis import (
     DayToDayAnalysisResponse,
     TodaySummary,
@@ -21,6 +25,10 @@ from backend.app.schemas.day_to_day_analysis import (
     CategoryKpi,
     ProviderItem,
     Last7DayItem,
+    # NUEVO
+    DailySeriesItem,
+    MonthlySeriesItem,
+    EvolutionKpis,
 )
 
 router = APIRouter(
@@ -42,10 +50,9 @@ TIPO_TO_CATEGORY: dict[str, str] = {
     "ELE-TIPOGASTO-47CC77E5": "SUMINISTROS",
 
     # 3. VEHICULOS
-    # Cotidianos:
-    "TIP-GASOLINA-SW1ZQO": "VEHICULOS",          # GASOLINA
-    "MAV-TIPOGASTO-BVC356": "VEHICULOS",         # MANTENIMIENTO VEHÍCULO
-    "PEA-TIPOGASTO-7HDY89": "VEHICULOS",         # PEAJES
+    "TIP-GASOLINA-SW1ZQO": "VEHICULOS",
+    "MAV-TIPOGASTO-BVC356": "VEHICULOS",
+    "PEA-TIPOGASTO-7HDY89": "VEHICULOS",
 
     # 4. ROPA
     "ROP-TIPOGASTO-S227BB": "ROPA",
@@ -53,17 +60,16 @@ TIPO_TO_CATEGORY: dict[str, str] = {
     # 5. RESTAURACION
     "RES-TIPOGASTO-26ROES": "RESTAURACION",
 
-    # 6. OCIO (viajes, actividades, etc.)
-    "TRA-TIPOGASTO-RB133Z": "OCIO",              # TRANSPORTE
-    "HOS-TIPOGASTO-357FDG": "OCIO",              # HOSPEDAJE
-    "ACT-TIPOGASTO-2X9H1Q": "OCIO",              # ACTIVIDADES
+    # 6. OCIO
+    "TRA-TIPOGASTO-RB133Z": "OCIO",
+    "HOS-TIPOGASTO-357FDG": "OCIO",
+    "ACT-TIPOGASTO-2X9H1Q": "OCIO",
 }
 
 
 def classify_category(tipo_id: Optional[str]) -> str:
     """
     Dado un tipo_id de GastoCotidiano, devuelve la categoría de análisis.
-
     Si no está en el diccionario, devolverá 'OTROS'.
     """
     if not tipo_id:
@@ -85,7 +91,6 @@ def parse_base_date(fecha_str: Optional[str]) -> date:
     try:
         return datetime.strptime(fecha_str, "%Y-%m-%d").date()
     except ValueError:
-        # Si el formato es incorrecto, hacemos fallback a hoy
         return date.today()
 
 
@@ -117,7 +122,6 @@ def week_range(base: date) -> tuple[date, date]:
     """
     Devuelve (inicio_semana, fin_semana_inclusive) asumiendo semana que empieza en lunes.
     """
-    # weekday(): lunes=0 ... domingo=6
     start = base - timedelta(days=base.weekday())
     end = start + timedelta(days=6)
     return start, end
@@ -135,6 +139,16 @@ def format_spanish_date(d: date) -> str:
     dia_semana = dias[d.weekday()]
     mes = meses[d.month - 1]
     return f"{dia_semana}, {d.day} de {mes}"
+
+
+def add_months(d: date, months: int) -> date:
+    """
+    Suma/resta meses manteniendo el día en 1.
+    Útil para ventanas mensuales.
+    """
+    y = d.year + (d.month - 1 + months) // 12
+    m = (d.month - 1 + months) % 12 + 1
+    return date(y, m, 1)
 
 
 # ---------------------------------------------------------------------------
@@ -164,7 +178,6 @@ def apply_categoria_filters(
 ):
     """
     Aplica filtro por categoría o por tipo:
-
     - Si viene tipo_id, filtramos por ese tipo concreto.
     - Si viene categoria, filtramos por todos los tipo_id que pertenecen a esa categoría.
     - Si no viene nada, no filtramos por categoría.
@@ -173,20 +186,23 @@ def apply_categoria_filters(
         return query.filter(GastoCotidiano.tipo_id == tipo_id)
 
     if categoria:
-        # Normalizamos categoría a mayúsculas para comparar
         categoria_upper = categoria.upper()
-        tipo_ids = [
-            tid for tid, cat in TIPO_TO_CATEGORY.items()
-            if cat.upper() == categoria_upper
-        ]
+        tipo_ids = [tid for tid, cat in TIPO_TO_CATEGORY.items() if cat.upper() == categoria_upper]
         if tipo_ids:
             return query.filter(GastoCotidiano.tipo_id.in_(tipo_ids))
 
     return query
 
 
+def apply_user_filter(query, GastoCotidiano, user_id: str):
+    """
+    Multi-tenant: restringe por user_id.
+    """
+    return query.filter(GastoCotidiano.user_id == user_id)
+
+
 # ---------------------------------------------------------------------------
-# Helpers de agregación
+# Helpers de agregación existentes
 # ---------------------------------------------------------------------------
 
 def _aggregate_by_category(
@@ -196,19 +212,13 @@ def _aggregate_by_category(
     pago: str,
     categoria: Optional[str],
     tipo_id: Optional[str],
+    user_id: str,
 ) -> Dict[str, Dict[str, float]]:
     """
-    Agrega GastoCotidiano por categoría de análisis (SUPERMERCADOS, SUMINISTROS, etc.)
-    usando el mapa TIPO_TO_CATEGORY y respetando filtros de pago y categoría.
-
-    Devuelve un dict:
-    {
-        "SUPERMERCADOS": {"total": 145.3, "tickets": 8},
-        "VEHICULOS": {"total": 68.4, "tickets": 3},
-        ...
-    }
+    Agrega GastoCotidiano por categoría de análisis.
+    Devuelve:
+      { "SUPERMERCADOS": {"total": 145.3, "tickets": 8}, ... }
     """
-
     GastoCotidiano = models.GastoCotidiano
 
     base_query = (
@@ -221,19 +231,16 @@ def _aggregate_by_category(
         .filter(GastoCotidiano.fecha < end_date_exclusive)
     )
 
+    base_query = apply_user_filter(base_query, GastoCotidiano, user_id)
     base_query = apply_pago_filter(base_query, GastoCotidiano, pago)
     base_query = apply_categoria_filters(base_query, GastoCotidiano, categoria, tipo_id)
 
     rows = base_query.group_by(GastoCotidiano.tipo_id).all()
 
     result: Dict[str, Dict[str, float]] = {}
-
     for r in rows:
         categoria_key = classify_category(r.tipo_id)
-        current = result.setdefault(
-            categoria_key,
-            {"total": 0.0, "tickets": 0.0},
-        )
+        current = result.setdefault(categoria_key, {"total": 0.0, "tickets": 0.0})
         current["total"] += float(r.total or 0)
         current["tickets"] += float(r.tickets or 0)
 
@@ -247,17 +254,10 @@ def _aggregate_providers_by_category(
     pago: str,
     categoria: Optional[str],
     tipo_id: Optional[str],
+    user_id: str,
 ) -> Dict[str, List[ProviderItem]]:
     """
-    Agrega GastoCotidiano por proveedor y categoría de análisis (SUPERMERCADOS, etc.)
-    usando el mapa TIPO_TO_CATEGORY y respetando filtros de pago y categoría.
-
-    Devuelve:
-    {
-      "SUPERMERCADOS": [ProviderItem(...), ...],
-      "VEHICULOS": [...],
-      ...
-    }
+    Agrega GastoCotidiano por proveedor y categoría.
     """
     GastoCotidiano = models.GastoCotidiano
     Proveedor = models.Proveedor
@@ -274,25 +274,24 @@ def _aggregate_providers_by_category(
         .filter(GastoCotidiano.fecha < end_date_exclusive)
     )
 
+    base_query = apply_user_filter(base_query, GastoCotidiano, user_id)
     base_query = apply_pago_filter(base_query, GastoCotidiano, pago)
     base_query = apply_categoria_filters(base_query, GastoCotidiano, categoria, tipo_id)
 
     rows = base_query.group_by(GastoCotidiano.tipo_id, Proveedor.nombre).all()
 
     result: Dict[str, List[ProviderItem]] = {}
-
     for r in rows:
         categoria_key = classify_category(r.tipo_id)
         provider_item = ProviderItem(
             nombre=(r.proveedor or "").upper(),
             importe=float(r.total or 0),
             num_compras=int(r.tickets or 0),
-            tendencia="FLAT",  # más adelante calcularemos tendencia real
+            tendencia="FLAT",  # TODO: tendencia real si quieres (comparando con mes anterior por proveedor)
         )
         result.setdefault(categoria_key, []).append(provider_item)
 
-    # Ordenamos proveedores de cada categoría por importe desc.
-    for cat, lista in result.items():
+    for _, lista in result.items():
         lista.sort(key=lambda x: x.importe, reverse=True)
 
     return result
@@ -304,10 +303,10 @@ def _aggregate_last_7_days(
     pago: str,
     categoria: Optional[str],
     tipo_id: Optional[str],
+    user_id: str,
 ) -> List[Last7DayItem]:
     """
-    Calcula el gasto diario de los últimos 7 días (incluyendo base_date)
-    respetando filtros de pago y categoría/tipo.
+    Calcula el gasto diario de los últimos 7 días (incluyendo base_date).
     """
     GastoCotidiano = models.GastoCotidiano
 
@@ -323,35 +322,202 @@ def _aggregate_last_7_days(
         .filter(GastoCotidiano.fecha < end)
     )
 
+    base_query = apply_user_filter(base_query, GastoCotidiano, user_id)
     base_query = apply_pago_filter(base_query, GastoCotidiano, pago)
     base_query = apply_categoria_filters(base_query, GastoCotidiano, categoria, tipo_id)
 
     rows = base_query.group_by(GastoCotidiano.fecha).all()
 
-    # Pasamos a dict {fecha: total}
     totals_by_date = {r.fecha: float(r.total or 0) for r in rows}
 
-    # Orden cronológico de 7 días
-    result: List[Last7DayItem] = []
-
-    # Mapeo día semana a letra
     weekday_labels = ["L", "M", "X", "J", "V", "S", "D"]
+    result: List[Last7DayItem] = []
 
     for i in range(6, -1, -1):
         d = base_date - timedelta(days=i)
-        importe = totals_by_date.get(d, 0.0)
-        weekday_idx = d.weekday()  # 0=lunes ... 6=domingo
-        label = weekday_labels[weekday_idx]
-
         result.append(
             Last7DayItem(
-                label=label,
+                label=weekday_labels[d.weekday()],
                 fecha=d.isoformat(),
-                importe=importe,
+                importe=totals_by_date.get(d, 0.0),
             )
         )
 
     return result
+
+
+# ---------------------------------------------------------------------------
+# NUEVO: series para gráficas
+# ---------------------------------------------------------------------------
+
+def _daily_series_for_month(
+    db: Session,
+    month_start: date,
+    month_next: date,
+    pago: str,
+    categoria: Optional[str],
+    tipo_id: Optional[str],
+    user_id: str,
+) -> List[DailySeriesItem]:
+    """
+    Serie diaria del mes (rellena días sin datos con 0).
+    """
+    GastoCotidiano = models.GastoCotidiano
+
+    q = (
+        db.query(
+            GastoCotidiano.fecha.label("fecha"),
+            func.coalesce(func.sum(GastoCotidiano.importe), 0).label("total"),
+        )
+        .filter(GastoCotidiano.fecha >= month_start)
+        .filter(GastoCotidiano.fecha < month_next)
+    )
+
+    q = apply_user_filter(q, GastoCotidiano, user_id)
+    q = apply_pago_filter(q, GastoCotidiano, pago)
+    q = apply_categoria_filters(q, GastoCotidiano, categoria, tipo_id)
+
+    rows = q.group_by(GastoCotidiano.fecha).all()
+    totals_by_date: Dict[date, float] = {r.fecha: float(r.total or 0) for r in rows}
+
+    # rellenar calendario completo
+    out: List[DailySeriesItem] = []
+    d = month_start
+    while d < month_next:
+        out.append(
+            DailySeriesItem(
+                fecha=d.isoformat(),
+                dia=d.day,
+                importe=totals_by_date.get(d, 0.0),
+            )
+        )
+        d += timedelta(days=1)
+
+    return out
+
+
+def _monthly_series_last_n(
+    db: Session,
+    base_date: date,
+    months_back: int,
+    pago: str,
+    categoria: Optional[str],
+    tipo_id: Optional[str],
+    user_id: str,
+) -> List[MonthlySeriesItem]:
+    """
+    Serie mensual (últimos N meses incluyendo el mes de base_date).
+    Rellena meses sin datos con 0.
+    """
+    GastoCotidiano = models.GastoCotidiano
+
+    # Ventana: desde el primer día del mes (months_back-1) atrás, hasta el primer día del mes siguiente
+    base_month_start, base_month_next = month_range(base_date)
+    window_start = add_months(base_month_start, -(months_back - 1))
+    window_end = base_month_next
+
+    q = (
+        db.query(
+            extract("year", GastoCotidiano.fecha).label("y"),
+            extract("month", GastoCotidiano.fecha).label("m"),
+            func.coalesce(func.sum(GastoCotidiano.importe), 0).label("total"),
+            func.count(GastoCotidiano.id).label("tickets"),
+        )
+        .filter(GastoCotidiano.fecha >= window_start)
+        .filter(GastoCotidiano.fecha < window_end)
+    )
+
+    q = apply_user_filter(q, GastoCotidiano, user_id)
+    q = apply_pago_filter(q, GastoCotidiano, pago)
+    q = apply_categoria_filters(q, GastoCotidiano, categoria, tipo_id)
+
+    rows = q.group_by("y", "m").all()
+
+    by_ym: Dict[Tuple[int, int], Tuple[float, int]] = {}
+    for r in rows:
+        y = int(r.y)
+        m = int(r.m)
+        by_ym[(y, m)] = (float(r.total or 0), int(r.tickets or 0))
+
+    out: List[MonthlySeriesItem] = []
+    cur = window_start
+    for _ in range(months_back):
+        y, m = cur.year, cur.month
+        total, tickets = by_ym.get((y, m), (0.0, 0))
+        out.append(
+            MonthlySeriesItem(
+                year=y,
+                month=m,
+                label=f"{y:04d}-{m:02d}",
+                importe=total,
+                tickets=tickets,
+            )
+        )
+        cur = add_months(cur, 1)
+
+    return out
+
+
+def _compute_evolution_kpis(serie_mensual: List[MonthlySeriesItem]) -> EvolutionKpis:
+    """
+    KPIs clave sobre la serie mensual.
+    - Variación MoM
+    - Medias 3/6/12
+    - Tendencia (simple): compara media 3m vs media 6m y delta MoM
+    """
+    values = [x.importe for x in serie_mensual]
+    labels = [x.label for x in serie_mensual]
+
+    def mean_last(n: int) -> float:
+        if not values:
+            return 0.0
+        chunk = values[-n:] if len(values) >= n else values[:]
+        return sum(chunk) / float(len(chunk)) if chunk else 0.0
+
+    curr = values[-1] if values else 0.0
+    prev = values[-2] if len(values) >= 2 else 0.0
+
+    var_abs = curr - prev
+    if prev > 0:
+        var_pct = (var_abs / prev) * 100.0
+    else:
+        var_pct = 100.0 if curr > 0 else 0.0
+
+    m3 = mean_last(3)
+    m6 = mean_last(6)
+    m12 = mean_last(12)
+
+    # tendencia simple:
+    # - UP si m3 > m6 y MoM >= 0
+    # - DOWN si m3 < m6 y MoM <= 0
+    # - si no, FLAT
+    if m3 > m6 and var_abs >= 0:
+        trend = "UP"
+        detail = "La media de los últimos 3 meses está por encima de la de 6 meses y el mes actual no cae vs anterior."
+    elif m3 < m6 and var_abs <= 0:
+        trend = "DOWN"
+        detail = "La media de los últimos 3 meses está por debajo de la de 6 meses y el mes actual cae vs anterior."
+    else:
+        trend = "FLAT"
+        detail = "No se aprecia una tendencia consistente combinando medias 3/6 meses y variación mensual."
+
+    # max/min (ignorando ceros si quieres; aquí los incluimos para ser fieles a datos)
+    max_idx = max(range(len(values)), key=lambda i: values[i]) if values else None
+    min_idx = min(range(len(values)), key=lambda i: values[i]) if values else None
+
+    return EvolutionKpis(
+        variacion_mes_pct=float(round(var_pct, 2)),
+        variacion_mes_abs=float(round(var_abs, 2)),
+        media_3m=float(round(m3, 2)),
+        media_6m=float(round(m6, 2)),
+        media_12m=float(round(m12, 2)),
+        tendencia=trend,  # type: ignore
+        tendencia_detalle=detail,
+        max_mes_label=(labels[max_idx] if max_idx is not None else None),
+        max_mes_importe=(float(round(values[max_idx], 2)) if max_idx is not None else None),
+        min_mes_label=(labels[min_idx] if min_idx is not None else None),
+        min_mes_importe=(float(round(values[min_idx], 2)) if min_idx is not None else None),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -374,24 +540,28 @@ def get_day_to_day_analysis(
     ),
     tipo_id: Optional[str] = Query(
         default=None,
-        description="Tipo concreto de gasto cotidiano (subgasto / tipo_id). Opcional.",
+        description="Tipo concreto de gasto cotidiano (tipo_id). Opcional; si se informa, tiene prioridad sobre categoria.",
+    ),
+    # NUEVO: cuántos meses para serie mensual (para gráficas)
+    months_back: int = Query(
+        default=12,
+        ge=2,
+        le=36,
+        description="Ventana de meses para serie mensual (incluye el mes actual).",
     ),
     db: Session = Depends(get_db),
+    current_user: models.User = Depends(require_user),
 ):
     """
     Devuelve el análisis 'día a día' de los gastos cotidianos.
 
-    Parámetros:
-    - fecha: fecha base (YYYY-MM-DD). Se usa para calcular día, semana y mes.
-    - pago:
-        * 'YO'    -> solo gastos cotidianos donde pagado = True (los pagas tú).
-        * 'OTRO'  -> solo gastos donde pagado = False (los paga otra persona).
-        * 'TODOS' -> mezcla ambos.
-    - categoria: categoría de análisis (SUPERMERCADOS, SUMINISTROS, VEHICULOS, ROPA, RESTURACION, OCIO, OTROS).
-    - tipo_id: tipo concreto de gasto (por ejemplo TIP-GASOLINA-SW1ZQO). Si se informa,
-      tiene prioridad sobre 'categoria' en los filtros.
+    NUEVO (sin romper):
+    - serie_diaria_mes: puntos diarios del mes (relleno con 0)
+    - serie_mensual: evolución últimos N meses (relleno con 0)
+    - kpis_evolucion: KPIs para interpretar la evolución
     """
     base_date = parse_base_date(fecha)
+    user_id = str(current_user.id)
 
     # Rangos de fecha
     month_start, month_next = month_range(base_date)
@@ -410,6 +580,7 @@ def get_day_to_day_analysis(
         )
         .filter(GastoCotidiano.fecha == base_date)
     )
+    today_query = apply_user_filter(today_query, GastoCotidiano, user_id)
     today_query = apply_pago_filter(today_query, GastoCotidiano, pago)
     today_query = apply_categoria_filters(today_query, GastoCotidiano, categoria, tipo_id)
     today_row = today_query.one()
@@ -421,15 +592,12 @@ def get_day_to_day_analysis(
     # Ayer (para diff vs ayer)
     ayer = base_date - timedelta(days=1)
     yesterday_query = (
-        db.query(
-            func.coalesce(func.sum(GastoCotidiano.importe), 0).label("total"),
-        )
+        db.query(func.coalesce(func.sum(GastoCotidiano.importe), 0).label("total"))
         .filter(GastoCotidiano.fecha == ayer)
     )
+    yesterday_query = apply_user_filter(yesterday_query, GastoCotidiano, user_id)
     yesterday_query = apply_pago_filter(yesterday_query, GastoCotidiano, pago)
-    yesterday_query = apply_categoria_filters(
-        yesterday_query, GastoCotidiano, categoria, tipo_id
-    )
+    yesterday_query = apply_categoria_filters(yesterday_query, GastoCotidiano, categoria, tipo_id)
     yesterday_row = yesterday_query.one()
     total_ayer = float(yesterday_row.total or 0)
 
@@ -437,7 +605,6 @@ def get_day_to_day_analysis(
     signo = "+" if diff_vs_ayer_val >= 0 else "-"
     diff_vs_ayer_label = f"{signo} {abs(diff_vs_ayer_val):.2f} € vs ayer"
 
-    # Mensaje de tendencia hoy (muy simple de momento)
     if total_hoy == 0:
         tendencia_texto = "Hoy no has tenido gastos cotidianos."
     elif diff_vs_ayer_val > 0:
@@ -458,18 +625,16 @@ def get_day_to_day_analysis(
     # Semana actual
     # -----------------------------------------------------------------------
     week_query = (
-        db.query(
-            func.coalesce(func.sum(GastoCotidiano.importe), 0).label("total"),
-        )
+        db.query(func.coalesce(func.sum(GastoCotidiano.importe), 0).label("total"))
         .filter(GastoCotidiano.fecha >= week_start)
         .filter(GastoCotidiano.fecha <= week_end)
     )
+    week_query = apply_user_filter(week_query, GastoCotidiano, user_id)
     week_query = apply_pago_filter(week_query, GastoCotidiano, pago)
     week_query = apply_categoria_filters(week_query, GastoCotidiano, categoria, tipo_id)
     week_total_row = week_query.one()
     total_semana = float(week_total_row.total or 0)
 
-    # Días consumidos de la semana (hasta base_date)
     dias_consumidos = (base_date - week_start).days + 1
     dias_consumidos = max(1, min(dias_consumidos, 7))
 
@@ -480,12 +645,11 @@ def get_day_to_day_analysis(
     # Mes en curso
     # -----------------------------------------------------------------------
     month_query = (
-        db.query(
-            func.coalesce(func.sum(GastoCotidiano.importe), 0).label("total"),
-        )
+        db.query(func.coalesce(func.sum(GastoCotidiano.importe), 0).label("total"))
         .filter(GastoCotidiano.fecha >= month_start)
         .filter(GastoCotidiano.fecha < month_next)
     )
+    month_query = apply_user_filter(month_query, GastoCotidiano, user_id)
     month_query = apply_pago_filter(month_query, GastoCotidiano, pago)
     month_query = apply_categoria_filters(month_query, GastoCotidiano, categoria, tipo_id)
     month_total_row = month_query.one()
@@ -493,22 +657,17 @@ def get_day_to_day_analysis(
 
     # Mes anterior
     prev_month_query = (
-        db.query(
-            func.coalesce(func.sum(GastoCotidiano.importe), 0).label("total"),
-        )
+        db.query(func.coalesce(func.sum(GastoCotidiano.importe), 0).label("total"))
         .filter(GastoCotidiano.fecha >= prev_month_start)
         .filter(GastoCotidiano.fecha < prev_month_next)
     )
+    prev_month_query = apply_user_filter(prev_month_query, GastoCotidiano, user_id)
     prev_month_query = apply_pago_filter(prev_month_query, GastoCotidiano, pago)
-    prev_month_query = apply_categoria_filters(
-        prev_month_query, GastoCotidiano, categoria, tipo_id
-    )
+    prev_month_query = apply_categoria_filters(prev_month_query, GastoCotidiano, categoria, tipo_id)
     prev_month_total_row = prev_month_query.one()
     gastado_mes_anterior = float(prev_month_total_row.total or 0)
 
-    # Presupuesto mensual "estimado":
-    # - Si hay histórico del mes anterior, usamos 1.1 * gasto mes anterior.
-    # - Si no hay, usamos 1.3 * gasto actual (o 0 si no hay nada).
+    # Presupuesto mensual estimado (mantengo tu lógica)
     if gastado_mes_anterior > 0:
         presupuesto_mes = gastado_mes_anterior * 1.1
     elif gastado_mes > 0:
@@ -516,7 +675,6 @@ def get_day_to_day_analysis(
     else:
         presupuesto_mes = 0.0
 
-    # Límite semanal aproximado: 1/4 del presupuesto
     limite_semana = presupuesto_mes / 4 if presupuesto_mes > 0 else gastado_mes or 0
 
     week_summary = WeekSummary(
@@ -534,12 +692,8 @@ def get_day_to_day_analysis(
     # -----------------------------------------------------------------------
     # Distribución por categoría (mes actual) + KPIs vs mes anterior
     # -----------------------------------------------------------------------
-    # Mes actual
-    cat_curr = _aggregate_by_category(db, month_start, month_next, pago, categoria, tipo_id)
-    # Mes anterior
-    cat_prev = _aggregate_by_category(
-        db, prev_month_start, prev_month_next, pago, categoria, tipo_id
-    )
+    cat_curr = _aggregate_by_category(db, month_start, month_next, pago, categoria, tipo_id, user_id)
+    cat_prev = _aggregate_by_category(db, prev_month_start, prev_month_next, pago, categoria, tipo_id, user_id)
 
     categorias_mes: List[CategoryMonth] = []
     category_kpis: Dict[str, CategoryKpi] = {}
@@ -547,17 +701,15 @@ def get_day_to_day_analysis(
     total_mes_para_pct = gastado_mes if gastado_mes > 0 else 1.0
 
     for key, data_curr in cat_curr.items():
-        total_cat = data_curr["total"]
+        total_cat = float(data_curr["total"])
         tickets_cat = int(data_curr["tickets"])
 
         pct_sobre_total = (total_cat / total_mes_para_pct) * 100.0
 
-        # Datos mes anterior para esta categoría
         prev_data = cat_prev.get(key, {"total": 0.0, "tickets": 0.0})
-        total_prev = prev_data["total"]
-        tickets_prev = prev_data["tickets"]
+        total_prev = float(prev_data["total"])
+        tickets_prev = float(prev_data["tickets"])
 
-        # Variaciones %
         if total_prev > 0:
             var_importe_pct = ((total_cat - total_prev) / total_prev) * 100.0
         else:
@@ -571,7 +723,7 @@ def get_day_to_day_analysis(
         categorias_mes.append(
             CategoryMonth(
                 key=key,
-                label=key,   # mostramos el nombre de la categoría tal cual (SUPERMERCADOS, OCIO, etc.)
+                label=key,
                 importe=total_cat,
                 porcentaje=pct_sobre_total,
             )
@@ -587,47 +739,54 @@ def get_day_to_day_analysis(
             peso_sobre_total_gasto=pct_sobre_total,
         )
 
-    # Ordenamos categorías por importe desc.
     categorias_mes.sort(key=lambda c: c.importe, reverse=True)
 
     # -----------------------------------------------------------------------
     # Proveedores destacados por categoría (mes actual)
     # -----------------------------------------------------------------------
     proveedores_por_categoria = _aggregate_providers_by_category(
-        db, month_start, month_next, pago, categoria, tipo_id
+        db, month_start, month_next, pago, categoria, tipo_id, user_id
     )
 
     # -----------------------------------------------------------------------
     # Últimos 7 días
     # -----------------------------------------------------------------------
-    ultimos_7_dias = _aggregate_last_7_days(db, base_date, pago, categoria, tipo_id)
+    ultimos_7_dias = _aggregate_last_7_days(db, base_date, pago, categoria, tipo_id, user_id)
 
     # -----------------------------------------------------------------------
-    # Alertas sencillas
+    # NUEVO: series para gráficas + KPIs de evolución
+    # -----------------------------------------------------------------------
+    serie_diaria_mes = _daily_series_for_month(db, month_start, month_next, pago, categoria, tipo_id, user_id)
+    serie_mensual = _monthly_series_last_n(db, base_date, months_back, pago, categoria, tipo_id, user_id)
+    kpis_evolucion = _compute_evolution_kpis(serie_mensual)
+
+    # -----------------------------------------------------------------------
+    # Alertas sencillas (mantengo y añado 1-2 relacionadas con tendencia)
     # -----------------------------------------------------------------------
     alertas: List[str] = []
 
-    pct_mes_usado = (
-        (gastado_mes / presupuesto_mes) * 100.0 if presupuesto_mes > 0 else 0.0
-    )
+    pct_mes_usado = (gastado_mes / presupuesto_mes) * 100.0 if presupuesto_mes > 0 else 0.0
 
     if presupuesto_mes > 0:
         alertas.append(
             f"Has consumido el {pct_mes_usado:.1f}% del presupuesto mensual estimado de gastos cotidianos."
         )
 
-    # Alertas por concentración en categorías
     for cat in categorias_mes:
         if cat.porcentaje >= 40:
-            alertas.append(
-                f"{cat.label} concentra el {cat.porcentaje:.1f}% de tu gasto mensual."
-            )
+            alertas.append(f"{cat.label} concentra el {cat.porcentaje:.1f}% de tu gasto mensual.")
+
+    # Alertas de evolución mensual
+    if kpis_evolucion.variacion_mes_abs > 0:
+        alertas.append(f"Este mes vas +{kpis_evolucion.variacion_mes_abs:.2f} € vs el mes anterior.")
+    elif kpis_evolucion.variacion_mes_abs < 0:
+        alertas.append(f"Este mes vas {kpis_evolucion.variacion_mes_abs:.2f} € vs el mes anterior.")
 
     if not alertas:
         alertas.append("No hay alertas destacadas este mes en tus gastos cotidianos.")
 
     # -----------------------------------------------------------------------
-    # Construir respuesta
+    # Respuesta (compatibilidad total + nuevos campos)
     # -----------------------------------------------------------------------
     return DayToDayAnalysisResponse(
         today=today_summary,
@@ -638,4 +797,9 @@ def get_day_to_day_analysis(
         proveedores_por_categoria=proveedores_por_categoria,
         ultimos_7_dias=ultimos_7_dias,
         alertas=alertas,
+
+        # nuevos
+        serie_diaria_mes=serie_diaria_mes,
+        serie_mensual=serie_mensual,
+        kpis_evolucion=kpis_evolucion,
     )

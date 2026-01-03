@@ -75,6 +75,8 @@ import ReinciarCierreScreen from '../screens/cierres/ReinciarCierreScreen';
 import ReiniciarMesScreen from '../screens/cierres/ReiniciarMesScreen';
 import ReiniciarMesPreviewScreen from '../screens/cierres/ReiniciarMesPreviewScreen';
 import InversionesStack from './InversionesStack'
+import DayToDayKpisScreen from '../screens/dia/DayToDayKpisScreen';
+
 
 
 // ✅ Sistema reusable de info “i”
@@ -222,6 +224,23 @@ export type DayToDayStackParamList = {
         initialSearch?: string;
       }
     | undefined;
+
+    DayToDayKpisScreen:
+    | {
+        fromHome?: boolean;
+
+        // Opcional: si vienes desde Analysis, puedes “arrastrar” filtros
+        pago?: 'TODOS' | 'YO' | 'OTRO';
+        view?: 'GENERAL' | 'CATEGORIA';
+        categoria?: string | null;
+        tipoId?: string | null;
+
+        // Back consistente con el resto
+        returnToTab?: keyof MainTabsParamList;
+        returnToScreen?: string;
+      }
+    | undefined;
+
 };
 
 export type MonthStackParamList = {
@@ -1165,6 +1184,8 @@ function DayToDayStackNavigator() {
       <DayToDayStack.Screen name="IngresoForm" component={IngresoFormScreen} />
 
       <DayToDayStack.Screen name="DayToDayAnalysisScreen" component={DayToDayAnalysisScreen} />
+      <DayToDayStack.Screen name="DayToDayKpisScreen" component={DayToDayKpisScreen} />
+
     </DayToDayStack.Navigator>
   );
 }

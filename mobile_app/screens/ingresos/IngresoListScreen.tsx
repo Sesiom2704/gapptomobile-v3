@@ -106,11 +106,28 @@ type EstadoFiltro = 'todos' | 'activos' | 'inactivos';
 type PagadoFiltro = 'todos' | 'pagado' | 'no_pagado';
 type KpiFiltro = 'todos' | 'kpi_si' | 'kpi_no';
 
-function getNombreTipoIngreso(ing: Ingreso): string {
-  if (ing.tipo_nombre && ing.tipo_nombre.trim() !== '') return ing.tipo_nombre;
-  if (ing.tipo_id && ing.tipo_id.trim() !== '') return ing.tipo_id;
+function getNombreTipoIngreso(
+  ing: Ingreso,
+  catalogoTipos: TipoIngreso[]
+): string {
+  // 1) Si el backend ya trae el nombre, lo usamos
+  const directo = (ing.tipo_nombre ?? '').trim();
+  if (directo) return directo;
+
+  // 2) Si no, resolvemos por catálogo (id -> nombre)
+  const id = (ing.tipo_id ?? '').trim();
+  if (id) {
+    const found = (catalogoTipos ?? []).find((t) => (t.id ?? '').trim() === id);
+    const nombre = (found?.nombre ?? '').trim();
+    if (nombre) return nombre;
+
+    // 3) Fallback: si no existe en catálogo, al menos mostramos el id
+    return id;
+  }
+
   return 'Ingreso';
 }
+
 
 function formatRangoCobroLabel(ing: Ingreso): string {
   const rc = (ing.rango_cobro || '').trim();
@@ -474,8 +491,9 @@ export const IngresoListScreen: React.FC<Props> = ({ navigation }) => {
         const hayCoincidencia =
           (ing.concepto ?? '').toLowerCase().includes(term) ||
           (ing.cuenta_nombre ?? '').toLowerCase().includes(term) ||
-          (ing.tipo_nombre ?? '').toLowerCase().includes(term) ||
+          getNombreTipoIngreso(ing, catalogoTipos).toLowerCase().includes(term) ||
           (ing.segmento_nombre ?? '').toLowerCase().includes(term);
+
 
         if (!hayCoincidencia) return false;
       }
@@ -500,7 +518,7 @@ export const IngresoListScreen: React.FC<Props> = ({ navigation }) => {
 
       return true;
     });
-  }, [ingresos, searchText, filtroPeriodicidad, filtroTipo, filtroEstado, filtroPagado, filtroKpi]);
+  }, [ingresos, searchText, filtroPeriodicidad, filtroTipo, filtroEstado, filtroPagado, filtroKpi, catalogoTipos]);
 
   // =========================================================
   // ✅ VACÍO INTELIGENTE (helpers únicos - sin duplicados)
@@ -986,7 +1004,7 @@ export const IngresoListScreen: React.FC<Props> = ({ navigation }) => {
       >
         {ingresosFiltrados.map((ing) => {
           const titulo = ing.concepto || 'SIN CONCEPTO';
-          const category = getNombreTipoIngreso(ing);
+          const category = getNombreTipoIngreso(ing, catalogoTipos);
 
           return (
             <ExpenseCard

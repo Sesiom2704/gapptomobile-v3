@@ -127,7 +127,32 @@ const DiaADiaScreen: React.FC = () => {
               />
             </TouchableOpacity>
 
-            {/* Movimientos del mes */}
+            {/* Análisis día a día */}
+            <TouchableOpacity
+              style={panelStyles.menuCard}
+              onPress={() => navigation.navigate('DayToDayAnalysisScreen')}
+            >
+              <View style={panelStyles.menuIconCircleSecondary}>
+                <Ionicons
+                  name="analytics-outline"
+                  size={22}
+                  color={colors.primary}
+                />
+              </View>
+              <View style={panelStyles.menuTextContainer}>
+                <Text style={panelStyles.menuTitle}>Análisis día a día</Text>
+                <Text style={panelStyles.menuSubtitle}>
+                  Detalle de gastos cotidianos por día, semana y mes.
+                </Text>
+              </View>
+              <Ionicons
+                name="chevron-forward"
+                size={18}
+                color={colors.textSecondary}
+              />
+            </TouchableOpacity>
+
+                        {/* Movimientos del mes */}
             <TouchableOpacity
               style={panelStyles.menuCard}
               onPress={irAMovimientos}
@@ -153,31 +178,7 @@ const DiaADiaScreen: React.FC = () => {
                 color={colors.textSecondary}
               />
             </TouchableOpacity>
-
-            {/* Análisis día a día */}
-            <TouchableOpacity
-              style={panelStyles.menuCard}
-              onPress={() => navigation.navigate('DayToDayAnalysisScreen')}
-            >
-              <View style={panelStyles.menuIconCircleSecondary}>
-                <Ionicons
-                  name="analytics-outline"
-                  size={22}
-                  color={colors.primary}
-                />
-              </View>
-              <View style={panelStyles.menuTextContainer}>
-                <Text style={panelStyles.menuTitle}>Análisis día a día</Text>
-                <Text style={panelStyles.menuSubtitle}>
-                  Detalle de gastos cotidianos por día, semana y mes.
-                </Text>
-              </View>
-              <Ionicons
-                name="chevron-forward"
-                size={18}
-                color={colors.textSecondary}
-              />
-            </TouchableOpacity>
+            
           </View>
         </ScrollView>
       </View>

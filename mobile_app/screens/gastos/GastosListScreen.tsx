@@ -480,6 +480,20 @@ export const GastosListScreen: React.FC<{ navigation: any; route: any }> = ({
     }
   }, [filtro]);
 
+  // ======= Helpers  =======
+
+  function parseRangoPago(rango?: string | null): { desde: number; hasta: number } | null {
+    const rc = (rango ?? '').trim();
+    if (!rc) return null;
+
+    const [dRaw, hRaw] = rc.split('-').map((p) => p.trim());
+    const desde = Number(dRaw);
+    const hasta = Number(hRaw);
+
+    if (!Number.isFinite(desde) || !Number.isFinite(hasta)) return null;
+    return { desde, hasta };
+  }
+
   // ======= Helpers de formato =======
 
   const getSegmentoNombre = (gasto: Gasto): string => {
@@ -603,6 +617,7 @@ export const GastosListScreen: React.FC<{ navigation: any; route: any }> = ({
   const listaGestionables = useMemo(() => {
     const base = gastosFiltrados;
 
+    // 1) "Todos": mantener comportamiento actual (fecha DESC)
     if (filtro === 'todos') {
       return [...base].sort((a, b) => {
         const ta = new Date(a.fecha).getTime();
@@ -616,9 +631,34 @@ export const GastosListScreen: React.FC<{ navigation: any; route: any }> = ({
       });
     }
 
-    // pendientes (y cualquier otro estado gestionable): no tocar orden actual
+    // 2) "Pendientes": ordenar por rango_pago (desde ASC, hasta ASC)
+    if (filtro === 'pendientes') {
+      return [...base].sort((a, b) => {
+        const ra = parseRangoPago(a.rango_pago);
+        const rb = parseRangoPago(b.rango_pago);
+
+        // Los que no tengan rango, al final (y mantenemos orden relativo)
+        if (!ra && !rb) return 0;
+        if (!ra) return 1;
+        if (!rb) return -1;
+
+        if (ra.desde !== rb.desde) return ra.desde - rb.desde;
+        if (ra.hasta !== rb.hasta) return ra.hasta - rb.hasta;
+
+        // Desempate: por fecha DESC para estabilidad visual
+        const ta = new Date(a.fecha).getTime();
+        const tb = new Date(b.fecha).getTime();
+        if (Number.isNaN(ta) && Number.isNaN(tb)) return 0;
+        if (Number.isNaN(ta)) return 1;
+        if (Number.isNaN(tb)) return -1;
+        return tb - ta;
+      });
+    }
+
+    // 3) Otros (activos, etc.): mantener como venía (sin tocar)
     return base;
   }, [gastosFiltrados, filtro]);
+
 
   // ======= Filtros LOCALES para cotidianos =======
   const aplicarFiltrosCotidianos = useMemo(() => {
