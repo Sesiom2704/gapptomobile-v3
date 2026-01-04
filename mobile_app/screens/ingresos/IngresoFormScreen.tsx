@@ -16,6 +16,7 @@
  *   - Navegación:
  *       - Retorno explícito (returnToTab/returnToScreen/returnToParams) con prioridad.
  *       - Compatibilidad con flags legacy (fromHome/fromDiaADia).
+ *       - Alta auxiliar (AuxEntityForm) para tipo_ingreso (con preselección al volver).
  *
  * Reglas funcionales relevantes:
  *   - Duplicado:
@@ -28,12 +29,21 @@
  *
  * Notas:
  *   - La selección de Vivienda se muestra solo si el tipo de ingreso contiene “VIVIENDA” (por nombre).
- *   - Metadatos (createOn/modifiedOn/etc.) se presentan solo en edición y en modo avanzado.
+ *   - Metadatos (createOn/modifiedOn/etc.) se presentan solo en edición/consulta y en modo avanzado.
  *
- * Cambios aplicados (replicar patrón gestionables):
- *   - Header subtitle indica modo: Alta nueva / Edición / Consulta / Duplicado.
- *   - Fecha usa FormDateButton.
- *   - Bugfix: unificación de estado del DateTimePicker (antes había showDatePicker y showFechaPicker mezclados).
+ * Mejoras solicitadas en este paso:
+ *   1) Tipo de ingreso:
+ *      - Añadir botón "+" (InlineAddButton) para crear tipo de ingreso.
+ *      - Al volver desde AuxEntityForm, el tipo recién creado debe quedar preseleccionado.
+ *
+ *   2) Opciones avanzadas:
+ *      - Añadir “flecha” (chevron) para desplegar/ocultar.
+ *      - Mostrar la sección SOLO cuando estamos editando/consultando un ingreso existente
+ *        (es decir: existe ingresoSource y NO estamos en duplicado).
+ *      - En creación (alta nueva) y duplicado: NO aparece la sección avanzada.
+ *
+ * Bugfix mantenido:
+ *   - Unificación de estado del DateTimePicker (showDatePicker).
  */
 
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
@@ -45,8 +55,11 @@ import {
   RefreshControl,
   ScrollView,
   ActivityIndicator,
+  TouchableOpacity,
 } from 'react-native';
 import DateTimePicker from '@react-native-community/datetimepicker';
+import { Ionicons } from '@expo/vector-icons';
+import { useFocusEffect } from '@react-navigation/native';
 
 import { Screen } from '../../components/layout/Screen';
 import { Header } from '../../components/layout/Header';
@@ -55,6 +68,9 @@ import { PillButton } from '../../components/ui/PillButton';
 import { AccountPill } from '../../components/ui/AccountPill';
 import { commonFormStyles } from '../../components/forms/formStyles';
 import { FormActionButton } from '../../components/ui/FormActionButton';
+import { InlineAddButton } from '../../components/ui/InlineAddButton';
+import { FormDateButton } from '../../components/ui/FormDateButton';
+import { colors } from '../../theme';
 
 import { PERIODICIDADES } from '../../constants/finance';
 import { RANGOS_PAGO } from '../../constants/general';
@@ -63,8 +79,6 @@ import { fetchTiposIngreso, fetchCuentas, fetchViviendas } from '../../services/
 import { createIngreso, updateIngreso } from '../../services/ingresosApi';
 
 import { EuroformatEuro, parseImporte, appendMonthYearSuffix, formatFechaCorta } from '../../utils/format';
-import { FormDateButton } from '../../components/ui/FormDateButton';
-
 import { useResetFormOnFocus } from '../../utils/formsUtils';
 
 // ---- Tipos locales ----
@@ -91,6 +105,7 @@ type Vivienda = {
 type Props = {
   navigation: any;
   route: {
+    key?: string;
     params?: {
       mode?: IngresoMode;
       ingreso?: any;
@@ -104,8 +119,13 @@ type Props = {
       fromHome?: boolean;
       fromDiaADia?: boolean;
 
-      // Nota: este form no usa auxResult actualmente, pero lo dejamos compatible
-      auxResult?: unknown;
+      /**
+       * Resultado de alta auxiliar (AuxEntityForm).
+       * Esperamos la forma:
+       *   { type: 'tipo_ingreso', item: TipoIngreso }
+       * (mantenemos el mismo patrón que en otras pantallas).
+       */
+      auxResult?: any;
     };
   };
 };
@@ -181,12 +201,20 @@ function normalizePagoUnico(value: string): string {
 const IngresoFormScreen: React.FC<Props> = ({ navigation, route }) => {
   const styles = commonFormStyles;
 
+  // ========================
+  // Modo de pantalla
+  // ========================
   const mode: IngresoMode = route?.params?.mode ?? 'gestionable';
   const duplicate: boolean = route?.params?.duplicate === true;
 
   const ingresoSource = route?.params?.ingreso ?? null;
   const readOnly: boolean = route?.params?.readOnly ?? false;
 
+  /**
+   * isEdit (concepto de “existe ingreso en backend y no estamos duplicando”).
+   * Nota: readOnly puede ser true y seguir siendo “edición” en el sentido de que existe el ingreso;
+   * lo usamos para mostrar metadatos/avanzado pero sin permitir cambios.
+   */
   const isEdit = !!ingresoSource && !duplicate;
   const ingresoAny = ingresoSource as any;
 
@@ -219,15 +247,22 @@ const IngresoFormScreen: React.FC<Props> = ({ navigation, route }) => {
     navigation.goBack();
   };
 
+  // ========================
+  // Catálogos
+  // ========================
   const [tipos, setTipos] = useState<TipoIngreso[]>([]);
   const [cuentas, setCuentas] = useState<Cuenta[]>([]);
   const [viviendas, setViviendas] = useState<Vivienda[]>([]);
 
-  // 1. Datos básicos
+  // ========================
+  // 1) Datos básicos
+  // ========================
   const [concepto, setConcepto] = useState<string>(ingresoSource?.concepto ?? '');
   const [tipoId, setTipoId] = useState<string | null>(ingresoSource?.tipo_id ?? null);
 
-  // 2. Vinculaciones
+  // ========================
+  // 2) Vinculaciones
+  // ========================
   const [cuentaId, setCuentaId] = useState<string | null>(ingresoSource?.cuenta_id ?? null);
   const [viviendaId, setViviendaId] = useState<string | null>(ingresoSource?.referencia_vivienda_id ?? null);
 
@@ -236,7 +271,9 @@ const IngresoFormScreen: React.FC<Props> = ({ navigation, route }) => {
     ingresoSource?.importe != null ? String(ingresoSource.importe) : ''
   );
 
+  // ========================
   // Fecha y rango
+  // ========================
   const [fechaInicio, setFechaInicio] = useState<string>(() => {
     if (ingresoSource?.fecha_inicio) return ingresoSource.fecha_inicio;
     return toApiDate(new Date());
@@ -259,12 +296,14 @@ const IngresoFormScreen: React.FC<Props> = ({ navigation, route }) => {
     return mode === 'extraordinario' ? 'PAGO UNICO' : 'MENSUAL';
   });
 
+  // ========================
   // Estado / meta
+  // ========================
   const [activo, setActivo] = useState<boolean>(ingresoSource?.activo ?? mode === 'gestionable');
   const [cobrado, setCobrado] = useState<boolean>(ingresoSource?.cobrado ?? false);
   const [kpi, setKpi] = useState<boolean>(ingresoSource?.kpi ?? mode === 'gestionable');
 
-  // Metadatos (solo visual)
+  // Metadatos (solo visual; normalmente vienen en edición)
   const createOn: string | null = ingresoAny?.createon ?? null;
   const modifiedOn: string | null = ingresoAny?.modifiedon ?? null;
   const inactivatedOn: string | null = ingresoAny?.inactivatedon ?? null;
@@ -272,6 +311,10 @@ const IngresoFormScreen: React.FC<Props> = ({ navigation, route }) => {
   const userName: string | null =
     ingresoAny?.user_nombre ?? ingresoAny?.userName ?? ingresoAny?.user_id ?? null;
 
+  /**
+   * Toggle de “avanzado”.
+   * Importante: la sección avanzada SOLO se muestra cuando isEdit=true (existe ingreso y no duplicado).
+   */
   const [showAdvanced, setShowAdvanced] = useState<boolean>(false);
 
   // Loading / saving / refresh
@@ -304,6 +347,7 @@ const IngresoFormScreen: React.FC<Props> = ({ navigation, route }) => {
     setCobrado(false);
     setKpi(mode === 'gestionable');
 
+    // En alta no queremos mantener el estado avanzado (aunque no se muestre)
     setShowAdvanced(false);
   }, [mode]);
 
@@ -315,7 +359,9 @@ const IngresoFormScreen: React.FC<Props> = ({ navigation, route }) => {
     onReset: resetFormToNew,
   });
 
+  // ========================
   // Duplicado: comportamiento
+  // ========================
   useEffect(() => {
     if (!duplicate || !ingresoSource) return;
 
@@ -334,6 +380,9 @@ const IngresoFormScreen: React.FC<Props> = ({ navigation, route }) => {
     }
   }, [duplicate, ingresoSource]);
 
+  // ========================
+  // Carga catálogos base
+  // ========================
   const loadData = useCallback(async () => {
     try {
       setLoading(true);
@@ -364,6 +413,55 @@ const IngresoFormScreen: React.FC<Props> = ({ navigation, route }) => {
     void loadData();
   };
 
+  // ========================
+  // ✅ Retorno desde AuxEntityForm: tipo_ingreso
+  //   - Refresca tipos
+  //   - Hace merge
+  //   - Preselecciona el nuevo tipo
+  // ========================
+  useFocusEffect(
+    React.useCallback(() => {
+      let alive = true;
+
+      (async () => {
+        const res = route?.params?.auxResult;
+        if (!res) return;
+
+        try {
+          if (res.type === 'tipo_ingreso' && res.item) {
+            const nuevoTipo = res.item as TipoIngreso;
+
+            const tiposRes = await fetchTiposIngreso();
+            if (!alive) return;
+
+            // Merge estable: asegura que el nuevo tipo esté disponible en la lista
+            const merged = (() => {
+              const map = new Map<string, TipoIngreso>();
+              map.set(nuevoTipo.id, nuevoTipo);
+              for (const t of tiposRes ?? []) map.set(t.id, t);
+              return Array.from(map.values());
+            })();
+
+            setTipos(merged);
+
+            // ✅ Preselección automática del tipo recién creado
+            setTipoId(nuevoTipo.id);
+          }
+        } finally {
+          // Limpieza para evitar reprocesado al volver a foco
+          navigation.setParams({ auxResult: undefined });
+        }
+      })();
+
+      return () => {
+        alive = false;
+      };
+    }, [route?.params?.auxResult, navigation])
+  );
+
+  // ========================
+  // Helpers UI
+  // ========================
   const getCuentaLabel = (cta: Cuenta): string => cta.anagrama || cta.nombre || cta.id;
   const getViviendaLabel = (viv: Vivienda): string => viv.referencia || viv.id;
 
@@ -385,6 +483,23 @@ const IngresoFormScreen: React.FC<Props> = ({ navigation, route }) => {
   const isTipoVivienda =
     !!tipoSeleccionado && tipoSeleccionado.nombre.toUpperCase().includes('VIVIENDA');
 
+  // ========================
+  // Acción: crear tipo ingreso (AuxEntityForm)
+  // ========================
+  const handleAddTipoIngreso = () => {
+    if (readOnly) return;
+
+    navigation.navigate('AuxEntityForm', {
+      auxType: 'tipo_ingreso',
+      origin: 'ingresos',
+      returnKey: 'ingresos-tipo_ingreso',
+      returnRouteKey: route.key,
+    });
+  };
+
+  // ========================
+  // Guardado
+  // ========================
   const handleSave = async () => {
     if (readOnly) return;
 
@@ -436,12 +551,14 @@ const IngresoFormScreen: React.FC<Props> = ({ navigation, route }) => {
         const per = normalizePagoUnico(periodicidad);
         const nowIso = new Date().toISOString();
 
+        // En duplicado mantenemos flags según lógica previa
         if (duplicate) {
           payload.activo = activo;
           payload.cobrado = cobrado;
           payload.kpi = kpi;
         }
 
+        // Caso especial duplicado PAGO ÚNICO
         if (duplicate && per === 'PAGO UNICO') {
           payload.cobrado = true;
           payload.activo = false;
@@ -471,8 +588,11 @@ const IngresoFormScreen: React.FC<Props> = ({ navigation, route }) => {
     }
   };
 
+  // ========================
+  // Header
+  // ========================
   const headerTitle = useMemo(() => {
-    // Título base (más estable) y el modo va en subtitle
+    // Título base (estable); el modo va en subtitle
     return mode === 'extraordinario' ? 'Ingreso extraordinario' : 'Ingreso gestionable';
   }, [mode]);
 
@@ -483,6 +603,9 @@ const IngresoFormScreen: React.FC<Props> = ({ navigation, route }) => {
     return 'Alta nueva';
   }, [readOnly, duplicate, isEdit]);
 
+  // ========================
+  // Loading state
+  // ========================
   if (loading) {
     return (
       <Screen>
@@ -496,6 +619,13 @@ const IngresoFormScreen: React.FC<Props> = ({ navigation, route }) => {
     );
   }
 
+  /**
+   * La sección avanzada SOLO se muestra en edición/consulta de ingreso existente.
+   * - Alta nueva: NO
+   * - Duplicado: NO
+   */
+  const canShowAdvancedSection = !!ingresoSource && !duplicate;
+
   return (
     <Screen>
       <View style={styles.topArea}>
@@ -508,6 +638,9 @@ const IngresoFormScreen: React.FC<Props> = ({ navigation, route }) => {
         refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} />}
         showsVerticalScrollIndicator={false}
       >
+        {/* =======================
+            DATOS BÁSICOS
+           ======================= */}
         <FormSection title="Datos básicos">
           <View style={styles.field}>
             <Text style={styles.label}>Nombre del ingreso</Text>
@@ -520,8 +653,19 @@ const IngresoFormScreen: React.FC<Props> = ({ navigation, route }) => {
             />
           </View>
 
+          {/* Tipo de ingreso + botón "+" */}
           <View style={styles.field}>
-            <Text style={styles.label}>Tipo de ingreso</Text>
+            <View style={styles.labelRow}>
+              <Text style={styles.label}>Tipo de ingreso</Text>
+
+              {/* ✅ Mejora 1: botón + que abre AuxEntityForm */}
+              <InlineAddButton
+                onPress={handleAddTipoIngreso}
+                disabled={readOnly}
+                accessibilityLabel="Crear tipo de ingreso"
+              />
+            </View>
+
             <View style={styles.segmentosRow}>
               {tipos.map((t) => (
                 <View key={t.id} style={styles.segmentoWrapper}>
@@ -539,6 +683,9 @@ const IngresoFormScreen: React.FC<Props> = ({ navigation, route }) => {
           </View>
         </FormSection>
 
+        {/* =======================
+            IMPORTE Y CONDICIONES
+           ======================= */}
         <FormSection title="Importe y condiciones">
           <View style={styles.field}>
             <Text style={styles.label}>Importe</Text>
@@ -571,6 +718,9 @@ const IngresoFormScreen: React.FC<Props> = ({ navigation, route }) => {
           </View>
         </FormSection>
 
+        {/* =======================
+            VINCULACIONES
+           ======================= */}
         <FormSection title="Vinculaciones">
           {isTipoVivienda && (
             <View style={styles.field}>
@@ -613,6 +763,9 @@ const IngresoFormScreen: React.FC<Props> = ({ navigation, route }) => {
           </View>
         </FormSection>
 
+        {/* =======================
+            ESTADO Y PLANIFICACIÓN
+           ======================= */}
         <FormSection title="Estado y planificación">
           <View style={styles.field}>
             <Text style={styles.label}>Fecha</Text>
@@ -655,107 +808,120 @@ const IngresoFormScreen: React.FC<Props> = ({ navigation, route }) => {
           </View>
         </FormSection>
 
-        <FormSection title="Opciones avanzadas">
-          <View style={styles.advancedToggle}>
-            <Text
-              style={styles.advancedToggleText}
-              onPress={() => {
-                if (readOnly) return;
-                setShowAdvanced((v) => !v);
-              }}
+        {/* =======================
+            OPCIONES AVANZADAS (solo edición/consulta de existente)
+           ======================= */}
+        {canShowAdvancedSection && (
+          <FormSection title="Opciones avanzadas">
+            {/* ✅ Mejora 2: toggle con flecha (chevron) */}
+            <TouchableOpacity
+              style={styles.advancedToggle}
+              onPress={() => setShowAdvanced((v) => !v)}
             >
-              {showAdvanced ? 'Ocultar opciones avanzadas' : 'Mostrar opciones avanzadas'}
-            </Text>
-          </View>
+              <Ionicons
+                name={showAdvanced ? 'chevron-up' : 'chevron-down'}
+                size={16}
+                color={colors.textSecondary}
+              />
+              <Text style={styles.advancedToggleText}>
+                {showAdvanced ? 'Ocultar opciones avanzadas' : 'Mostrar opciones avanzadas'}
+              </Text>
+            </TouchableOpacity>
 
-          {showAdvanced && (
-            <>
-              <View style={styles.field}>
-                <Text style={styles.label}>Estado</Text>
-                <View style={styles.segmentosRow}>
-                  <View style={styles.segmentoWrapper}>
-                    <PillButton
-                      label="Activo"
-                      selected={activo}
-                      onPress={() => {
-                        if (readOnly) return;
-                        setActivo((v) => !v);
-                      }}
+            {showAdvanced && (
+              <>
+                {/* Estado (editable solo si no es readOnly) */}
+                <View style={styles.field}>
+                  <Text style={styles.label}>Estado</Text>
+                  <View style={styles.segmentosRow}>
+                    <View style={styles.segmentoWrapper}>
+                      <PillButton
+                        label="Activo"
+                        selected={activo}
+                        onPress={() => {
+                          if (readOnly) return;
+                          setActivo((v) => !v);
+                        }}
+                      />
+                    </View>
+                    <View style={styles.segmentoWrapper}>
+                      <PillButton
+                        label="Cobrado"
+                        selected={cobrado}
+                        onPress={() => {
+                          if (readOnly) return;
+                          setCobrado((v) => !v);
+                        }}
+                      />
+                    </View>
+                    <View style={styles.segmentoWrapper}>
+                      <PillButton
+                        label="KPI"
+                        selected={kpi}
+                        onPress={() => {
+                          if (readOnly) return;
+                          setKpi((v) => !v);
+                        }}
+                      />
+                    </View>
+                  </View>
+                </View>
+
+                {/* Metadatos (solo visual; ya estamos en existente) */}
+                <View style={styles.fieldRowTwoCols}>
+                  <View style={styles.col}>
+                    <Text style={styles.label}>Creado el</Text>
+                    <TextInput
+                      style={[styles.input, styles.inputAdvanced]}
+                      editable={false}
+                      value={createOn ? formatDateDisplay(createOn) : ''}
                     />
                   </View>
-                  <View style={styles.segmentoWrapper}>
-                    <PillButton
-                      label="Cobrado"
-                      selected={cobrado}
-                      onPress={() => {
-                        if (readOnly) return;
-                        setCobrado((v) => !v);
-                      }}
-                    />
-                  </View>
-                  <View style={styles.segmentoWrapper}>
-                    <PillButton
-                      label="KPI"
-                      selected={kpi}
-                      onPress={() => {
-                        if (readOnly) return;
-                        setKpi((v) => !v);
-                      }}
+                  <View style={styles.col}>
+                    <Text style={styles.label}>Inactivado el</Text>
+                    <TextInput
+                      style={[styles.input, styles.inputAdvanced]}
+                      editable={false}
+                      value={inactivatedOn ? formatDateDisplay(inactivatedOn) : ''}
                     />
                   </View>
                 </View>
-              </View>
 
-              {isEdit && (
-                <>
-                  <View style={styles.fieldRowTwoCols}>
-                    <View style={styles.col}>
-                      <Text style={styles.label}>Creado el</Text>
-                      <TextInput
-                        style={[styles.input, styles.inputAdvanced]}
-                        editable={false}
-                        value={createOn ? formatDateDisplay(createOn) : ''}
-                      />
-                    </View>
-                    <View style={styles.col}>
-                      <Text style={styles.label}>Inactivado el</Text>
-                      <TextInput
-                        style={[styles.input, styles.inputAdvanced]}
-                        editable={false}
-                        value={inactivatedOn ? formatDateDisplay(inactivatedOn) : ''}
-                      />
-                    </View>
+                <View style={styles.fieldRowTwoCols}>
+                  <View style={styles.col}>
+                    <Text style={styles.label}>Último cobro</Text>
+                    <TextInput
+                      style={[styles.input, styles.inputAdvanced]}
+                      editable={false}
+                      value={ultimoIngresoOn ? formatDateDisplay(ultimoIngresoOn) : ''}
+                    />
                   </View>
-
-                  <View style={styles.fieldRowTwoCols}>
-                    <View style={styles.col}>
-                      <Text style={styles.label}>Último cobro</Text>
-                      <TextInput
-                        style={[styles.input, styles.inputAdvanced]}
-                        editable={false}
-                        value={ultimoIngresoOn ? formatDateDisplay(ultimoIngresoOn) : ''}
-                      />
-                    </View>
-                    <View style={styles.col}>
-                      <Text style={styles.label}>Modificado el</Text>
-                      <TextInput
-                        style={[styles.input, styles.inputAdvanced]}
-                        editable={false}
-                        value={modifiedOn ? formatDateDisplay(modifiedOn) : ''}
-                      />
-                    </View>
+                  <View style={styles.col}>
+                    <Text style={styles.label}>Modificado el</Text>
+                    <TextInput
+                      style={[styles.input, styles.inputAdvanced]}
+                      editable={false}
+                      value={modifiedOn ? formatDateDisplay(modifiedOn) : ''}
+                    />
                   </View>
+                </View>
 
-                  <View style={styles.field}>
-                    <Text style={styles.label}>Usuario</Text>
-                    <TextInput style={[styles.input, styles.inputAdvanced]} editable={false} value={userName ?? ''} />
-                  </View>
-                </>
-              )}
-            </>
-          )}
-        </FormSection>
+                <View style={styles.field}>
+                  <Text style={styles.label}>Usuario</Text>
+                  <TextInput
+                    style={[styles.input, styles.inputAdvanced]}
+                    editable={false}
+                    value={userName ?? ''}
+                  />
+                </View>
+              </>
+            )}
+          </FormSection>
+        )}
 
+        {/* =======================
+            ACCIÓN GUARDAR
+           ======================= */}
         {!readOnly ? (
           <View style={{ marginTop: 12 }}>
             <FormActionButton
