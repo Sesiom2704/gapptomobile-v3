@@ -1,14 +1,22 @@
+# backend/app/schemas/proveedores.py
 """
-Schemas Pydantic para PROVEEDORES en GapptoMobile v3.
+Schemas Pydantic para PROVEEDORES (GapptoMobile v3)
 
-La idea es separar claramente:
-- ProveedorBase: campos de negocio comunes (nombre, rama, ubicación).
-- ProveedorCreate: payload de entrada al crear un proveedor.
-- ProveedorUpdate: payload parcial para actualizar un proveedor.
-- ProveedorRead: forma en la que devolvemos el proveedor al cliente.
+Objetivo de unificación:
+- Evitar duplicidad de esquemas (proveedor.py vs proveedores.py).
+- Garantizar que ProveedorCreate/Update tengan SIEMPRE:
+    - localidad_id (opcional) para flujo normalizado
+    - localidad/comunidad/pais (opcionales) para compatibilidad legacy
+- Mantener compatibilidad hacia atrás:
+    - Permitir que el cliente envíe "id" (opcional) en Create si existía antes.
+      El backend puede ignorarlo y generar ID propio (como ya haces).
+- Definir un ProveedorRead estable para la app móvil:
+    - Incluye campos legacy y normalizados (localidad_rel) si el backend los expone.
+    - Incluye rama_rel opcional, porque tu UI la usa en edición.
 
-NOTA: La validación "LOCALIDAD/PAÍS/COMUNIDAD obligatorios según rama"
-se hace en el router (reglas de negocio), no aquí.
+Nota:
+- La validación "obligatorio según rama" (localidad/pais/comunidad) se mantiene en el router,
+  porque es una regla de negocio (no un simple constraint de esquema).
 """
 
 from __future__ import annotations
@@ -17,102 +25,120 @@ from typing import Optional
 
 from pydantic import BaseModel, Field, ConfigDict
 
+from .localidad import LocalidadWithContext
 
-class ProveedorBase(BaseModel):
+
+# -----------------------------------------------------------------------------
+# Subschemas de relaciones (opcionales)
+# -----------------------------------------------------------------------------
+class RamaProveedorRel(BaseModel):
     """
-    Campos base de un proveedor.
-
-    - nombre: nombre comercial del proveedor (supermercado, banco, hotel, etc.).
-    - rama_id: ID de la rama de proveedor (tabla tipo_ramas_proveedores).
-    - localidad: ciudad/población donde opera principalmente.
-    - pais: país del proveedor.
-    - comunidad: comunidad autónoma (para RESTAURANTES es obligatoria).
+    Relación ligera a la rama del proveedor.
+    Tu UI (AuxEntityFormScreen) usa:
+      editingProveedor.rama_rel?.nombre
     """
-
-    nombre: str = Field(
-        ...,
-        description="Nombre comercial del proveedor (por ejemplo, 'MERCADONA', 'BBVA').",
-    )
-    rama_id: str = Field(
-        ...,
-        description="ID de la rama de proveedor (FK a tipo_ramas_proveedores.id).",
-    )
-
-    localidad: Optional[str] = Field(
-        None,
-        description="Localidad o ciudad principal del proveedor (opcional según rama).",
-    )
-    pais: Optional[str] = Field(
-        None,
-        description="País del proveedor (opcional según rama).",
-    )
-    comunidad: Optional[str] = Field(
-        None,
-        description="Comunidad autónoma (obligatoria SOLO para restaurantes).",
-    )
-
-
-class ProveedorCreate(ProveedorBase):
-    """
-    Payload de creación de proveedor.
-
-    - id: se puede enviar desde el cliente (por compatibilidad).
-      Si quisieras, más adelante podríamos pasar a generarlo
-      totalmente en servidor.
-
-    El resto de campos heredan de ProveedorBase.
-    """
-
-    id: Optional[str] = Field(
-        None,
-        description=(
-            "ID del proveedor. Si no se envía, el backend puede generar uno "
-            "automáticamente."
-        ),
-    )
-
-
-class ProveedorUpdate(BaseModel):
-    """
-    Payload de actualización de proveedor (PATCH/PUT parcial).
-
-    Todos los campos son opcionales; sólo se actualizan los que se envían.
-    La lógica de negocio (normalización a MAYÚSCULAS, validación de rama/ubicación)
-    se aplica en el router.
-    """
-
-    nombre: Optional[str] = Field(
-        None,
-        description="Nuevo nombre del proveedor (si se quiere cambiar).",
-    )
-    rama_id: Optional[str] = Field(
-        None,
-        description="Nueva rama del proveedor (si se quiere cambiar).",
-    )
-    localidad: Optional[str] = Field(
-        None,
-        description="Nueva localidad (si se quiere cambiar).",
-    )
-    pais: Optional[str] = Field(
-        None,
-        description="Nuevo país (si se quiere cambiar).",
-    )
-    comunidad: Optional[str] = Field(
-        None,
-        description="Nueva comunidad autónoma (si se quiere cambiar).",
-    )
-
-
-class ProveedorRead(ProveedorBase):
-    """
-    Representación de salida de un proveedor.
-
-    Incluye el ID, además de los campos base.
-
-    model_config.from_attributes = True permite crear el schema a partir de
-    instancias SQLAlchemy (models.Proveedor).
-    """
-
     id: str
+    nombre: str
 
     model_config = ConfigDict(from_attributes=True)
+
+
+# -----------------------------------------------------------------------------
+# Base: campos comunes de negocio (sin obligar a localidad_id)
+# -----------------------------------------------------------------------------
+class ProveedorBase(BaseModel):
+    """
+    Campos base de proveedor.
+
+    - nombre: nombre comercial (normalizado en router a MAYÚSCULAS).
+    - rama_id: FK a tipo_ramas_proveedores.id (obligatorio en creación).
+    - localidad_id: referencia normalizada (opcional).
+    - localidad/comunidad/pais: textos legacy (compatibilidad v2).
+    """
+    nombre: str = Field(..., description="Nombre comercial del proveedor.")
+    rama_id: str = Field(..., description="ID de la rama del proveedor (FK).")
+
+    # Normalizado por FK (opcional)
+    localidad_id: Optional[int] = Field(
+        None,
+        description="FK a localidades.id (opcional). Si se informa, el backend puede derivar textos.",
+    )
+
+    # Legacy por texto (opcionales según rama, se valida en router)
+    localidad: Optional[str] = Field(None, description="Localidad (texto legacy).")
+    comunidad: Optional[str] = Field(None, description="Comunidad/Región (texto legacy).")
+    pais: Optional[str] = Field(None, description="País (texto legacy).")
+
+
+# -----------------------------------------------------------------------------
+# Create: permite 'id' opcional por compatibilidad, y mantiene localidad_id
+# -----------------------------------------------------------------------------
+class ProveedorCreate(ProveedorBase):
+    """
+    Payload para crear proveedor.
+
+    Compatibilidad:
+    - Algunos clientes antiguos podían enviar `id`. Lo aceptamos como opcional.
+      Tu backend actual genera el ID; puedes ignorar este campo en el router.
+    """
+    id: Optional[str] = Field(
+        None,
+        description="ID opcional. El backend puede ignorarlo y generar PROV-XXXXXX.",
+    )
+
+
+# -----------------------------------------------------------------------------
+# Update: todos opcionales (PUT/PATCH parcial)
+# -----------------------------------------------------------------------------
+class ProveedorUpdate(BaseModel):
+    """
+    Payload de actualización (parcial): sólo se aplican campos presentes.
+    La normalización a MAYÚSCULAS y la validación por rama se hacen en router.
+    """
+    nombre: Optional[str] = Field(None, description="Nuevo nombre (si se cambia).")
+    rama_id: Optional[str] = Field(None, description="Nueva rama_id (si se cambia).")
+
+    localidad_id: Optional[int] = Field(
+        None,
+        description="Nueva FK a localidades.id (si se cambia).",
+    )
+
+    localidad: Optional[str] = Field(None, description="Nueva localidad texto (legacy).")
+    comunidad: Optional[str] = Field(None, description="Nueva comunidad texto (legacy).")
+    pais: Optional[str] = Field(None, description="Nuevo país texto (legacy).")
+
+
+# -----------------------------------------------------------------------------
+# Read: forma estable de respuesta
+# -----------------------------------------------------------------------------
+class ProveedorRead(BaseModel):
+    """
+    Representación de salida del proveedor.
+
+    Incluye:
+    - id (string PROV-XXXXXX)
+    - campos principales
+    - user_id (multiusuario) si lo quieres exponer (tu UI no lo necesita, pero no rompe)
+    - relaciones opcionales:
+        - rama_rel
+        - localidad_rel (con region+pais dentro) si el backend la devuelve
+    """
+    id: str
+    nombre: str
+    rama_id: str
+
+    localidad_id: Optional[int] = None
+    localidad: Optional[str] = None
+    comunidad: Optional[str] = None
+    pais: Optional[str] = None
+
+    user_id: Optional[int] = None
+
+    rama_rel: Optional[RamaProveedorRel] = None
+    localidad_rel: Optional[LocalidadWithContext] = None
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+# Alias de compatibilidad para imports antiguos (si alguien importaba "Proveedor")
+Proveedor = ProveedorRead
