@@ -181,23 +181,43 @@ export const AuxEntityFormScreen: React.FC<Props> = ({ navigation, route }) => {
 
   const sendResult = (result: { type: string; item: any; key?: string | null; mode: 'created' | 'updated' }) => {
     const auxResult = {
+      // tipo de entidad creada (ej: 'proveedor', 'tipo_gasto', 'tipo_ingreso', etc.)
       type: result.type,
+
+      // item creado/actualizado
       item: result.item,
+
+      // compat: campo legacy que ya usas
       key: result.key ?? null,
+
+      // ✅ NUEVO: campo “canónico” para que los forms lo detecten de forma consistente
+      returnKey: result.key ?? null,
+
+      // ✅ NUEVO: origen (útil para debug / compat)
+      origin,
+
+      // creado/actualizado
       mode: result.mode,
     };
 
+    console.log('[AuxEntityForm][sendResult] sending auxResult=', auxResult);
+    console.log('[AuxEntityForm][sendResult] returnRouteKey=', returnRouteKey, 'returnTo=', returnTo);
+
     if (returnRouteKey) {
       const ownerNav = findOwningNavigatorByRouteKey(navigation, returnRouteKey);
+      console.log('[AuxEntityForm][sendResult] ownerNav found=', !!ownerNav);
+
       if (ownerNav) {
         try {
           ownerNav.dispatch({
             ...(CommonActions.setParams({ auxResult }) as any),
             source: returnRouteKey,
           });
+          console.log('[AuxEntityForm][sendResult] dispatched setParams to source=', returnRouteKey);
           return;
-        } catch {
-          // fallback
+        } catch (e) {
+          console.log('[AuxEntityForm][sendResult] dispatch failed, fallback to returnTo', e);
+          // fallback sigue abajo
         }
       }
     }
@@ -207,11 +227,13 @@ export const AuxEntityFormScreen: React.FC<Props> = ({ navigation, route }) => {
         const parent = navigation.getParent?.();
         const nav = parent ?? navigation;
         nav.navigate({ name: returnTo, params: { auxResult }, merge: true });
-      } catch {
-        // ignore
+        console.log('[AuxEntityForm][sendResult] navigated to returnTo with merge=', returnTo);
+      } catch (e) {
+        console.log('[AuxEntityForm][sendResult] returnTo navigation failed', e);
       }
     }
   };
+
 
   const sendResultAndClose = (result: { type: string; item: any; key?: string | null; mode: 'created' | 'updated' }) => {
     sendResult(result);

@@ -1,183 +1,249 @@
 /**
  * Archivo: mobile_app/screens/prestamos/PrestamoFormScreen.tsx
  *
- * Responsabilidad:
- *   - Alta/edición de préstamo manteniendo comportamiento V2.
- *   - Usar componentes comunes del repo (FormScreen, FormSection, DateFieldButton, InlineSearchSelect, FormActionButton).
+ * OBJETIVO (ajustes solicitados):
+ *  1) "Cuentas" con formato pills (AccountPill) como en ingresos/gestionables.
+ *  2) "Periodicidad" con pills (PillButton) como en ingresos/gestionables.
+ *  3) "Principal" con estilo de importe (amountInputBig).
+ *  4) "Tipo de interés" con pills (PillButton).
+ *  5) "Datos básicos": PERSONAL / HIPOTECA con pills (PillButton).
+ *  6) "Vivienda" con pills (AccountPill) como ingresos/gestionables.
  *
- * Maneja:
- *   - UI: FormScreen, FormSection, TextInput, DateFieldButton, InlineSearchSelect, FormActionButton
- *   - Estado: local (campos + loading/refreshing)
- *   - Datos:
- *       - Lectura: prestamosApi.get(id), catálogos vía prestamosApi.catalogs()
- *       - Escritura: prestamosApi.create / prestamosApi.update
- *   - Navegación:
- *       - goBack al guardar/cancelar
- *
- * Entradas / Salidas:
- *   - route.params:
- *       - prestamoId?: string
- *   - Efectos:
- *       - carga inicial de catálogos + (si edición) datos del préstamo
- *
- * Dependencias clave:
- *   - UI interna: FormScreen, FormSection, InlineSearchSelect, DateFieldButton, FormActionButton
- *   - Tema: colors, spacing
- *
- * Reutilización:
- *   - Candidato a externalizar: MEDIO (patrón de form con catálogos).
- *   - Riesgos: si los catálogos se obtienen desde endpoints distintos en tu V3.
- *
- * Notas de estilo:
- *   - Corrige errores TS: tipoInteres, props de FormScreen, imports de DateFieldButton/FormActionButton.
+ * FIX adicional (bancos):
+ *  - El selector “Banco” muestra SOLO proveedores de ramas BANCOS/FINANCIERAS
+ *    (filtrado en prestamosApi.catalogs()) y limita la lista a 4 resultados.
  */
 
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
-import { View, Text, TextInput, StyleSheet, Alert, Platform } from 'react-native';
+import { View, Text, TextInput, StyleSheet, Alert } from 'react-native';
 import DateTimePicker from '@react-native-community/datetimepicker';
 import { useNavigation, useRoute } from '@react-navigation/native';
 
-import { FormScreen } from '../../components/forms/FormScreen';
+import FormScreen from '../../components/forms/FormScreen';
 import { FormSection } from '../../components/forms/FormSection';
 import { InlineSearchSelect } from '../../components/ui/InlineSearchSelect';
-import { DateFieldButton } from '../../components/ui/DateFieldButton';
+import { FormDateButton } from '../../components/ui/FormDateButton';
 import { FormActionButton } from '../../components/ui/FormActionButton';
+import { PillButton } from '../../components/ui/PillButton';
+import { AccountPill } from '../../components/ui/AccountPill';
+import { commonFormStyles } from '../../components/forms/formStyles';
 import { colors, spacing } from '../../theme';
 
 import { prestamosApi } from '../../services/prestamosApi';
 
+// ------------------------------
+// Tipos locales
+// ------------------------------
 type RouteParams = { prestamoId?: string };
 
-type Proveedor = { id: string; nombre: string };
-type Cuenta = { id: string; anagrama: string; banco_id?: string | null };
-type Vivienda = { id: string; referencia: string; direccion_completa?: string | null };
+// En catalogs() ya vienen filtrados por rama_id (BANCOS/FINANCIERAS) y mapeados.
+type ProveedorBanco = { id: string; nombre: string; rama_id: string };
+
+// Las cuentas del catálogo incluyen banco_id (para filtrar por banco seleccionado).
+type Cuenta = { id: string; anagrama: string; banco_id?: string | null; liquidez?: number | null; nombre?: string };
+
+// Viviendas del catálogo (patrimonios) para HIPOTECA.
+type Vivienda = { id: string; referencia: string; direccion_completa?: string | null; activo?: boolean };
 
 type Periodicidad = 'MENSUAL' | 'TRIMESTRAL' | 'SEMESTRAL' | 'ANUAL';
 type TipoInteres = 'FIJO' | 'VARIABLE' | 'MIXTO';
 
+// Para préstamos mantenemos la lista "clásica".
 const PERIODS: Periodicidad[] = ['MENSUAL', 'TRIMESTRAL', 'SEMESTRAL', 'ANUAL'];
 const TIPOS_INTERES: TipoInteres[] = ['FIJO', 'VARIABLE', 'MIXTO'];
 
+const MAX_BANCOS_SUGERENCIAS = 4;
+
+// ------------------------------
+// Helpers fecha
+// ------------------------------
 function fmtDate(d: Date) {
+  // UI: DD/MM/YYYY
   const dd = String(d.getDate()).padStart(2, '0');
   const mm = String(d.getMonth() + 1).padStart(2, '0');
   const yyyy = String(d.getFullYear());
   return `${dd}/${mm}/${yyyy}`;
 }
+
 function isoDate(d: Date) {
+  // API: YYYY-MM-DD
   const dd = String(d.getDate()).padStart(2, '0');
   const mm = String(d.getMonth() + 1).padStart(2, '0');
   const yyyy = String(d.getFullYear());
   return `${yyyy}-${mm}-${dd}`;
 }
 
+/**
+ * Normaliza textos numéricos en formato ES (“1.234,56”) a number.
+ * Tolerante:
+ *  - elimina puntos
+ *  - cambia coma por punto
+ */
+function parseEuroNumber(text: string): number {
+  const raw = String(text ?? '').trim();
+  if (!raw) return 0;
+  const normalized = raw.replace(/\./g, '').replace(',', '.');
+  const n = Number(normalized);
+  return Number.isFinite(n) ? n : 0;
+}
+
 export default function PrestamoFormScreen() {
+  const styles = commonFormStyles;
+
   const navigation = useNavigation<any>();
   const route = useRoute<any>();
   const { prestamoId } = (route.params ?? {}) as RouteParams;
   const isEdit = !!prestamoId;
 
+  // ------------------------------
+  // Loading state
+  // ------------------------------
   const [loading, setLoading] = useState(true);
 
+  // ------------------------------
   // Catálogos
-  const [bancos, setBancos] = useState<Proveedor[]>([]);
+  // ------------------------------
+  const [bancos, setBancos] = useState<ProveedorBanco[]>([]);
   const [cuentas, setCuentas] = useState<Cuenta[]>([]);
   const [viviendas, setViviendas] = useState<Vivienda[]>([]);
 
-  // Queries InlineSearchSelect
+  // ------------------------------
+  // InlineSearchSelect query (banco)
+  // ------------------------------
   const [qBanco, setQBanco] = useState('');
-  const [qCuenta, setQCuenta] = useState('');
 
-  // Form fields
+  // ------------------------------
+  // Campos del form
+  // ------------------------------
   const [clasificacion, setClasificacion] = useState<'PERSONAL' | 'HIPOTECA'>('PERSONAL');
   const [nombre, setNombre] = useState('');
 
-  const [banco, setBanco] = useState<Proveedor | null>(null);
-  const [cuenta, setCuenta] = useState<Cuenta | null>(null);
-  const [vivienda, setVivienda] = useState<Vivienda | null>(null);
+  const [banco, setBanco] = useState<ProveedorBanco | null>(null);
 
+  // Cuenta seleccionada por id (pills)
+  const [cuentaId, setCuentaId] = useState<string | null>(null);
+
+  // Vivienda seleccionada por id (pills)
+  const [viviendaId, setViviendaId] = useState<string | null>(null);
+
+  // Fecha inicio
   const [fechaInicio, setFechaInicio] = useState<Date>(new Date());
   const [showDate, setShowDate] = useState(false);
 
+  // Condiciones
   const [periodicidad, setPeriodicidad] = useState<Periodicidad>('MENSUAL');
   const [plazoMeses, setPlazoMeses] = useState('120');
+
+  // Principal: UI como importe
   const [principal, setPrincipal] = useState('');
 
+  // Tipo de interés: pills
   const [tipoInteres, setTipoInteres] = useState<TipoInteres>('FIJO');
   const [tin, setTin] = useState('3.00');
   const [tae, setTae] = useState('');
   const [indice, setIndice] = useState('');
   const [diferencial, setDiferencial] = useState('');
 
+  // Gastos iniciales
   const [comApertura, setComApertura] = useState('0');
   const [otrosIni, setOtrosIni] = useState('0');
 
+  // Estado
   const [activo, setActivo] = useState(true);
 
+  // ---------------------------------------------------------
+  // Derivados: cuentas filtradas por banco
+  // ---------------------------------------------------------
   const cuentasFiltradas = useMemo(() => {
-    const base = cuentas;
-    if (!banco?.id) return base;
-    return base.filter((c) => String(c.banco_id ?? '') === String(banco.id));
+    if (!banco?.id) return cuentas;
+    return cuentas.filter((c) => String(c.banco_id ?? '') === String(banco.id));
   }, [cuentas, banco]);
 
+  // ---------------------------------------------------------
+  // Derivados: bancos filtrados por query + limit 4
+  // (bancos ya filtrados por rama en prestamosApi.catalogs)
+  // ---------------------------------------------------------
   const bancosFilteredByQuery = useMemo(() => {
     const qq = qBanco.trim().toUpperCase();
-    if (!qq) return bancos;
-    return bancos.filter((b) => String(b.nombre ?? '').toUpperCase().includes(qq));
+    const base = bancos ?? [];
+    const filtered = !qq ? base : base.filter((b) => String(b.nombre ?? '').toUpperCase().includes(qq));
+    return filtered.slice(0, MAX_BANCOS_SUGERENCIAS);
   }, [bancos, qBanco]);
 
-  const cuentasFilteredByQuery = useMemo(() => {
-    const base = cuentasFiltradas;
-    const qq = qCuenta.trim().toUpperCase();
-    if (!qq) return base;
-    return base.filter((c) => String(c.anagrama ?? '').toUpperCase().includes(qq));
-  }, [cuentasFiltradas, qCuenta]);
+  // ---------------------------------------------------------
+  // Derivados: viviendas activas
+  // ---------------------------------------------------------
+  const viviendasActivas = useMemo(() => {
+    return (viviendas ?? []).filter((v) => v.activo !== false);
+  }, [viviendas]);
 
+  // ---------------------------------------------------------
+  // Labels
+  // ---------------------------------------------------------
+  const getCuentaLabel = (cta: Cuenta): string => cta.anagrama || cta.nombre || cta.id;
+  const getViviendaLabel = (viv: Vivienda): string => viv.referencia || viv.id;
+
+  // ---------------------------------------------------------
+  // Load catálogos + (si edición) load préstamo
+  // ---------------------------------------------------------
   const loadAll = useCallback(async () => {
     try {
       setLoading(true);
 
-      // Este endpoint es una abstracción: si en tu repo lo separas (proveedores/cuentas/patrimonios),
-      // tu prestamosApi puede resolverlo internamente sin cambiar el screen.
       const catalogs = await prestamosApi.catalogs();
-      setBancos(Array.isArray(catalogs?.bancos) ? catalogs.bancos : []);
-      setCuentas(Array.isArray(catalogs?.cuentas) ? catalogs.cuentas : []);
-      setViviendas(Array.isArray(catalogs?.viviendas) ? catalogs.viviendas : []);
+
+      // Bancos ya filtrados por rama (BANCOS/FINANCIERAS)
+      setBancos(Array.isArray(catalogs?.bancos) ? (catalogs.bancos as any) : []);
+      setCuentas(Array.isArray(catalogs?.cuentas) ? (catalogs.cuentas as any) : []);
+      setViviendas(Array.isArray(catalogs?.viviendas) ? (catalogs.viviendas as any) : []);
 
       if (isEdit && prestamoId) {
         const p = await prestamosApi.get(prestamoId);
 
         setNombre(String(p?.nombre ?? ''));
+
+        // Clasificación: si tiene vivienda => HIPOTECA
         setClasificacion(p?.referencia_vivienda_id ? 'HIPOTECA' : 'PERSONAL');
 
+        // Banco por proveedor_id
         const bancoFound = (catalogs?.bancos ?? []).find((x: any) => String(x.id) === String(p?.proveedor_id));
-        setBanco(bancoFound ?? null);
+        setBanco((bancoFound as any) ?? null);
 
-        const cuentaFound = (catalogs?.cuentas ?? []).find((x: any) => String(x.id) === String(p?.cuenta_id));
-        setCuenta(cuentaFound ?? null);
+        // Cuenta por id
+        setCuentaId(p?.cuenta_id ? String(p.cuenta_id) : null);
 
-        const vivFound = (catalogs?.viviendas ?? []).find(
-          (x: any) => String(x.id) === String(p?.referencia_vivienda_id)
-        );
-        setVivienda(vivFound ?? null);
+        // Vivienda por id
+        setViviendaId(p?.referencia_vivienda_id ? String(p.referencia_vivienda_id) : null);
 
+        // Fecha
         setFechaInicio(p?.fecha_inicio ? new Date(String(p.fecha_inicio)) : new Date());
-        setPeriodicidad((String(p?.periodicidad ?? 'MENSUAL').toUpperCase() as any) ?? 'MENSUAL');
+
+        // Periodicidad
+        const per = String(p?.periodicidad ?? 'MENSUAL').toUpperCase();
+        setPeriodicidad((PERIODS.includes(per as any) ? (per as any) : 'MENSUAL') as Periodicidad);
+
+        // Plazo / principal
         setPlazoMeses(String(p?.plazo_meses ?? '120'));
         setPrincipal(String(p?.importe_principal ?? ''));
 
-        setTipoInteres((String(p?.tipo_interes ?? 'FIJO').toUpperCase() as any) ?? 'FIJO');
+        // Interés
+        const ti = String(p?.tipo_interes ?? 'FIJO').toUpperCase();
+        setTipoInteres((TIPOS_INTERES.includes(ti as any) ? (ti as any) : 'FIJO') as TipoInteres);
+
         setTin(String(p?.tin_pct ?? ''));
         setTae(p?.tae_pct != null ? String(p.tae_pct) : '');
         setIndice(String(p?.indice ?? ''));
         setDiferencial(p?.diferencial_pct != null ? String(p.diferencial_pct) : '');
 
+        // Iniciales
         setComApertura(String(p?.comision_apertura ?? '0'));
         setOtrosIni(String(p?.otros_gastos_iniciales ?? '0'));
 
+        // Estado
         setActivo(Boolean(p?.activo ?? true));
       }
-    } catch {
+    } catch (e) {
+      console.error('[PrestamoForm] Error cargando', e);
       Alert.alert('Error', 'No se pudo cargar el formulario de préstamo.');
     } finally {
       setLoading(false);
@@ -188,41 +254,65 @@ export default function PrestamoFormScreen() {
     void loadAll();
   }, [loadAll]);
 
+  // ---------------------------------------------------------
+  // Si cambia banco, limpiar cuenta si ya no pertenece
+  // ---------------------------------------------------------
+  useEffect(() => {
+    if (!banco?.id) return;
+    if (!cuentaId) return;
+
+    const stillValid = cuentasFiltradas.some((c) => c.id === cuentaId);
+    if (!stillValid) setCuentaId(null);
+  }, [banco, cuentaId, cuentasFiltradas]);
+
+  // ---------------------------------------------------------
+  // Si cambia clasificación a PERSONAL, limpiar vivienda
+  // ---------------------------------------------------------
+  useEffect(() => {
+    if (clasificacion === 'PERSONAL') setViviendaId(null);
+  }, [clasificacion]);
+
+  // ---------------------------------------------------------
+  // Guardar
+  // ---------------------------------------------------------
   const onSave = useCallback(async () => {
     if (!nombre.trim()) return Alert.alert('Atención', 'Indica un nombre.');
     if (!banco?.id) return Alert.alert('Atención', 'Selecciona un banco.');
-    if (!cuenta?.id) return Alert.alert('Atención', 'Selecciona una cuenta.');
+    if (!cuentaId) return Alert.alert('Atención', 'Selecciona una cuenta.');
 
-    if (clasificacion === 'HIPOTECA' && !vivienda?.id) {
+    if (clasificacion === 'HIPOTECA' && !viviendaId) {
       return Alert.alert('Atención', 'Selecciona una vivienda.');
     }
 
     const plazo = parseInt(plazoMeses || '0', 10);
-    const principalNum = Number(String(principal).replace(',', '.')) || 0;
-    const tinNum = Number(String(tin).replace(',', '.')) || 0;
+    const principalNum = parseEuroNumber(principal);
+    const tinNum = parseEuroNumber(tin);
 
     if (plazo <= 0) return Alert.alert('Atención', 'Plazo inválido.');
     if (principalNum <= 0) return Alert.alert('Atención', 'Principal debe ser > 0.');
+    if (tinNum <= 0) return Alert.alert('Atención', 'TIN debe ser > 0.');
 
     const payload: any = {
       nombre: nombre.trim().toUpperCase(),
+
       proveedor_id: banco.id,
-      cuenta_id: cuenta.id,
-      referencia_vivienda_id: clasificacion === 'HIPOTECA' ? vivienda?.id ?? null : null,
+      cuenta_id: cuentaId,
+      referencia_vivienda_id: clasificacion === 'HIPOTECA' ? viviendaId : null,
 
       fecha_inicio: isoDate(fechaInicio),
       periodicidad,
       plazo_meses: plazo,
       importe_principal: principalNum,
 
-      tipo_interes: tipoInteres, // ✅ antes estaba mal referenciado
+      tipo_interes: tipoInteres,
       tin_pct: tinNum,
-      tae_pct: tae ? Number(String(tae).replace(',', '.')) : null,
-      indice: tipoInteres === 'FIJO' ? null : (indice || null),
-      diferencial_pct: tipoInteres === 'FIJO' ? null : (diferencial ? Number(String(diferencial).replace(',', '.')) : null),
+      tae_pct: tae ? parseEuroNumber(tae) : null,
 
-      comision_apertura: Number(String(comApertura).replace(',', '.')) || 0,
-      otros_gastos_iniciales: Number(String(otrosIni).replace(',', '.')) || 0,
+      indice: tipoInteres === 'FIJO' ? null : (indice || null),
+      diferencial_pct: tipoInteres === 'FIJO' ? null : (diferencial ? parseEuroNumber(diferencial) : null),
+
+      comision_apertura: parseEuroNumber(comApertura) || 0,
+      otros_gastos_iniciales: parseEuroNumber(otrosIni) || 0,
 
       activo: isEdit ? activo : true,
       clasificacion,
@@ -237,14 +327,15 @@ export default function PrestamoFormScreen() {
       navigation.goBack();
     } catch (e: any) {
       const msg = e?.response?.data?.detail ?? 'Error al guardar el préstamo.';
+      console.error('[PrestamoForm] Error guardando', e);
       Alert.alert('Error', String(msg));
     }
   }, [
     nombre,
     banco,
-    cuenta,
+    cuentaId,
     clasificacion,
-    vivienda,
+    viviendaId,
     fechaInicio,
     periodicidad,
     plazoMeses,
@@ -262,7 +353,7 @@ export default function PrestamoFormScreen() {
     navigation,
   ]);
 
-  const title = isEdit ? 'Editar préstamo' : 'Nuevo préstamo';
+  const title = 'Préstamo';
   const subtitle = isEdit ? 'Edición' : 'Alta';
 
   return (
@@ -271,268 +362,273 @@ export default function PrestamoFormScreen() {
       subtitle={subtitle}
       loading={loading}
       onBackPress={() => navigation.goBack()}
-        footer={
-          <View style={styles.footerRow}>
-            <View style={{ flex: 1 }}>
-              <FormActionButton
-                label="Cancelar"
-                variant="secondary"
-                onPress={() => navigation.goBack()}
-              />
-            </View>
-
-            <View style={{ width: spacing.sm }} />
-
-            <View style={{ flex: 1 }}>
-              <FormActionButton
-                label={isEdit ? 'Actualizar' : 'Guardar'}
-                variant="primary"
-                onPress={onSave}
-              />
-            </View>
+      footer={
+        <View style={stylesLocal.footerRow}>
+          <View style={{ flex: 1 }}>
+            <FormActionButton label="Cancelar" variant="secondary" onPress={() => navigation.goBack()} />
           </View>
-        }
+
+          <View style={{ width: spacing.sm }} />
+
+          <View style={{ flex: 1 }}>
+            <FormActionButton label={isEdit ? 'Actualizar' : 'Guardar'} variant="primary" onPress={onSave} />
+          </View>
+        </View>
+      }
     >
       <FormSection title="Datos básicos">
-        <View style={styles.toggleRow}>
-          <FormActionButton
-            label="PERSONAL"
-            variant={clasificacion === 'PERSONAL' ? 'primary' : 'secondary'}
-            onPress={() => setClasificacion('PERSONAL')}
-            style={{ flex: 1 }}
-          />
-          <View style={{ width: spacing.sm }} />
-          <FormActionButton
-            label="HIPOTECA"
-            variant={clasificacion === 'HIPOTECA' ? 'primary' : 'secondary'}
-            onPress={() => setClasificacion('HIPOTECA')}
-            style={{ flex: 1 }}
-          />
+        <View style={styles.field}>
+          <Text style={styles.label}>Tipo</Text>
+          <View style={styles.segmentosRow}>
+            <View style={styles.segmentoWrapper}>
+              <PillButton label="PERSONAL" selected={clasificacion === 'PERSONAL'} onPress={() => setClasificacion('PERSONAL')} />
+            </View>
+            <View style={styles.segmentoWrapper}>
+              <PillButton label="HIPOTECA" selected={clasificacion === 'HIPOTECA'} onPress={() => setClasificacion('HIPOTECA')} />
+            </View>
+          </View>
         </View>
 
-        <Text style={styles.label}>Nombre</Text>
-        <TextInput
-          value={nombre}
-          onChangeText={setNombre}
-          placeholder="Ej. HIPOTECA PISO CENTRO"
-          placeholderTextColor={colors.textSecondary}
-          style={styles.input}
-        />
+        <View style={styles.field}>
+          <Text style={styles.label}>Nombre</Text>
+          <TextInput
+            value={nombre}
+            onChangeText={setNombre}
+            placeholder="Ej. HIPOTECA PISO CENTRO"
+            placeholderTextColor={colors.textSecondary}
+            style={[styles.input, nombre.trim() !== '' && styles.inputFilled]}
+          />
+        </View>
       </FormSection>
 
       <FormSection title="Banco y cuenta">
-        <InlineSearchSelect<Proveedor>
-          label="Banco"
-          onAddPress={() => {}}
-          disabled={false}
-          selected={banco}
-          selectedLabel={(x) => x.nombre}
-          onClear={() => {
-            setBanco(null);
-            setCuenta(null);
-            setQBanco('');
-            setQCuenta('');
-          }}
-          query={qBanco}
-          onChangeQuery={setQBanco}
-          placeholder="Buscar banco…"
-          options={bancosFilteredByQuery}
-          optionKey={(x) => x.id}
-          optionLabel={(x) => x.nombre}
-          onSelect={(x) => {
-            setBanco(x);
-            setCuenta(null);
-            setQBanco('');
-            setQCuenta('');
-          }}
-          emptyText="Sin resultados"
-        />
+        <View style={styles.field}>
+          <InlineSearchSelect<ProveedorBanco>
+            label="Banco"
+            onAddPress={() => {}}
+            addAccessibilityLabel="Añadir (no aplica)"
+            disabled={false}
+            selected={banco}
+            selectedLabel={(x) => x.nombre}
+            onClear={() => {
+              setBanco(null);
+              setCuentaId(null);
+              setQBanco('');
+            }}
+            query={qBanco}
+            onChangeQuery={setQBanco}
+            placeholder="Buscar banco…"
+            options={bancosFilteredByQuery}
+            optionKey={(x) => x.id}
+            optionLabel={(x) => x.nombre}
+            onSelect={(x) => {
+              setBanco(x);
+              setCuentaId(null);
+              setQBanco('');
+            }}
+            emptyText="Sin resultados"
+          />
+        </View>
 
-        <InlineSearchSelect<Cuenta>
-          label="Cuenta"
-          onAddPress={() => {}}
-          disabled={!banco}
-          selected={cuenta}
-          selectedLabel={(x) => x.anagrama}
-          onClear={() => {
-            setCuenta(null);
-            setQCuenta('');
-          }}
-          query={qCuenta}
-          onChangeQuery={setQCuenta}
-          placeholder={banco ? 'Buscar cuenta…' : 'Selecciona banco primero'}
-          options={cuentasFilteredByQuery}
-          optionKey={(x) => x.id}
-          optionLabel={(x) => x.anagrama}
-          onSelect={(x) => {
-            setCuenta(x);
-            setQCuenta('');
-          }}
-          emptyText="Sin resultados"
-        />
+        <View style={styles.field}>
+          <Text style={styles.label}>Cuenta</Text>
+
+          {!banco ? <Text style={styles.helperText}>Selecciona primero un banco para ver sus cuentas.</Text> : null}
+          {banco && cuentasFiltradas.length === 0 ? <Text style={styles.helperText}>No hay cuentas asociadas a este banco.</Text> : null}
+
+          <View style={styles.accountsRow}>
+            {(banco ? cuentasFiltradas : cuentas).map((cta) => (
+              <View key={cta.id} style={styles.accountPillWrapper}>
+                <AccountPill
+                  label={getCuentaLabel(cta)}
+                  subLabel={
+                    typeof cta.liquidez === 'number'
+                      ? `${cta.liquidez.toLocaleString('es-ES', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} €`
+                      : undefined
+                  }
+                  selected={cuentaId === cta.id}
+                  onPress={() => setCuentaId((prev) => (prev === cta.id ? null : cta.id))}
+                />
+              </View>
+            ))}
+          </View>
+        </View>
 
         {clasificacion === 'HIPOTECA' ? (
-          <>
+          <View style={styles.field}>
             <Text style={styles.label}>Vivienda</Text>
-            <View style={styles.simpleList}>
-              {viviendas.map((v) => {
-                const selected = vivienda?.id === v.id;
-                return (
-                  <FormActionButton
-                    key={v.id}
-                    label={v.direccion_completa ? `${v.referencia} · ${v.direccion_completa}` : v.referencia}
-                    variant={selected ? 'primary' : 'secondary'}
-                    onPress={() => setVivienda(selected ? null : v)}
-                    style={{ marginBottom: spacing.xs }}
+
+            {viviendasActivas.length === 0 ? <Text style={styles.helperText}>No hay viviendas disponibles.</Text> : null}
+
+            <View style={styles.accountsRow}>
+              {viviendasActivas.map((v) => (
+                <View key={v.id} style={styles.accountPillWrapper}>
+                  <AccountPill
+                    label={getViviendaLabel(v)}
+                    subLabel={v.direccion_completa ?? ''}
+                    selected={viviendaId === v.id}
+                    onPress={() => setViviendaId((prev) => (prev === v.id ? null : v.id))}
                   />
-                );
-              })}
+                </View>
+              ))}
             </View>
-          </>
+          </View>
         ) : null}
       </FormSection>
 
       <FormSection title="Condiciones">
-        <Text style={styles.label}>Fecha inicio</Text>
-        <DateFieldButton text={fmtDate(fechaInicio)} onPress={() => setShowDate(true)} />
-        {showDate ? (
-          <DateTimePicker
-            value={fechaInicio}
-            mode="date"
-            display={Platform.OS === 'ios' ? 'spinner' : 'calendar'}
-            onChange={(_, d) => {
-              setShowDate(false);
-              if (d) setFechaInicio(d);
-            }}
+        <View style={styles.field}>
+          <Text style={styles.label}>Fecha inicio</Text>
+          <FormDateButton valueText={fmtDate(fechaInicio)} onPress={() => setShowDate(true)} disabled={false} />
+
+          {showDate ? (
+            <DateTimePicker
+              value={fechaInicio}
+              mode="date"
+              display="default"
+              onChange={(_, d) => {
+                setShowDate(false);
+                if (d) setFechaInicio(d);
+              }}
+            />
+          ) : null}
+        </View>
+
+        <View style={styles.field}>
+          <Text style={styles.label}>Periodicidad</Text>
+          <View style={styles.periodicidadRow}>
+            {PERIODS.map((p) => (
+              <View key={p} style={styles.periodicidadPillWrapper}>
+                <PillButton label={p} selected={periodicidad === p} onPress={() => setPeriodicidad(p)} />
+              </View>
+            ))}
+          </View>
+        </View>
+
+        <View style={styles.field}>
+          <Text style={styles.label}>Plazo (meses)</Text>
+          <TextInput
+            value={plazoMeses}
+            onChangeText={setPlazoMeses}
+            keyboardType="number-pad"
+            placeholder="Ej. 120"
+            placeholderTextColor={colors.textSecondary}
+            style={[styles.input, plazoMeses.trim() !== '' && styles.inputFilled]}
           />
-        ) : null}
-
-        <Text style={styles.label}>Periodicidad</Text>
-        <View style={styles.toggleRow}>
-          {PERIODS.map((p) => (
-            <FormActionButton
-              key={p}
-              label={p}
-              variant={periodicidad === p ? 'primary' : 'secondary'}
-              onPress={() => setPeriodicidad(p)}
-              style={{ flex: 1 }}
-            />
-          ))}
         </View>
 
-        <Text style={styles.label}>Plazo (meses)</Text>
-        <TextInput
-          value={plazoMeses}
-          onChangeText={setPlazoMeses}
-          keyboardType="numeric"
-          placeholder="Ej. 120"
-          placeholderTextColor={colors.textSecondary}
-          style={styles.input}
-        />
-
-        <Text style={styles.label}>Principal (€)</Text>
-        <TextInput
-          value={principal}
-          onChangeText={setPrincipal}
-          keyboardType="decimal-pad"
-          placeholder="Ej. 150000"
-          placeholderTextColor={colors.textSecondary}
-          style={styles.input}
-        />
-
-        <Text style={styles.label}>Tipo de interés</Text>
-        <View style={styles.toggleRow}>
-          {TIPOS_INTERES.map((t) => (
-            <FormActionButton
-              key={t}
-              label={t}
-              variant={tipoInteres === t ? 'primary' : 'secondary'}
-              onPress={() => setTipoInteres(t)}
-              style={{ flex: 1 }}
-            />
-          ))}
+        <View style={styles.field}>
+          <Text style={styles.label}>Principal (€)</Text>
+          <TextInput
+            value={principal}
+            onChangeText={setPrincipal}
+            keyboardType="decimal-pad"
+            placeholder="Ej. 150.000,00"
+            placeholderTextColor={colors.textSecondary}
+            style={[styles.input, styles.amountInputBig, principal.trim() !== '' && styles.inputFilled]}
+          />
         </View>
 
-        <Text style={styles.label}>TIN (%)</Text>
-        <TextInput
-          value={tin}
-          onChangeText={setTin}
-          keyboardType="decimal-pad"
-          placeholder="Ej. 3.10"
-          placeholderTextColor={colors.textSecondary}
-          style={styles.input}
-        />
+        <View style={styles.field}>
+          <Text style={styles.label}>Tipo de interés</Text>
+          <View style={styles.segmentosRow}>
+            {TIPOS_INTERES.map((t) => (
+              <View key={t} style={styles.segmentoWrapper}>
+                <PillButton label={t} selected={tipoInteres === t} onPress={() => setTipoInteres(t)} />
+              </View>
+            ))}
+          </View>
+        </View>
 
-        <Text style={styles.label}>TAE (%)</Text>
-        <TextInput
-          value={tae}
-          onChangeText={setTae}
-          keyboardType="decimal-pad"
-          placeholder="Opcional"
-          placeholderTextColor={colors.textSecondary}
-          style={styles.input}
-        />
+        <View style={styles.fieldRowTwoCols}>
+          <View style={styles.col}>
+            <Text style={styles.label}>TIN (%)</Text>
+            <TextInput
+              value={tin}
+              onChangeText={setTin}
+              keyboardType="decimal-pad"
+              placeholder="Ej. 3,10"
+              placeholderTextColor={colors.textSecondary}
+              style={[styles.input, tin.trim() !== '' && styles.inputFilled]}
+            />
+          </View>
+
+          <View style={styles.col}>
+            <Text style={styles.label}>TAE (%)</Text>
+            <TextInput
+              value={tae}
+              onChangeText={setTae}
+              keyboardType="decimal-pad"
+              placeholder="Opcional"
+              placeholderTextColor={colors.textSecondary}
+              style={[styles.input, tae.trim() !== '' && styles.inputFilled]}
+            />
+          </View>
+        </View>
 
         {tipoInteres !== 'FIJO' ? (
           <>
-            <Text style={styles.label}>Índice</Text>
-            <TextInput
-              value={indice}
-              onChangeText={setIndice}
-              placeholder="EURIBOR 12M"
-              placeholderTextColor={colors.textSecondary}
-              style={styles.input}
-            />
+            <View style={styles.field}>
+              <Text style={styles.label}>Índice</Text>
+              <TextInput
+                value={indice}
+                onChangeText={setIndice}
+                placeholder="Ej. EURIBOR 12M"
+                placeholderTextColor={colors.textSecondary}
+                style={[styles.input, indice.trim() !== '' && styles.inputFilled]}
+              />
+            </View>
 
-            <Text style={styles.label}>Diferencial (%)</Text>
-            <TextInput
-              value={diferencial}
-              onChangeText={setDiferencial}
-              keyboardType="decimal-pad"
-              placeholder="Ej. 1.00"
-              placeholderTextColor={colors.textSecondary}
-              style={styles.input}
-            />
+            <View style={styles.field}>
+              <Text style={styles.label}>Diferencial (%)</Text>
+              <TextInput
+                value={diferencial}
+                onChangeText={setDiferencial}
+                keyboardType="decimal-pad"
+                placeholder="Ej. 1,00"
+                placeholderTextColor={colors.textSecondary}
+                style={[styles.input, diferencial.trim() !== '' && styles.inputFilled]}
+              />
+            </View>
           </>
         ) : null}
 
-        <Text style={styles.label}>Comisión apertura (€)</Text>
-        <TextInput
-          value={comApertura}
-          onChangeText={setComApertura}
-          keyboardType="decimal-pad"
-          placeholder="0"
-          placeholderTextColor={colors.textSecondary}
-          style={styles.input}
-        />
+        <View style={styles.fieldRowTwoCols}>
+          <View style={styles.col}>
+            <Text style={styles.label}>Comisión apertura (€)</Text>
+            <TextInput
+              value={comApertura}
+              onChangeText={setComApertura}
+              keyboardType="decimal-pad"
+              placeholder="0"
+              placeholderTextColor={colors.textSecondary}
+              style={[styles.input, comApertura.trim() !== '' && styles.inputFilled]}
+            />
+          </View>
 
-        <Text style={styles.label}>Otros gastos iniciales (€)</Text>
-        <TextInput
-          value={otrosIni}
-          onChangeText={setOtrosIni}
-          keyboardType="decimal-pad"
-          placeholder="0"
-          placeholderTextColor={colors.textSecondary}
-          style={styles.input}
-        />
+          <View style={styles.col}>
+            <Text style={styles.label}>Otros gastos iniciales (€)</Text>
+            <TextInput
+              value={otrosIni}
+              onChangeText={setOtrosIni}
+              keyboardType="decimal-pad"
+              placeholder="0"
+              placeholderTextColor={colors.textSecondary}
+              style={[styles.input, otrosIni.trim() !== '' && styles.inputFilled]}
+            />
+          </View>
+        </View>
       </FormSection>
 
       {isEdit ? (
         <FormSection title="Estado">
-          <View style={styles.toggleRow}>
-            <FormActionButton
-              label="Activo"
-              variant={activo ? 'primary' : 'secondary'}
-              onPress={() => setActivo(true)}
-              style={{ flex: 1 }}
-            />
-            <View style={{ width: spacing.sm }} />
-            <FormActionButton
-              label="Inactivo"
-              variant={!activo ? 'primary' : 'secondary'}
-              onPress={() => setActivo(false)}
-              style={{ flex: 1 }}
-            />
+          <View style={styles.segmentosRow}>
+            <View style={styles.segmentoWrapper}>
+              <PillButton label="Activo" selected={activo} onPress={() => setActivo(true)} />
+            </View>
+            <View style={styles.segmentoWrapper}>
+              <PillButton label="Inactivo" selected={!activo} onPress={() => setActivo(false)} />
+            </View>
           </View>
         </FormSection>
       ) : null}
@@ -540,30 +636,7 @@ export default function PrestamoFormScreen() {
   );
 }
 
-const styles = StyleSheet.create({
-  label: {
-    fontSize: 13,
-    fontWeight: '600',
-    color: colors.textPrimary,
-    marginBottom: 6,
-  },
-  input: {
-    borderWidth: 1,
-    borderColor: colors.border,
-    backgroundColor: '#fff',
-    borderRadius: 12,
-    paddingHorizontal: spacing.md,
-    paddingVertical: 10,
-    color: colors.textPrimary,
-  },
-  toggleRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    marginBottom: spacing.sm,
-  },
-  simpleList: {
-    marginTop: spacing.xs,
-  },
+const stylesLocal = StyleSheet.create({
   footerRow: {
     flexDirection: 'row',
     alignItems: 'center',

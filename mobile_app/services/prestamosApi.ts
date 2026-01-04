@@ -1,42 +1,22 @@
 /**
  * Archivo: mobile_app/services/prestamosApi.ts
  *
- * Responsabilidad:
- *   - Encapsular todas las llamadas HTTP de Préstamos (listado, detalle, cuotas, acciones).
- *   - Proveer tipado estable para que los screens no dependan del shape “raw” del backend.
- *   - Centralizar rutas para mantener cambios controlados (si cambia el prefix, se toca aquí).
+ * OBJETIVO (FIX de bancos):
+ *  - El selector “Banco” usa Proveedores pero debe mostrar solo aquellos cuya rama_id
+ *    pertenezca a:
+ *       - BANCOS (BAN-TIPORAMAPROVEEDOR-8D1302BD)
+ *       - FINANCIERAS (FIN-TIPORAMAPROVEEDOR-8D1302BC)
+ *  - El screen limita a 4 sugerencias; aquí devolvemos el catálogo ya filtrado y ordenado.
  *
- * Maneja:
- *   - UI: N/A.
- *   - Estado: N/A.
- *   - Datos:
- *       - Lectura: listPrestamos/getPrestamo/getCuotas
- *       - Escritura: create/update, pagar/desmarcar, vincular gasto, amortizar
- *   - Navegación: N/A.
+ * IMPORTANTE:
+ *  - Antes estabas mapeando proveedores a {id, nombre} y perdiendo rama_id.
+ *  - Además usabas heurística looksLikeBanco() por nombre, lo que podía dejar lista vacía.
+ *  - Ahora:
+ *      1) preservamos rama_id en el catálogo de bancos
+ *      2) filtramos estrictamente por rama_id (BAN/FIN)
+ *      3) añadimos logs diagnósticos por si en staging algo no llega como esperamos
  *
- * Entradas / Salidas:
- *   - Props: N/A.
- *   - route.params: N/A.
- *   - Efectos: N/A.
- *
- * Dependencias clave:
- *   - api client interno (axios/fetch wrapper) del proyecto.
- *
- * Reutilización:
- *   - Candidato a externalizar: MEDIO (patrón CRUD estándar).
- *   - Riesgos: si el backend cambia shape, hay que ajustar tipos y normalización aquí.
- *
- * Notas de estilo:
- *   - No hacer transformaciones complejas aquí; solo normalización ligera y tipado.
- */
-
-/**
- * Archivo: mobile_app/services/prestamosApi.ts
- *
- * Actualización:
- *  - FIX: catalogs() deja de usar endpoints legacy (/api/*) y pasa a reutilizar utilsApi
- *    que ya apunta a /api/v1/* (proveedores/cuentas/patrimonios).
- *  - Se mantiene el resto intacto (tipado, normalizadores, facade prestamosApi).
+ * Resto del facade se mantiene intacto.
  */
 
 import { api } from './api';
@@ -254,76 +234,101 @@ export async function amortizarPrestamo(
   return r.data;
 }
 
-export type PrestamosCatalogs = {
-  bancos: Array<{ id: string; nombre: string }>;
-  cuentas: Array<{ id: string; anagrama: string; banco_id?: string | null }>;
-  viviendas: Array<{ id: string; referencia: string; direccion_completa?: string | null }>;
-};
+// =====================================================
+// ✅ IDs reales en tu tabla tipo_ramas_proveedores
+// =====================================================
+const RAMA_PROVEEDOR_FINANCIERAS_ID = 'FIN-TIPORAMAPROVEEDOR-8D1302BC';
+const RAMA_PROVEEDOR_BANCOS_ID = 'BAN-TIPORAMAPROVEEDOR-8D1302BD';
 
-/**
- * Heurística para “bancos”:
- * - En tu UI el selector se llama Banco pero realmente viene de Proveedores.
- * - Si no tienes un campo tipo/segmento/ramas en proveedor, una heurística común es:
- *    - si el nombre contiene BANCO/CAIXA/SANTANDER/BBVA/etc.
- * - Para NO romper nada: si no detectamos ninguno, devolvemos TODOS como “bancos”
- *   (mejor UX que lista vacía).
- */
-function looksLikeBanco(nombre: string): boolean {
-  const n = (nombre || '').toUpperCase();
-  return (
-    n.includes('BANCO') ||
-    n.includes('CAIXA') ||
-    n.includes('SANTANDER') ||
-    n.includes('BBVA') ||
-    n.includes('SABADELL') ||
-    n.includes('UNICAJA') ||
-    n.includes('KUTXA') ||
-    n.includes('IBERCAJA') ||
-    n.includes('ABANCA') ||
-    n.includes('ING')
-  );
-}
+const RAMAS_BANCO_VALIDAS = new Set<string>([
+  RAMA_PROVEEDOR_FINANCIERAS_ID,
+  RAMA_PROVEEDOR_BANCOS_ID,
+]);
 
 function safeStr(v: any): string {
   return v == null ? '' : String(v);
 }
 
 /**
- * ✅ FIX PRINCIPAL:
- *  - Antes: /api/proveedores, /api/cuentas_bancarias, /api/patrimonios/picker (legacy) => 404
- *  - Ahora: reutilizamos utilsApi (v3) => /api/v1/proveedores, /api/v1/cuentas, /api/v1/patrimonios
+ * Extrae rama_id de forma robusta.
+ * En tu backend lo normal es p.rama_id; dejamos fallbacks por si cambia.
+ */
+function getProveedorRamaId(p: any): string {
+  return safeStr(
+    p?.rama_id ??
+      p?.ramaId ??
+      p?.rama_rel?.id ??
+      p?.ramaRel?.id ??
+      ''
+  );
+}
+
+export type PrestamosCatalogs = {
+  bancos: Array<{ id: string; nombre: string; rama_id: string }>;
+  cuentas: Array<{ id: string; anagrama: string; banco_id?: string | null }>;
+  viviendas: Array<{ id: string; referencia: string; direccion_completa?: string | null }>;
+};
+
+/**
+ * Catálogos para el form de préstamo:
+ *  - bancos: prov de ramas BANCOS/FINANCIERAS
+ *  - cuentas: cuentas bancarias
+ *  - viviendas: patrimonios/viviendas
  */
 export async function catalogs(): Promise<PrestamosCatalogs> {
-  const [proveedores, cuentasRaw, viviendasRaw] = await Promise.all([
+  const [proveedoresRaw, cuentasRaw, viviendasRaw] = await Promise.all([
     fetchProveedores().catch(() => [] as ProveedorFromUtils[]),
     fetchCuentas().catch(() => [] as CuentaFromUtils[]),
     fetchViviendas().catch(() => [] as ViviendaFromUtils[]),
   ]);
 
-  const provMapped = (proveedores ?? []).map((p: any) => ({
+  // ---------------------------
+  // Proveedores: preservamos rama_id
+  // ---------------------------
+  const proveedores = (proveedoresRaw ?? []).map((p: any) => ({
     id: safeStr(p.id),
     nombre: safeStr(p.nombre ?? p.id),
+    rama_id: getProveedorRamaId(p),
   }));
 
-  // Filtrado de “bancos” con fallback a “todos”
-  const bancosFiltrados = provMapped.filter((p) => looksLikeBanco(p.nombre));
-  const bancos = (bancosFiltrados.length > 0 ? bancosFiltrados : provMapped).sort((a, b) =>
-    a.nombre.localeCompare(b.nombre)
-  );
+  // ---------------------------
+  // ✅ Filtrado estricto por rama_id (BANCOS o FINANCIERAS)
+  // ---------------------------
+  const bancos = proveedores
+    .filter((p) => RAMAS_BANCO_VALIDAS.has(p.rama_id))
+    .sort((a, b) => a.nombre.localeCompare(b.nombre));
 
+  // Logs diagnósticos: si quedara vacío, verás qué ramas llegan realmente
+  console.log('[prestamosApi][catalogs] proveedores.len=', proveedores.length);
+  console.log('[prestamosApi][catalogs] bancos.len=', bancos.length);
+  if (bancos.length === 0) {
+    const ramasDetectadas = Array.from(new Set(proveedores.map((p) => p.rama_id).filter(Boolean)));
+    console.log('[prestamosApi][catalogs] ramasDetectadas=', ramasDetectadas);
+    console.log('[prestamosApi][catalogs] sampleProveedor=', proveedores.slice(0, 3));
+  }
+
+  // ---------------------------
+  // Cuentas
+  // Nota: si quieres mostrar liquidez en el screen, debes mapear liquidez aquí.
+  // ---------------------------
   const cuentas = (cuentasRaw ?? [])
     .map((c: any) => ({
       id: safeStr(c.id),
       anagrama: safeStr(c.anagrama ?? c.referencia ?? c.id),
       banco_id: c.banco_id != null ? safeStr(c.banco_id) : null,
+      // Si existe en tu API: liquidez: c.liquidez ?? null,
     }))
     .sort((a, b) => a.anagrama.localeCompare(b.anagrama));
 
+  // ---------------------------
+  // Viviendas
+  // ---------------------------
   const viviendas = (viviendasRaw ?? [])
     .map((v: any) => ({
       id: safeStr(v.id),
       referencia: safeStr(v.referencia ?? v.id),
       direccion_completa: v.direccion_completa != null ? safeStr(v.direccion_completa) : null,
+      // Si existe en tu API: activo: v.activo ?? true,
     }))
     .sort((a, b) => a.referencia.localeCompare(b.referencia));
 
@@ -332,7 +337,7 @@ export async function catalogs(): Promise<PrestamosCatalogs> {
 
 /**
  * =========================================================
- * Facade para compatibilidad con los screens V3
+ * Facade para compatibilidad con screens V3
  * =========================================================
  */
 export const prestamosApi = {
