@@ -1,35 +1,16 @@
 /**
  * Archivo: screens/gastos/GastoCotidianoFormScreen.tsx
  *
- * Responsabilidad:
- *   - Pantalla de alta/edición y consulta (readOnly) de un Gasto Cotidiano.
- *   - Gestiona carga de catálogos (proveedores/cuentas), selección de tipo/proveedor/cuenta,
- *     lógica V3 de pago y reparto (importe total, tipo de pago, cantidad, importe imputable, participo),
- *     y guardado (crear/actualizar).
- *
- * Maneja:
- *   - UI: FormScreen + secciones reutilizables (FormSection) y controles tipo “pill”.
- *   - Estado: local (useState) para campos del formulario y flags.
- *   - Datos: fetchProveedores/fetchCuentas y crear/actualizar gasto cotidiano.
- *   - Navegación: retorno explícito (returnToTab/returnToScreen/returnToParams) y compatibilidad legacy.
- *
- * Notas:
- *   - Replicado patrón “Gestionables”:
- *       - Header: title fijo + subtitle indicando modo (Alta/Edición/Consulta).
- *       - Fecha: uso de FormDateButton (estándar de formularios).
- *   - El bloque específico de estilos "Reparto" se ha extraído a un componente reutilizable:
- *     components/forms/RepartoRow. Esta pantalla no mantiene estilos locales.
+ * Fix UX:
+ *   - No resetear el formulario al volver de crear proveedor (se elimina reset al foco).
+ *   - Confirmación al volver si hay datos sin guardar ("si sales perderás los datos").
+ *   - Reset solo cuando:
+ *       a) guardas gasto (antes de salir), o
+ *       b) sales confirmando descarte.
  */
 
 import React, { useEffect, useMemo, useState } from 'react';
-import {
-  View,
-  Text,
-  TextInput,
-  TouchableOpacity,
-  Alert,
-  RefreshControl,
-} from 'react-native';
+import { View, Text, TextInput, TouchableOpacity, Alert } from 'react-native';
 import { useFocusEffect } from '@react-navigation/native';
 import { Ionicons } from '@expo/vector-icons';
 import DateTimePicker, { DateTimePickerEvent } from '@react-native-community/datetimepicker';
@@ -44,8 +25,6 @@ import FormScreen from '../../components/forms/FormScreen';
 import { FormActionButton } from '../../components/ui/FormActionButton';
 import RepartoRow from '../../components/forms/RepartoRow';
 import { FormDateButton } from '../../components/ui/FormDateButton';
-
-import { useResetFormOnFocus } from '../../utils/formsUtils';
 
 import {
   GastoCotidiano,
@@ -88,7 +67,7 @@ export const GastoCotidianoFormScreen: React.FC<Props> = ({ navigation, route })
   const returnToScreen: string | undefined = route?.params?.returnToScreen;
   const returnToParams: any | undefined = route?.params?.returnToParams;
 
-  const handleBack = () => {
+  const doNavigateBack = () => {
     if (returnToTab) {
       if (returnToScreen) {
         navigation.navigate(returnToTab, {
@@ -180,12 +159,8 @@ export const GastoCotidianoFormScreen: React.FC<Props> = ({ navigation, route })
   const [comunidad, setComunidad] = useState<string>((gastoEdit as any)?.comunidad ?? '');
 
   // GASOLINA (opcional)
-  const [precioLitro, setPrecioLitro] = useState<string>(
-    gastoEdit?.precio_litro != null ? String(gastoEdit.precio_litro) : ''
-  );
-  const [litros, setLitros] = useState<string>(
-    gastoEdit?.litros != null ? String(gastoEdit.litros) : ''
-  );
+  const [precioLitro, setPrecioLitro] = useState<string>(gastoEdit?.precio_litro != null ? String(gastoEdit.precio_litro) : '');
+  const [litros, setLitros] = useState<string>(gastoEdit?.litros != null ? String(gastoEdit.litros) : '');
   const [km, setKm] = useState<string>(gastoEdit?.km != null ? String(gastoEdit.km) : '');
 
   const [bloquearLitros, setBloquearLitros] = useState(false);
@@ -194,7 +169,7 @@ export const GastoCotidianoFormScreen: React.FC<Props> = ({ navigation, route })
   const [refreshing, setRefreshing] = useState(false);
 
   // ========================
-  // ✅ Reset centralizado al foco (solo Alta/Nuevo)
+  // Reset explícito (solo cuando corresponde por UX)
   // ========================
   const resetFormToNew = React.useCallback(() => {
     const hoy = new Date().toISOString().slice(0, 10);
@@ -202,7 +177,6 @@ export const GastoCotidianoFormScreen: React.FC<Props> = ({ navigation, route })
     setFecha(hoy);
     setShowDatePicker(false);
 
-    // defaults coherentes con tu lógica V3
     setTipoPago(1);
     setImporteTotal('');
     setCantidad('1');
@@ -229,13 +203,6 @@ export const GastoCotidianoFormScreen: React.FC<Props> = ({ navigation, route })
     setBloquearLitros(false);
     setBloquearPrecioLitro(false);
   }, []);
-
-  useResetFormOnFocus({
-    readOnly,
-    isEdit,
-    auxResult: route?.params?.auxResult,
-    onReset: resetFormToNew,
-  });
 
   // ========================
   // Carga catálogos
@@ -280,6 +247,7 @@ export const GastoCotidianoFormScreen: React.FC<Props> = ({ navigation, route })
 
           setProveedores(merged);
 
+          // FIX: solo actualizamos lo relativo al proveedor; NO tocamos el resto del formulario.
           setProveedorSeleccionado(nuevoProveedor);
           setBusquedaProveedor('');
           setLocalidad(nuevoProveedor.localidad ?? '');
@@ -329,10 +297,7 @@ export const GastoCotidianoFormScreen: React.FC<Props> = ({ navigation, route })
   // ========================
   // Rama por tipo
   // ========================
-  const ramaIdSeleccionada = useMemo(
-    () => (tipoId ? RAMA_POR_TIPO[tipoId] : undefined),
-    [tipoId]
-  );
+  const ramaIdSeleccionada = useMemo(() => (tipoId ? RAMA_POR_TIPO[tipoId] : undefined), [tipoId]);
 
   // ========================
   // Proveedores filtrados
@@ -372,10 +337,7 @@ export const GastoCotidianoFormScreen: React.FC<Props> = ({ navigation, route })
     if (readOnly) return;
 
     if (!tipoId) {
-      Alert.alert(
-        'Selecciona un tipo',
-        'Primero selecciona un tipo de gasto para poder crear un proveedor asociado.'
-      );
+      Alert.alert('Selecciona un tipo', 'Primero selecciona un tipo de gasto para poder crear un proveedor asociado.');
       return;
     }
 
@@ -485,14 +447,10 @@ export const GastoCotidianoFormScreen: React.FC<Props> = ({ navigation, route })
     const totalNum = parseEuroToNumber(importeTotal) ?? 0;
 
     const cantEff =
-      isTipo1 || isTipo2
-        ? 1
-        : isTipo3
-        ? 2
-        : (() => {
-            const c = parseCantidadInt(cantidad);
-            return c && c > 0 ? c : 0;
-          })();
+      isTipo1 || isTipo2 ? 1 : isTipo3 ? 2 : (() => {
+        const c = parseCantidadInt(cantidad);
+        return c && c > 0 ? c : 0;
+      })();
 
     if (totalNum > 0 && cantEff > 0) {
       const parte = totalNum / cantEff;
@@ -511,12 +469,10 @@ export const GastoCotidianoFormScreen: React.FC<Props> = ({ navigation, route })
     const parteNum = parseEuroToNumber(text) ?? 0;
     if (parteNum <= 0) return;
 
-    const cantEff = isTipo3
-      ? 2
-      : (() => {
-          const c = parseCantidadInt(cantidad);
-          return c && c > 0 ? c : 0;
-        })();
+    const cantEff = isTipo3 ? 2 : (() => {
+      const c = parseCantidadInt(cantidad);
+      return c && c > 0 ? c : 0;
+    })();
 
     if (!cantEff || cantEff <= 0) return;
 
@@ -527,6 +483,90 @@ export const GastoCotidianoFormScreen: React.FC<Props> = ({ navigation, route })
   const handleChangeCantidad = (text: string) => {
     if (readOnly) return;
     setCantidad(text);
+  };
+
+  // ========================
+  // Dirty check + confirmación al volver
+  // ========================
+  const norm = (v: any) => String(v ?? '').trim();
+
+  const initialSnapshot = useMemo(() => {
+    return {
+      fecha: norm(gastoEdit?.fecha ?? hoyIso),
+      tipoPago: initTipoPago,
+      importeTotal: norm(initImporteTotal),
+      cantidad: norm(initCantidad),
+      importeParte: norm(initImporteParte),
+      tipoId: norm(gastoEdit?.tipo_id ?? ''),
+      proveedorId: norm(gastoEdit?.proveedor_id ?? ''),
+      cuentaId: norm(gastoEdit?.cuenta_id ?? ''),
+      evento: norm(gastoEdit?.evento ?? ''),
+      observaciones: norm(gastoEdit?.observaciones ?? ''),
+      precioLitro: norm(gastoEdit?.precio_litro ?? ''),
+      litros: norm(gastoEdit?.litros ?? ''),
+      km: norm(gastoEdit?.km ?? ''),
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const isDirty = useMemo(() => {
+    if (readOnly) return false;
+
+    return (
+      norm(fecha) !== initialSnapshot.fecha ||
+      tipoPago !== initialSnapshot.tipoPago ||
+      norm(importeTotal) !== initialSnapshot.importeTotal ||
+      norm(cantidad) !== initialSnapshot.cantidad ||
+      norm(importeParte) !== initialSnapshot.importeParte ||
+      norm(tipoId) !== initialSnapshot.tipoId ||
+      norm(proveedorSeleccionado?.id ?? '') !== initialSnapshot.proveedorId ||
+      norm(cuentaId ?? '') !== initialSnapshot.cuentaId ||
+      norm(evento) !== initialSnapshot.evento ||
+      norm(observaciones) !== initialSnapshot.observaciones ||
+      norm(precioLitro) !== initialSnapshot.precioLitro ||
+      norm(litros) !== initialSnapshot.litros ||
+      norm(km) !== initialSnapshot.km
+    );
+  }, [
+    readOnly,
+    fecha,
+    tipoPago,
+    importeTotal,
+    cantidad,
+    importeParte,
+    tipoId,
+    proveedorSeleccionado,
+    cuentaId,
+    evento,
+    observaciones,
+    precioLitro,
+    litros,
+    km,
+    initialSnapshot,
+  ]);
+
+  const handleBack = () => {
+    if (!isDirty) {
+      doNavigateBack();
+      return;
+    }
+
+    Alert.alert(
+      'Salir del formulario',
+      'Si sales del formulario perderás los datos no guardados.',
+      [
+        { text: 'Cancelar', style: 'cancel' },
+        {
+          text: 'Salir',
+          style: 'destructive',
+          onPress: () => {
+            // UX: al confirmar salida, dejamos limpio el formulario.
+            resetFormToNew();
+            doNavigateBack();
+          },
+        },
+      ]
+    );
   };
 
   // ========================
@@ -607,10 +647,28 @@ export const GastoCotidianoFormScreen: React.FC<Props> = ({ navigation, route })
     try {
       if (isEdit && gastoEdit?.id) {
         await actualizarGastoCotidiano(gastoEdit.id, payload);
-        Alert.alert('Éxito', 'Gasto actualizado correctamente.', [{ text: 'OK', onPress: handleBack }]);
+        Alert.alert('Éxito', 'Gasto actualizado correctamente.', [
+          {
+            text: 'OK',
+            onPress: () => {
+              // reset al guardar (según regla) y salir
+              resetFormToNew();
+              doNavigateBack();
+            },
+          },
+        ]);
       } else {
         await crearGastoCotidiano(payload);
-        Alert.alert('Éxito', 'Gasto guardado correctamente.', [{ text: 'OK', onPress: handleBack }]);
+        Alert.alert('Éxito', 'Gasto guardado correctamente.', [
+          {
+            text: 'OK',
+            onPress: () => {
+              // reset al guardar (según regla) y salir
+              resetFormToNew();
+              doNavigateBack();
+            },
+          },
+        ]);
       }
     } catch (err) {
       console.error('[GastoCotidianoForm] Error al guardar', err);
@@ -810,9 +868,7 @@ export const GastoCotidianoFormScreen: React.FC<Props> = ({ navigation, route })
               ))}
             </View>
 
-            {!participo && (
-              <Text style={styles.helperText}>Este gasto no lo pagas tú, no afecta a tu liquidez.</Text>
-            )}
+            {!participo && <Text style={styles.helperText}>Este gasto no lo pagas tú, no afecta a tu liquidez.</Text>}
           </View>
         </FormSection>
       </FormSection>
@@ -906,15 +962,9 @@ export const GastoCotidianoFormScreen: React.FC<Props> = ({ navigation, route })
         <View style={styles.field}>
           <Text style={styles.label}>Fecha</Text>
 
-          <FormDateButton
-            valueText={formatFechaCorta(fecha)}
-            onPress={handleOpenDatePicker}
-            disabled={readOnly}
-          />
+          <FormDateButton valueText={formatFechaCorta(fecha)} onPress={handleOpenDatePicker} disabled={readOnly} />
 
-          {showDatePicker && (
-            <DateTimePicker value={new Date(fecha)} mode="date" display="default" onChange={handleDateChange} />
-          )}
+          {showDatePicker && <DateTimePicker value={new Date(fecha)} mode="date" display="default" onChange={handleDateChange} />}
         </View>
 
         {esRestaurante && (

@@ -2,19 +2,15 @@
  * Archivo: mobile_app/screens/auxiliares/AuxEntityFormScreen.tsx
  *
  * Objetivo:
- *   - Que Rama proveedor, Localidad, Comunidad/Región y País usen el MISMO patrón de desplegable
- *     que "Proveedor" en GastoCotidiano/Gestionable: InlineSearchSelect.
+ *   - Rama proveedor, Localidad, Comunidad/Región y País usan InlineSearchSelect.
+ *   - Fix UX:
+ *       1) Si se crea proveedor desde cotidianos con rama preseleccionada (ramaBloqueada),
+ *          el selector NO debe mostrar todo el listado: solo la rama fijada.
+ *       2) Al volver de crear Localidad, debe quedar preseleccionada (y estar en options).
+ *       3) No perder datos al salir sin guardar: confirmación al volver si hay cambios.
  *
- * Nota técnica:
- *   - InlineSearchSelect requiere onAddPress y onClear OBLIGATORIOS.
- *   - Por tanto, SIEMPRE pasamos:
- *       - onAddPress: no-op cuando no aplique
- *       - onClear: no-op cuando esté bloqueado (ramaBloqueada), o clear real cuando aplique
- *
- * Corrección clave (backend):
- *   - Tu backend /api/v1/proveedores NO acepta localidad_id.
- *   - Por tanto: NO enviamos localidad_id en create/update de proveedor.
- *   - Guardamos texto: localidad / comunidad / pais (como define ProveedorCreate/Update en backend).
+ * Nota backend:
+ *   - Backend proveedores NO acepta localidad_id: se envían TEXTOS localidad/comunidad/pais.
  */
 
 import React, { useEffect, useMemo, useState } from 'react';
@@ -32,12 +28,7 @@ import { SelectedInlineValue } from '../../components/ui/SelectedInlineValue';
 
 import { colors, spacing, radius } from '../../theme';
 
-import {
-  createProveedorFromAuxForm,
-  updateProveedor,
-  deleteProveedor,
-  Proveedor,
-} from '../../services/proveedoresApi';
+import { createProveedorFromAuxForm, updateProveedor, deleteProveedor, Proveedor } from '../../services/proveedoresApi';
 
 import {
   listLocalidades,
@@ -71,6 +62,23 @@ type RegionOption = {
 
 type PaisOption = { id: number; nombre: string };
 
+type DirtySnapshot = {
+  mode: 'proveedor' | 'aux';
+
+  // común
+  nombre: string;
+
+  // proveedor
+  ramaId: string;
+  localidad: string;
+  comunidad: string;
+  pais: string;
+
+  // aux (ej: tipo_gasto)
+  ramaGastoId: string;
+  segmentoGastoId: string;
+};
+
 type SimpleAuxItem = { id: string; nombre: string; [k: string]: any };
 
 const NOOP = () => {};
@@ -103,9 +111,7 @@ export const AuxEntityFormScreen: React.FC<Props> = ({ navigation, route }) => {
   // AUX (NO proveedor)
   // =========================
   const [ramaGastoId, setRamaGastoId] = useState<string | null>(null);
-  const [segmentoGastoId, setSegmentoGastoId] = useState<string | null>(
-    route?.params?.defaultSegmentoId ?? null
-  );
+  const [segmentoGastoId, setSegmentoGastoId] = useState<string | null>(route?.params?.defaultSegmentoId ?? null);
 
   const [ramasGasto, setRamasGasto] = useState<Array<{ id: string; nombre: string }>>([]);
   const [segmentosGasto, setSegmentosGasto] = useState<Array<{ id: string; nombre: string }>>([]);
@@ -151,6 +157,7 @@ export const AuxEntityFormScreen: React.FC<Props> = ({ navigation, route }) => {
   const [busquedaRegion, setBusquedaRegion] = useState('');
   const [busquedaPais, setBusquedaPais] = useState('');
 
+  // Regla UX: si vienes de cotidianos con rama fijada, NO debe poder cambiarse.
   const ramaBloqueada = origin === 'cotidianos' && !!ramaId;
 
   // =============================================================================
@@ -229,6 +236,7 @@ export const AuxEntityFormScreen: React.FC<Props> = ({ navigation, route }) => {
     if (auxResult?.type === 'localidad' && auxResult?.item) {
       const loc: LocalidadWithContext = auxResult.item;
 
+      // 1) Selección (preselección efectiva)
       setLocalidadId(loc.id);
       setLocalidad(loc.nombre);
 
@@ -241,6 +249,7 @@ export const AuxEntityFormScreen: React.FC<Props> = ({ navigation, route }) => {
       setComunidad(regionNombre);
       setPais(paisNombre);
 
+      // 2) Cerrar modos inline
       setCreatingLocalidad(false);
       setNewLocalidadText('');
       setCreatingRegion(false);
@@ -248,9 +257,20 @@ export const AuxEntityFormScreen: React.FC<Props> = ({ navigation, route }) => {
       setCreatingPais(false);
       setNewPaisText('');
 
+      // 3) Limpiar búsquedas
       setBusquedaLocalidad('');
       setBusquedaRegion('');
       setBusquedaPais('');
+
+      // 4) Importante: asegurar que la localidad exista en options
+      setLocalidadOptions((prev) => {
+        const exists = prev.some((x) => x.id === loc.id);
+        if (exists) return prev;
+        return [loc, ...prev].slice(0, 800);
+      });
+
+      // 5) Actualizar regiones/países derivados si vienen en el objeto
+      buildRegionAndPaisOptionsFromLocalidades([loc]);
     }
   }, [route?.params?.auxResult, isProveedor, navigation]);
 
@@ -321,9 +341,9 @@ export const AuxEntityFormScreen: React.FC<Props> = ({ navigation, route }) => {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isProveedor]);
 
-  // =========================
+  // =============================================================================
   // Cargas catálogo proveedor/ubicaciones
-  // =========================
+  // =============================================================================
   const buildRegionAndPaisOptionsFromLocalidades = (locs: LocalidadWithContext[]) => {
     const regionMap = new Map<number, RegionOption>();
     const paisMap = new Map<number, PaisOption>();
@@ -429,14 +449,43 @@ export const AuxEntityFormScreen: React.FC<Props> = ({ navigation, route }) => {
     }
   };
 
+  // =============================================================================
+  // FIX: si rama viene preseleccionada (cotidianos) pero ramaNombre está vacío, resolverlo.
+  // =============================================================================
+  useEffect(() => {
+    if (!isProveedor) return;
+    if (!ramaId) return;
+
+    // En rama bloqueada, mantenemos UX limpia (sin query).
+    if (ramaBloqueada && busquedaRamaProveedor !== '') setBusquedaRamaProveedor('');
+
+    // Si falta ramaNombre, lo resolvemos al cargar catálogo.
+    if (ramaNombre) return;
+
+    const found = ramaOptions.find((r) => r.id === ramaId);
+    if (found?.nombre) {
+      setRamaNombre(found.nombre);
+      return;
+    }
+
+    // Si aún no hay options, intentamos cargarlas y se resolverá al actualizar ramaOptions.
+    void ensureRamasProveedorLoaded();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isProveedor, ramaId, ramaNombre, ramaOptions, ramaBloqueada]);
+
   // =========================
   // Filtrados (InlineSearchSelect)
   // =========================
   const ramasProveedorFiltradas = useMemo(() => {
+    // UX FIX: cuando rama está bloqueada, no mostramos el listado completo.
+    if (ramaBloqueada && ramaId) {
+      return ramaOptions.filter((r) => r.id === ramaId);
+    }
+
     const term = busquedaRamaProveedor.trim().toLowerCase();
     if (!term) return ramaOptions.slice(0, 50);
     return ramaOptions.filter((r) => (r.nombre ?? '').toLowerCase().includes(term)).slice(0, 50);
-  }, [ramaOptions, busquedaRamaProveedor]);
+  }, [ramaOptions, busquedaRamaProveedor, ramaBloqueada, ramaId]);
 
   const localidadesFiltradas = useMemo(() => {
     const term = busquedaLocalidad.trim().toLowerCase();
@@ -780,8 +829,6 @@ export const AuxEntityFormScreen: React.FC<Props> = ({ navigation, route }) => {
       const finalLocalidadId = hasLocalidadText ? await ensureLocalidadCreatedIfNeeded() : null;
 
       // Backend proveedores acepta TEXTOS, no localidad_id:
-      // - localidad / comunidad / pais
-      // Aun así, mantener finalLocalidadId en estado sirve a la UI (selección), pero NO se envía.
       const payloadForBackend = {
         nombre: nombreFinal,
         rama_id: ramaId,
@@ -807,7 +854,6 @@ export const AuxEntityFormScreen: React.FC<Props> = ({ navigation, route }) => {
 
       sendResultAndClose({ type: auxType, item: creado, key: returnKey ?? null, mode: 'created' });
     } catch (err: any) {
-      // Logging robusto: aquí es donde necesitas ver si es 422 (validación), 401, 400, etc.
       if (axios.isAxiosError(err)) {
         const status = err.response?.status;
         const data = err.response?.data;
@@ -824,7 +870,6 @@ export const AuxEntityFormScreen: React.FC<Props> = ({ navigation, route }) => {
           return;
         }
 
-        // Si fuese 422, normalmente te vendrá un array con errores de validación
         if (status === 422) {
           Alert.alert('Datos inválidos', 'Revisa los campos requeridos para esa rama (localidad/país/comunidad).');
           return;
@@ -846,51 +891,43 @@ export const AuxEntityFormScreen: React.FC<Props> = ({ navigation, route }) => {
     if (!isProveedor) {
       if (!editingItem?.id) return;
 
-      Alert.alert(
-        'Eliminar registro',
-        `¿Seguro que quieres eliminar "${editingItem.nombre}"? Esta acción no se puede deshacer.`,
-        [
-          { text: 'Cancelar', style: 'cancel' },
-          {
-            text: 'Eliminar',
-            style: 'destructive',
-            onPress: async () => {
-              try {
-                await deleteAux(auxType as AuxEntity, editingItem.id);
-                navigation.goBack();
-              } catch (err) {
-                console.error('[AuxEntityForm] Error al eliminar auxiliar', err);
-                Alert.alert('Error', 'No se ha podido eliminar el registro.');
-              }
-            },
-          },
-        ]
-      );
-      return;
-    }
-
-    if (!editingProveedor) return;
-
-    Alert.alert(
-      'Eliminar proveedor',
-      `¿Seguro que quieres eliminar "${editingProveedor.nombre}"? Esta acción no se puede deshacer.`,
-      [
+      Alert.alert('Eliminar registro', `¿Seguro que quieres eliminar "${editingItem.nombre}"? Esta acción no se puede deshacer.`, [
         { text: 'Cancelar', style: 'cancel' },
         {
           text: 'Eliminar',
           style: 'destructive',
           onPress: async () => {
             try {
-              await deleteProveedor(editingProveedor.id);
+              await deleteAux(auxType as AuxEntity, editingItem.id);
               navigation.goBack();
             } catch (err) {
-              console.error('[AuxEntityForm] Error al eliminar proveedor', err);
-              Alert.alert('Error', 'No se ha podido eliminar el proveedor.');
+              console.error('[AuxEntityForm] Error al eliminar auxiliar', err);
+              Alert.alert('Error', 'No se ha podido eliminar el registro.');
             }
           },
         },
-      ]
-    );
+      ]);
+      return;
+    }
+
+    if (!editingProveedor) return;
+
+    Alert.alert('Eliminar proveedor', `¿Seguro que quieres eliminar "${editingProveedor.nombre}"? Esta acción no se puede deshacer.`, [
+      { text: 'Cancelar', style: 'cancel' },
+      {
+        text: 'Eliminar',
+        style: 'destructive',
+        onPress: async () => {
+          try {
+            await deleteProveedor(editingProveedor.id);
+            navigation.goBack();
+          } catch (err) {
+            console.error('[AuxEntityForm] Error al eliminar proveedor', err);
+            Alert.alert('Error', 'No se ha podido eliminar el proveedor.');
+          }
+        },
+      },
+    ]);
   };
 
   const title =
@@ -907,12 +944,152 @@ export const AuxEntityFormScreen: React.FC<Props> = ({ navigation, route }) => {
       : 'Nuevo registro';
 
   // =============================================================================
+  // Confirmación al salir si hay cambios sin guardar (dirty)
+  // =============================================================================
+  const normalize = (v: any) => String(v ?? '').trim();
+
+  const initialSnapshot = useMemo<DirtySnapshot>(() => {
+    if (isProveedor) {
+      if (editingProveedor) {
+        return {
+          mode: 'proveedor',
+          nombre: normalize(editingProveedor.nombre),
+          ramaId: normalize(editingProveedor.rama_id),
+          localidad: normalize(editingProveedor.localidad),
+          comunidad: normalize(editingProveedor.comunidad),
+          pais: normalize(editingProveedor.pais),
+
+          ramaGastoId: '',
+          segmentoGastoId: '',
+        };
+      }
+
+      // Nuevo proveedor:
+      // Si rama viene preseleccionada/bloqueada desde cotidianos, NO lo contamos como "cambio" por sí solo.
+      return {
+        mode: 'proveedor',
+        nombre: '',
+        ramaId: ramaBloqueada ? '' : normalize(ramaId),
+        localidad: '',
+        comunidad: '',
+        pais: '',
+
+        ramaGastoId: '',
+        segmentoGastoId: '',
+      };
+    }
+
+    // Aux genérico (tipo_gasto u otros)
+    if (editingItem) {
+      return {
+        mode: 'aux',
+        nombre: normalize(editingItem.nombre),
+
+        ramaId: '',
+        localidad: '',
+        comunidad: '',
+        pais: '',
+
+        ramaGastoId: normalize((editingItem as any).rama_id),
+        segmentoGastoId: normalize((editingItem as any).segmento_id),
+      };
+    }
+
+    return {
+      mode: 'aux',
+      nombre: '',
+
+      ramaId: '',
+      localidad: '',
+      comunidad: '',
+      pais: '',
+
+      ramaGastoId: '',
+      segmentoGastoId: '',
+    };
+  }, [isProveedor, editingProveedor, editingItem, ramaBloqueada, ramaId]);
+
+  const isDirty = useMemo(() => {
+    if (isProveedor) {
+      const current = {
+        nombre: normalize(nombre),
+        ramaId: ramaBloqueada ? '' : normalize(ramaId),
+        localidad: normalize(creatingLocalidad ? newLocalidadText : localidad),
+        comunidad: normalize(creatingRegion ? newRegionText : comunidad),
+        pais: normalize(creatingPais ? newPaisText : pais),
+      };
+
+      return (
+        current.nombre !== initialSnapshot.nombre ||
+        current.ramaId !== initialSnapshot.ramaId ||
+        current.localidad !== initialSnapshot.localidad ||
+        current.comunidad !== initialSnapshot.comunidad ||
+        current.pais !== initialSnapshot.pais
+      );
+    }
+
+    const current = {
+      nombre: normalize(nombre),
+      ramaGastoId: normalize(ramaGastoId),
+      segmentoGastoId: normalize(segmentoGastoId),
+    };
+
+    return (
+      current.nombre !== initialSnapshot.nombre ||
+      current.ramaGastoId !== initialSnapshot.ramaGastoId ||
+      current.segmentoGastoId !== initialSnapshot.segmentoGastoId
+    );
+  }, [
+    isProveedor,
+    nombre,
+    ramaId,
+    ramaBloqueada,
+    localidad,
+    comunidad,
+    pais,
+    creatingLocalidad,
+    creatingRegion,
+    creatingPais,
+    newLocalidadText,
+    newRegionText,
+    newPaisText,
+    ramaGastoId,
+    segmentoGastoId,
+    initialSnapshot,
+  ]);
+
+
+  const handleBackPress = () => {
+    if (!isDirty) {
+      navigation.goBack();
+      return;
+    }
+
+    Alert.alert(
+      'Salir del formulario',
+      'Si sales del formulario perderás los datos no guardados.',
+      [
+        { text: 'Cancelar', style: 'cancel' },
+        { text: 'Salir', style: 'destructive', onPress: () => navigation.goBack() },
+      ]
+    );
+  };
+
+  // =============================================================================
   // RENDER
   // =============================================================================
+  const selectedRama = useMemo(() => {
+    if (!ramaId) return null;
+    const found = ramaOptions.find((r) => r.id === ramaId);
+    if (found) return found;
+    if (ramaNombre) return ({ id: ramaId, nombre: ramaNombre } as any);
+    return null;
+  }, [ramaId, ramaNombre, ramaOptions]);
+
   return (
     <FormScreen
       title={title}
-      onBackPress={() => navigation.goBack()}
+      onBackPress={handleBackPress}
       loading={false}
       footer={
         <View style={styles.bottomActions}>
@@ -1005,11 +1182,13 @@ export const AuxEntityFormScreen: React.FC<Props> = ({ navigation, route }) => {
                 onAddPress={NOOP}
                 addAccessibilityLabel="Añadir (no aplica)"
                 disabled={ramaBloqueada}
-                selected={ramaId && ramaNombre ? ({ id: ramaId, nombre: ramaNombre } as any) : null}
+                selected={selectedRama}
                 selectedLabel={(r) => r.nombre}
                 onClear={ramaBloqueada ? NOOP : clearRama}
-                query={busquedaRamaProveedor}
+                query={ramaBloqueada ? '' : busquedaRamaProveedor}
                 onChangeQuery={(v) => {
+                  // Si está bloqueada, no permitimos interacción (ni filtros).
+                  if (ramaBloqueada) return;
                   setBusquedaRamaProveedor(v);
                   void ensureRamasProveedorLoaded();
                 }}
