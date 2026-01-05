@@ -1,29 +1,29 @@
 /**
  * Archivo: screens/gastos/GastoGestionableFormScreen.tsx
  *
- * Objetivo del ajuste actual:
- * - Cuando preset === 'extra' (gasto extra), la periodicidad debe:
- *   1) estar preseleccionada como "PAGO UNICO" (ya existía),
- *   2) NO mostrar el resto de periodicidades (como en IngresoForm).
+ * Objetivo del ajuste actual (SOLUCIÓN AL “REINICIO” TRAS CREAR PROVEEDOR/TIPO):
+ * - Al volver desde AuxEntityForm con auxResult (proveedor/tipo_gasto), el formulario NO debe resetearse.
+ * - Debe mantener todos los campos tal y como estaban y, además, dejar preseleccionado el auxiliar creado.
+ *
+ * Causa típica:
+ * - useResetFormOnFocus resetea en “Alta/Nuevo” al recuperar foco, y la vuelta desde AuxEntityForm
+ *   también recupera foco. Si no lo bloqueamos explícitamente, se pierde el estado.
  *
  * Implementación:
- * - Se introduce helper periodicidadesForPreset().
- * - Se ajusta el render para usar periodicidadesForPreset() en lugar de PERIODICIDADES directo.
- * - Se añade un efecto de "hardening" para asegurar que en preset extra la periodicidad no se desvíe.
+ * - Se introduce skipResetOnNextFocusRef:
+ *    - Se activa (true) justo antes de navegar a AuxEntityForm.
+ *    - Al volver (primer foco), evita que el reset se ejecute.
+ * - Se envuelve el onReset con un guard:
+ *    - Si hay auxResult pendiente, NO se resetea.
+ *    - Si skipResetOnNextFocusRef está activo, NO se resetea y se consume el flag.
  *
  * Importante:
- * - No se eliminan funcionalidades existentes.
- * - Se mantiene la lógica de edición/duplicado.
+ * - No se elimina ninguna funcionalidad existente.
+ * - Se mantiene la lógica de periodicidad preset extra (solo PAGO UNICO).
  */
 
-import React, { useEffect, useMemo, useState } from 'react';
-import {
-  View,
-  Text,
-  TextInput,
-  Alert,
-  TouchableOpacity,
-} from 'react-native';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
+import { View, Text, TextInput, Alert, TouchableOpacity } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import DateTimePicker, { DateTimePickerEvent } from '@react-native-community/datetimepicker';
 import { useFocusEffect } from '@react-navigation/native';
@@ -57,12 +57,7 @@ import {
   Gasto,
 } from '../../services/gastosApi';
 
-import {
-  SEGMENTOS,
-  RANGOS_PAGO,
-  VIVIENDAS_SEGMENTO_ID,
-  MAX_PROVEEDORES_SUGERENCIAS,
-} from '../../constants/general';
+import { SEGMENTOS, RANGOS_PAGO, VIVIENDAS_SEGMENTO_ID, MAX_PROVEEDORES_SUGERENCIAS } from '../../constants/general';
 
 import { PERIODICIDADES } from '../../constants/finance';
 import { parseEuroToNumber, formatFechaCorta, appendMonthYearSuffix } from '../../utils/format';
@@ -102,6 +97,14 @@ function getRangoFromDateString(dateStr: string): string {
 
 export const GastoGestionableFormScreen: React.FC<Props> = ({ navigation, route }) => {
   const styles = commonFormStyles;
+
+  // =========================================================
+  // ✅ FIX: evitar reset al volver de AuxEntityForm
+  // ---------------------------------------------------------
+  // Se activa justo antes de navegar a AuxEntityForm.
+  // En el primer foco de vuelta, bloquea el reset y se consume.
+  // =========================================================
+  const skipResetOnNextFocusRef = useRef<boolean>(false);
 
   // ========================
   // Modo de pantalla
@@ -188,9 +191,7 @@ export const GastoGestionableFormScreen: React.FC<Props> = ({ navigation, route 
   const [importeCuota, setImporteCuota] = useState<string>(
     gastoSource?.importe_cuota != null ? String(gastoSource.importe_cuota) : ''
   );
-  const [importeTotal, setImporteTotal] = useState<string>(
-    gastoSource?.importe != null ? String(gastoSource.importe) : ''
-  );
+  const [importeTotal, setImporteTotal] = useState<string>(gastoSource?.importe != null ? String(gastoSource.importe) : '');
 
   // ========================
   // Periodicidad
@@ -219,7 +220,6 @@ export const GastoGestionableFormScreen: React.FC<Props> = ({ navigation, route 
   /**
    * ✅ Hardening:
    * Si estamos en preset extra, no permitimos que periodicidad quede en otro valor.
-   * (Evita estados raros por cambios previos o restores de navegación.)
    */
   useEffect(() => {
     if (preset !== 'extra') return;
@@ -237,8 +237,7 @@ export const GastoGestionableFormScreen: React.FC<Props> = ({ navigation, route 
   // Campos “solo edición”
   const [cuotasPagadas, setCuotasPagadas] = useState<number>(gastoAny?.cuotas_pagadas ?? 0);
   const [cuotasRestantes, setCuotasRestantes] = useState<number>(
-    gastoAny?.cuotas_restantes ??
-      Math.max((gastoSource?.cuotas ?? 0) - (gastoAny?.cuotas_pagadas ?? 0), 0)
+    gastoAny?.cuotas_restantes ?? Math.max((gastoSource?.cuotas ?? 0) - (gastoAny?.cuotas_pagadas ?? 0), 0)
   );
   const [importePendiente, setImportePendiente] = useState<number>(gastoAny?.importe_pendiente ?? 0);
   const [prestamoId, setPrestamoId] = useState<string>(gastoAny?.prestamo_id ?? gastoAny?.prestamoId ?? '');
@@ -266,8 +265,7 @@ export const GastoGestionableFormScreen: React.FC<Props> = ({ navigation, route 
   const modifiedOn: string | null = gastoAny?.modifiedon ?? null;
   const inactivatedOn: string | null = gastoAny?.inactivatedon ?? null;
   const ultimoPagoOn: string | null = gastoAny?.ultimo_pago_on ?? null;
-  const userName: string | null =
-    gastoAny?.user_nombre ?? gastoAny?.userName ?? gastoAny?.user_id ?? null;
+  const userName: string | null = gastoAny?.user_nombre ?? gastoAny?.userName ?? gastoAny?.user_id ?? null;
 
   // Refresh UI
   const [refreshing, setRefreshing] = useState(false);
@@ -321,13 +319,40 @@ export const GastoGestionableFormScreen: React.FC<Props> = ({ navigation, route 
     setActivo(true);
     setPagado(false);
     setKpi(false);
+
+    console.log('[GastoGestionableForm][RESET] Form reseteado (Alta/Nuevo).');
   }, [preset]);
+
+  /**
+   * ✅ Guard para que el reset se comporte como en IngresoForm:
+   * - NO resetear si venimos de AuxEntityForm con auxResult.
+   * - NO resetear en el primer foco inmediatamente posterior a navegar a AuxEntityForm.
+   */
+  const guardedResetOnFocus = React.useCallback(() => {
+    const hasAuxResult = !!route?.params?.auxResult;
+
+    if (hasAuxResult) {
+      // Consumimos también el flag por seguridad (aunque el auxResult es el guard principal).
+      if (skipResetOnNextFocusRef.current) skipResetOnNextFocusRef.current = false;
+
+      console.log('[GastoGestionableForm][RESET] Skip reset: auxResult pendiente (retorno AuxEntityForm).');
+      return;
+    }
+
+    if (skipResetOnNextFocusRef.current) {
+      skipResetOnNextFocusRef.current = false;
+      console.log('[GastoGestionableForm][RESET] Skip reset: retorno inmediato desde pantalla hija (flag).');
+      return;
+    }
+
+    resetFormToNew();
+  }, [resetFormToNew, route?.params?.auxResult]);
 
   useResetFormOnFocus({
     readOnly,
     isEdit: isEdit || duplicate,
     auxResult: route?.params?.auxResult,
-    onReset: resetFormToNew,
+    onReset: guardedResetOnFocus,
   });
 
   // ========================
@@ -366,6 +391,9 @@ export const GastoGestionableFormScreen: React.FC<Props> = ({ navigation, route 
         if (!res) return;
 
         try {
+          // ------------------------
+          // Tipo de gasto creado
+          // ------------------------
           if (res.type === 'tipo_gasto' && res.item) {
             const nuevoTipo = res.item as TipoGasto;
 
@@ -386,8 +414,13 @@ export const GastoGestionableFormScreen: React.FC<Props> = ({ navigation, route 
 
             setTipos(mergedTipos);
             setTipoId(nuevoTipo.id);
+
+            console.log('[GastoGestionableForm][AUX] Tipo gasto seleccionado:', nuevoTipo.id);
           }
 
+          // ------------------------
+          // Proveedor creado
+          // ------------------------
           if (res.type === 'proveedor' && res.item) {
             const nuevoProv = res.item as Proveedor;
 
@@ -404,8 +437,11 @@ export const GastoGestionableFormScreen: React.FC<Props> = ({ navigation, route 
             setProveedores(mergedProv);
             setProveedorSeleccionado(nuevoProv);
             setBusquedaProveedor('');
+
+            console.log('[GastoGestionableForm][AUX] Proveedor seleccionado:', nuevoProv.id);
           }
         } finally {
+          // Limpieza del auxResult para no reprocesarlo
           navigation.setParams({ auxResult: undefined });
         }
       })();
@@ -422,11 +458,7 @@ export const GastoGestionableFormScreen: React.FC<Props> = ({ navigation, route 
   useEffect(() => {
     const loadStatic = async () => {
       try {
-        const [provRes, ctasRes, vivsRes] = await Promise.all([
-          fetchProveedores(),
-          fetchCuentas(),
-          fetchViviendas(),
-        ]);
+        const [provRes, ctasRes, vivsRes] = await Promise.all([fetchProveedores(), fetchCuentas(), fetchViviendas()]);
         setProveedores(provRes);
         setCuentas(ctasRes);
         setViviendas(vivsRes);
@@ -475,6 +507,7 @@ export const GastoGestionableFormScreen: React.FC<Props> = ({ navigation, route 
     void loadTipos();
   }, [segmentoId, gastoSource]);
 
+  // Refresh manual
   const handleRefresh = async () => {
     setRefreshing(true);
     try {
@@ -484,6 +517,7 @@ export const GastoGestionableFormScreen: React.FC<Props> = ({ navigation, route 
         fetchViviendas(),
         fetchTiposGasto(segmentoId ?? undefined),
       ]);
+
       setProveedores(provRes);
       setCuentas(ctasRes);
       setViviendas(vivsRes);
@@ -495,6 +529,7 @@ export const GastoGestionableFormScreen: React.FC<Props> = ({ navigation, route 
     }
   };
 
+  // Derived
   const tiposFiltrados = useMemo(() => {
     if (!segmentoId) return tipos;
     return tipos.filter((t) => t.segmento_id === segmentoId);
@@ -509,7 +544,9 @@ export const GastoGestionableFormScreen: React.FC<Props> = ({ navigation, route 
     return base.slice(0, MAX_PROVEEDORES_SUGERENCIAS);
   }, [busquedaProveedor, proveedores]);
 
-  // Cuotas / importes
+  // ========================
+  // Handlers: cuotas/importes
+  // ========================
   const handleChangeNumCuotas = (text: string) => {
     const n = Number(text.replace(/\D/g, ''));
     const cuotas = !n || n <= 0 ? 1 : n;
@@ -555,6 +592,7 @@ export const GastoGestionableFormScreen: React.FC<Props> = ({ navigation, route 
     setLockImporteTotal(false);
   };
 
+  // Recalcular pendientes
   useEffect(() => {
     const restantes = Math.max(numCuotas - cuotasPagadas, 0);
     setCuotasRestantes(restantes);
@@ -563,7 +601,9 @@ export const GastoGestionableFormScreen: React.FC<Props> = ({ navigation, route 
     setImportePendiente(restantes * cuotaNum);
   }, [numCuotas, cuotasPagadas, importeCuota]);
 
+  // ========================
   // Fecha
+  // ========================
   const handleOpenDatePicker = () => {
     if (readOnly) return;
     setShowDatePicker(true);
@@ -578,9 +618,15 @@ export const GastoGestionableFormScreen: React.FC<Props> = ({ navigation, route 
     setRangoPago(getRangoFromDateString(iso));
   };
 
+  // ========================
   // Proveedor
+  // ========================
   const handleAddProveedor = () => {
     if (readOnly) return;
+
+    // ✅ IMPORTANTE: marcamos que el siguiente foco es “retorno de hijo”, no “nuevo formulario”
+    skipResetOnNextFocusRef.current = true;
+    console.log('[GastoGestionableForm][NAV] Ir a AuxEntityForm(proveedor) -> skip reset on return.');
 
     navigation.navigate('AuxEntityForm', {
       auxType: 'proveedor',
@@ -598,37 +644,22 @@ export const GastoGestionableFormScreen: React.FC<Props> = ({ navigation, route 
     setBusquedaProveedor('');
   };
 
+  // ========================
   // Guardado
+  // ========================
   const handleSave = async () => {
     if (readOnly) return;
 
-    if (!nombre.trim()) {
-      Alert.alert('Campo requerido', 'El nombre del gasto es obligatorio.');
-      return;
-    }
-    if (!segmentoId) {
-      Alert.alert('Campo requerido', 'Debes seleccionar un segmento.');
-      return;
-    }
-    if (!tipoId) {
-      Alert.alert('Campo requerido', 'Debes seleccionar un tipo de gasto.');
-      return;
-    }
-    if (!proveedorSeleccionado) {
-      Alert.alert('Campo requerido', 'Debes seleccionar un proveedor.');
-      return;
-    }
-    if (!cuentaId) {
-      Alert.alert('Campo requerido', 'Debes seleccionar una cuenta de cargo.');
-      return;
-    }
+    if (!nombre.trim()) return Alert.alert('Campo requerido', 'El nombre del gasto es obligatorio.');
+    if (!segmentoId) return Alert.alert('Campo requerido', 'Debes seleccionar un segmento.');
+    if (!tipoId) return Alert.alert('Campo requerido', 'Debes seleccionar un tipo de gasto.');
+    if (!proveedorSeleccionado) return Alert.alert('Campo requerido', 'Debes seleccionar un proveedor.');
+    if (!cuentaId) return Alert.alert('Campo requerido', 'Debes seleccionar una cuenta de cargo.');
 
     const cuotaNum = parseEuroToNumber(importeCuota) ?? 0;
     const totalNum = parseEuroToNumber(importeTotal) ?? 0;
-
     if (cuotaNum <= 0 && totalNum <= 0) {
-      Alert.alert('Importe inválido', 'Debes indicar un importe de cuota o un importe total mayor que cero.');
-      return;
+      return Alert.alert('Importe inválido', 'Debes indicar un importe de cuota o un importe total mayor que cero.');
     }
 
     const basePayload: any = {
@@ -660,7 +691,6 @@ export const GastoGestionableFormScreen: React.FC<Props> = ({ navigation, route 
           pagado,
           kpi,
         });
-
         Alert.alert('Éxito', 'Gasto actualizado correctamente.', [{ text: 'OK', onPress: handleBack }]);
       } else {
         const per = normalizePagoUnico(periodicidad);
@@ -692,13 +722,15 @@ export const GastoGestionableFormScreen: React.FC<Props> = ({ navigation, route 
     }
   };
 
+  // ========================
+  // Título / subtítulo
+  // ========================
   const title = 'Gasto gestionable';
-  const subtitle =
-    readOnly ? 'Consulta' :
-    isEdit ? 'Edición de gasto' :
-    duplicate ? 'Duplicado' :
-    'Nuevo gasto gestionable';
+  const subtitle = readOnly ? 'Consulta' : isEdit ? 'Edición de gasto' : duplicate ? 'Duplicado' : 'Nuevo gasto gestionable';
 
+  // ========================
+  // Render
+  // ========================
   return (
     <FormScreen
       title={title}
@@ -775,6 +807,11 @@ export const GastoGestionableFormScreen: React.FC<Props> = ({ navigation, route 
                   Alert.alert('Campo requerido', 'Selecciona primero un segmento.');
                   return;
                 }
+
+                // ✅ IMPORTANTE: marcamos retorno de hijo para NO resetear al volver
+                skipResetOnNextFocusRef.current = true;
+                console.log('[GastoGestionableForm][NAV] Ir a AuxEntityForm(tipo_gasto) -> skip reset on return.');
+
                 navigation.navigate('AuxEntityForm', {
                   auxType: 'tipo_gasto',
                   origin: 'gestionables',
@@ -788,15 +825,9 @@ export const GastoGestionableFormScreen: React.FC<Props> = ({ navigation, route 
             />
           </View>
 
-          {!segmentoId && (
-            <Text style={styles.helperText}>
-              Selecciona primero un segmento para ver los tipos de gasto.
-            </Text>
-          )}
+          {!segmentoId && <Text style={styles.helperText}>Selecciona primero un segmento para ver los tipos de gasto.</Text>}
 
-          {segmentoId && tiposFiltrados.length === 0 && (
-            <Text style={styles.helperText}>No hay tipos de gasto para este segmento.</Text>
-          )}
+          {segmentoId && tiposFiltrados.length === 0 && <Text style={styles.helperText}>No hay tipos de gasto para este segmento.</Text>}
 
           {segmentoId && tiposFiltrados.length > 0 && (
             <View style={styles.segmentosRow}>
@@ -901,8 +932,6 @@ export const GastoGestionableFormScreen: React.FC<Props> = ({ navigation, route 
 
         <View style={styles.field}>
           <Text style={styles.label}>Periodicidad</Text>
-
-          {/* ✅ FIX: preset extra => solo PAGO UNICO */}
           <View style={styles.periodicidadRow}>
             {periodicidadesForPreset.map((p) => (
               <View key={p} style={styles.periodicidadPillWrapper}>
@@ -911,8 +940,6 @@ export const GastoGestionableFormScreen: React.FC<Props> = ({ navigation, route 
                   selected={normalizePagoUnico(periodicidad) === p}
                   onPress={() => {
                     if (readOnly) return;
-
-                    // Si preset extra, no permitimos cambiar a otras periodicidades (no existen en UI)
                     setPeriodicidad(p);
                   }}
                 />
@@ -936,11 +963,7 @@ export const GastoGestionableFormScreen: React.FC<Props> = ({ navigation, route 
               </View>
               <View style={styles.col}>
                 <Text style={styles.label}>Cuotas restantes</Text>
-                <TextInput
-                  style={[styles.input, styles.inputAdvanced, styles.inputDisabled]}
-                  editable={false}
-                  value={String(cuotasRestantes)}
-                />
+                <TextInput style={[styles.input, styles.inputAdvanced, styles.inputDisabled]} editable={false} value={String(cuotasRestantes)} />
               </View>
             </View>
 
@@ -1041,9 +1064,7 @@ export const GastoGestionableFormScreen: React.FC<Props> = ({ navigation, route 
           <Text style={styles.label}>Fecha</Text>
           <FormDateButton valueText={formatFechaCorta(fecha)} onPress={handleOpenDatePicker} disabled={readOnly} />
 
-          {showDatePicker && (
-            <DateTimePicker value={new Date(fecha)} mode="date" display="default" onChange={handleDateChange} />
-          )}
+          {showDatePicker && <DateTimePicker value={new Date(fecha)} mode="date" display="default" onChange={handleDateChange} />}
         </View>
 
         <View style={styles.field}>
@@ -1066,14 +1087,9 @@ export const GastoGestionableFormScreen: React.FC<Props> = ({ navigation, route 
       </FormSection>
 
       <FormSection title="Opciones avanzadas">
-        <TouchableOpacity
-          style={styles.advancedToggle}
-          onPress={() => setShowAdvanced((prev) => !prev)}
-        >
+        <TouchableOpacity style={styles.advancedToggle} onPress={() => setShowAdvanced((prev) => !prev)}>
           <Ionicons name={showAdvanced ? 'chevron-up' : 'chevron-down'} size={16} color={colors.textSecondary} />
-          <Text style={styles.advancedToggleText}>
-            {showAdvanced ? 'Ocultar opciones avanzadas' : 'Mostrar opciones avanzadas'}
-          </Text>
+          <Text style={styles.advancedToggleText}>{showAdvanced ? 'Ocultar opciones avanzadas' : 'Mostrar opciones avanzadas'}</Text>
         </TouchableOpacity>
 
         {showAdvanced && (
