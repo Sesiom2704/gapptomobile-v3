@@ -1,10 +1,8 @@
 # backend/app/api/v1/gastos_router.py
-
 """
 Router de GASTOS para GapptoMobile v3.
 
-Este fichero es una migración casi 1:1 del router de gastos de la v2,
-adaptado a la nueva estructura:
+Migración casi 1:1 del router de gastos de la v2, adaptado a la nueva estructura:
 
 - Usa backend.app.db.session.get_db como dependencia de BD.
 - Usa backend.app.db.models como modelos ORM.
@@ -13,9 +11,15 @@ adaptado a la nueva estructura:
 IMPORTANTE:
 - No se ha eliminado ninguna función ni endpoint respecto a la v2.
 - Se mantiene toda la lógica de cuotas, liquidez, préstamos, reinicios, etc.
-- Ahora todos los datos están vinculados a un usuario (user_id), de forma que
+- Todos los datos están vinculados a un usuario (user_id), de forma que
   cada usuario sólo puede ver y modificar sus propios gastos/ingresos.
+
+Notas recientes (2026-01):
+- Se incluye soporte consistente de `comentarios` en create/update y serializaciones
+  (vacíos -> None, no upper-case).
 """
+
+from __future__ import annotations
 
 from typing import List, Dict, Any, Optional
 from datetime import date
@@ -30,9 +34,9 @@ from fastapi import (
     Query,
     Response,
 )
-from sqlalchemy.orm import Session
+
+from sqlalchemy.orm import Session, joinedload
 from sqlalchemy import func, text
-from sqlalchemy.orm import joinedload
 
 from backend.app.db.session import get_db
 from backend.app.db import models
@@ -50,12 +54,12 @@ from backend.app.api.v1.auth_router import require_user
 router = APIRouter(tags=["gastos"])
 
 
-# =========================
+# ============================================================
 # Constantes
-# =========================
+# ============================================================
 
-# Segmento COTIDIANOS
-SEG_COT = "COT-12345"   # segmento cotidian@s siempre visible
+# Segmento COTIDIANOS (contenedor “virtual” que se excluye de ciertas lógicas)
+SEG_COT = "COT-12345"
 
 # Periodicidades y sus meses asociados
 PERIOD_MESES = {"TRIMESTRAL": 3, "SEMESTRAL": 6, "ANUAL": 12}
@@ -74,7 +78,7 @@ COT_TIPOS = {
     "ACTIVIDADES":  "ACT-TIPOGASTO-2X9H1Q",
 }
 
-# Grupos de promedio 3M
+# Grupos de promedio 3M (para recalcular "contenedores" en base al consumo real)
 PROM_GROUPS = {
     # Vehículo (contenedor GASOLINA)
     COT_TIPOS["GASOLINA"]: [
@@ -95,18 +99,21 @@ PROM_GROUPS = {
 }
 
 
-# =========================
+# ============================================================
 # Helpers generales
-# =========================
+# ============================================================
 
-def to_payload(model):
+def to_payload(model: Any) -> Dict[str, Any]:
     """
-    Convierte un objeto Pydantic a dict. Soporta model_dump (Pydantic v2) o dict().
+    Convierte un objeto Pydantic a dict.
+
+    - Pydantic v2: model_dump()
+    - Pydantic v1: dict()
     """
     try:
-        return model.model_dump(exclude_unset=False)
+        return model.model_dump(exclude_unset=False)  # type: ignore[attr-defined]
     except AttributeError:
-        return model.dict()
+        return model.dict()  # type: ignore[no-any-return]
 
 
 # Campos que deben ir en mayúsculas (texto)
@@ -122,17 +129,18 @@ _UPPER_ID_FIELDS = {
     # referencia_gasto NO se uppercasea (ids en minúsculas)
 }
 
-
 def _upperize_payload(d: Dict[str, Any]) -> None:
     """
     Recorre el dict y pasa a MAYÚSCULAS los campos definidos en
     _UPPER_FIELDS y _UPPER_ID_FIELDS, si son strings no vacíos.
+
+    Nota: `comentarios` no se upper-casea (contenido libre).
     """
     for k in list(d.keys()):
         v = d.get(k, None)
         if v is None:
             continue
-        if k in _UPPER_FIELDS | _UPPER_ID_FIELDS and isinstance(v, str):
+        if k in (_UPPER_FIELDS | _UPPER_ID_FIELDS) and isinstance(v, str):
             d[k] = v.upper()
 
 
@@ -187,11 +195,11 @@ def _add_months(d: date | None, n: int) -> date | None:
     return date(y, m, min(d.day, last_day))
 
 
-# =========================
-# Helpers: IDs
-# =========================
+# ============================================================
+# Helpers: IDs / Normalización
+# ============================================================
 
-def _norm_ref_id(val) -> str | None:
+def _norm_ref_id(val: Any) -> str | None:
     """
     Normaliza referencia_vivienda_id:
       - None / '' / 'none' (cualquier casing) -> None
@@ -210,7 +218,7 @@ def _norm_ref_id(val) -> str | None:
 def _serialize_gasto_ponderado(
     g: models.Gasto,
     pct_map: Dict[str, float],
-) -> dict:
+) -> Dict[str, Any]:
     """
     Serializa un gasto ponderándolo por participación_pct según referencia_vivienda_id.
     Si no hay ref o no está en el mapa, asume 100%.
@@ -219,7 +227,7 @@ def _serialize_gasto_ponderado(
     pct = pct_map.get(ref, 100.0) if ref else 100.0
     f = pct / 100.0
 
-    def _fnum(v):
+    def _fnum(v: Any) -> float:
         try:
             return float(v or 0.0)
         except Exception:
@@ -244,9 +252,7 @@ def _serialize_gasto_ponderado(
         "total": round(_fnum(getattr(g, "total", 0.0)) * f, 2),
         "cuotas_pagadas": getattr(g, "cuotas_pagadas", None),
         "cuotas_restantes": getattr(g, "cuotas_restantes", None),
-        "importe_pendiente": round(
-            _fnum(getattr(g, "importe_pendiente", 0.0)) * f, 2
-        ),
+        "importe_pendiente": round(_fnum(getattr(g, "importe_pendiente", 0.0)) * f, 2),
 
         "rango_pago": getattr(g, "rango_pago", None),
         "activo": getattr(g, "activo", True),
@@ -256,12 +262,13 @@ def _serialize_gasto_ponderado(
         "modifiedon": getattr(g, "modifiedon", None),
         "referencia_gasto": getattr(g, "referencia_gasto", None),
         "inactivatedon": getattr(g, "inactivatedon", None),
+        "comentarios": getattr(g, "comentarios", None),
     }
 
 
-# =========================
-# Helpers Pago Relacionado
-# =========================
+# ============================================================
+# Helpers: Pago Relacionado (financiaciones/aportaciones)
+# ============================================================
 
 def _fetch_ref_gasto(db: Session, ref_id: str) -> models.Gasto | None:
     """
@@ -342,7 +349,7 @@ def _apply_pago_relacionado_update(
     - Se cambia entre distintos gastos referenciados.
     """
     old_is_pu = ((old.periodicidad or "").upper() == "PAGO UNICO")
-    new_per   = (incoming.get("periodicidad", old.periodicidad) or "").upper()
+    new_per = (incoming.get("periodicidad", old.periodicidad) or "").upper()
     new_is_pu = (new_per == "PAGO UNICO")
 
     old_ref_id = old.referencia_gasto or None
@@ -361,15 +368,9 @@ def _apply_pago_relacionado_update(
     if new_is_pu and new_ref_id:
         new_ref = _fetch_ref_gasto(db, new_ref_id)
         if not new_ref:
-            raise HTTPException(
-                status_code=422,
-                detail="referencia_gasto inválida.",
-            )
+            raise HTTPException(status_code=422, detail="referencia_gasto inválida.")
         if (new_ref.cuotas or 0) <= 0:
-            raise HTTPException(
-                status_code=422,
-                detail="El gasto referenciado no tiene cuotas.",
-            )
+            raise HTTPException(status_code=422, detail="El gasto referenciado no tiene cuotas.")
         new_units = _units_from_amount(new_imp, _per_cuota(new_ref))
 
     if old_is_pu and old_ref_id and (not new_is_pu or not new_ref_id):
@@ -413,9 +414,9 @@ def _apply_pago_relacionado_delete(db: Session, g: models.Gasto) -> None:
     _adjust_ref_by_units(db, ref, +units)
 
 
-# =========================
+# ============================================================
 # Helpers PROM-3M (grupos)
-# =========================
+# ============================================================
 
 def _month_bounds(y: int, m: int) -> tuple[date, date]:
     """
@@ -480,7 +481,7 @@ def _sum_of_avgs_3m(
     user_id: Optional[int] = None,
 ) -> float:
     """
-    Suma de dios 3M para un grupo de tipos, filtrando por usuario si aplica.
+    Suma de promedios 3M para un grupo de tipos, filtrando por usuario si aplica.
     """
     total = 0.0
     for t in (tipo_ids or []):
@@ -545,9 +546,9 @@ def _apply_promedios_3m_por_tipo(db: Session, user_id: Optional[int] = None) -> 
     return total_updates
 
 
-# =========================
+# ============================================================
 # Liquidez helpers
-# =========================
+# ============================================================
 
 def _sum_restante_plan(
     db: Session,
@@ -570,9 +571,9 @@ def _sum_restante_plan(
     return (round(cap, 2), round(inte, 2))
 
 
-# =========================
+# ============================================================
 # Liquidez Préstamos
-# =========================
+# ============================================================
 
 def _mark_next_unpaid_installment_as_paid(
     db: Session,
@@ -608,6 +609,7 @@ def _recompute_pendientes_prestamo(db: Session, prestamo_id: str) -> None:
     p = db.get(models.Prestamo, prestamo_id)
     if not p:
         return
+
     c_paid = (
         db.query(models.PrestamoCuota)
         .filter(
@@ -639,7 +641,7 @@ def _sync_prestamo_cuotas_by_gasto(
     db: Session,
     gasto: models.Gasto,
     prev_cuotas_pagadas: int | None,
-):
+) -> None:
     """
     Si el gasto está asociado a un préstamo, sincroniza el plan de cuotas
     a partir de gasto.cuotas_pagadas:
@@ -650,6 +652,7 @@ def _sync_prestamo_cuotas_by_gasto(
     prestamo_id = getattr(gasto, "prestamo_id", None)
     if not prestamo_id:
         return
+
     n = int(getattr(gasto, "cuotas_pagadas", 0) or 0)
 
     rows = (
@@ -669,13 +672,15 @@ def _sync_prestamo_cuotas_by_gasto(
                 r.pagada = False
                 r.fecha_pago = None
             r.gasto_id = None
+
     db.flush()
     _recompute_pendientes_prestamo(db, prestamo_id)
 
 
-# =========================
+# ============================================================
 # GET
-# =========================
+# ============================================================
+
 @router.get("/pendientes", response_model=List[GastoSchema])
 def list_pendientes(
     db: Session = Depends(get_db),
@@ -695,6 +700,7 @@ def list_pendientes(
         .order_by(models.Gasto.fecha.asc())
     )
     return q.all()
+
 
 @router.get("/activos", response_model=List[GastoSchema])
 def list_activos(
@@ -756,6 +762,7 @@ def listar_gastos_aportables(
     q = q.order_by(models.Gasto.nombre.asc())
     return q.offset(offset).limit(limit).all()
 
+
 @router.get("/", response_model=List[GastoSchema])
 def list_todos(
     db: Session = Depends(get_db),
@@ -807,9 +814,9 @@ def listar_gastos_aportables_dup(
     return q.offset(offset).limit(limit).all()
 
 
-# =========================
+# ============================================================
 # EXTRAORDINARIOS (PAGO ÚNICO) - GASTOS (ponderado)
-# =========================
+# ============================================================
 
 def _month_range(year: int, month: int) -> tuple[date, date]:
     """
@@ -823,10 +830,7 @@ def _month_range(year: int, month: int) -> tuple[date, date]:
 def list_gastos_extra(
     month: Optional[int] = Query(None, ge=1, le=12),
     year: Optional[int] = Query(None, ge=1900, le=3000),
-    q: Optional[str] = Query(
-        None,
-        description="Busca en nombre o proveedor",
-    ),
+    q: Optional[str] = Query(None, description="Busca en nombre o proveedor"),
     db: Session = Depends(get_db),
     current_user: models.User = Depends(require_user),
 ):
@@ -847,10 +851,7 @@ def list_gastos_extra(
 
     if month is not None and year is not None:
         start, end = _month_range(year, month)
-        qset = qset.filter(
-            models.Gasto.fecha >= start,
-            models.Gasto.fecha <= end,
-        )
+        qset = qset.filter(models.Gasto.fecha >= start, models.Gasto.fecha <= end)
 
     if q:
         patt = f"%{q.strip().lower()}%"
@@ -875,10 +876,13 @@ def list_gastos_extra(
         base = float(g.importe or 0.0)
         ponderado = round(base * factor, 2)
 
+        # OJO: si estás en Pydantic v1, model_validate no existe.
+        # Asumimos Pydantic v2 (ya estás viendo el warning de v2).
         d = GastoSchema.model_validate(g).model_dump()
         d["importe"] = ponderado
         d["importe_cuota"] = ponderado
         out.append(d)
+
     return out
 
 
@@ -893,29 +897,19 @@ def get_gasto(
     """
     obj = (
         db.query(models.Gasto)
-        .filter(
-            models.Gasto.id == gasto_id,
-            models.Gasto.user_id == current_user.id,
-        )
+        .filter(models.Gasto.id == gasto_id, models.Gasto.user_id == current_user.id)
         .first()
     )
     if not obj:
-        raise HTTPException(
-            status_code=404,
-            detail="Gasto no encontrado o no autorizado",
-        )
+        raise HTTPException(status_code=404, detail="Gasto no encontrado o no autorizado")
     return obj
 
 
-# =========================
+# ============================================================
 # CREATE
-# =========================
+# ============================================================
 
-@router.post(
-    "/",
-    response_model=GastoSchema,
-    status_code=status.HTTP_201_CREATED,
-)
+@router.post("/", response_model=GastoSchema, status_code=status.HTTP_201_CREATED)
 def create_gasto(
     gasto_in: GastoCreateSchema,
     db: Session = Depends(get_db),
@@ -932,6 +926,7 @@ def create_gasto(
     """
     payload = to_payload(gasto_in)
 
+    # Normalización: vacíos a None (incluye comentarios para consistencia)
     _str_empty_to_none(payload, [
         "tienda",
         "proveedor_id",
@@ -946,6 +941,8 @@ def create_gasto(
         "rama",
         "comentarios",
     ])
+
+    # Normalización: mayúsculas para campos definidos (NO comentarios)
     _upperize_payload(payload)
 
     # Nunca confiamos en user_id que venga del cliente
@@ -956,10 +953,11 @@ def create_gasto(
     payload["createon"] = now_expr
     payload["modifiedon"] = now_expr
 
-    per_str    = (payload.get("periodicidad") or "").upper().strip()
-    cuotas_in  = int(payload.get("cuotas") or 0)
-    importe    = safe_float(payload.get("importe"))
+    per_str = (payload.get("periodicidad") or "").upper().strip()
+    cuotas_in = int(payload.get("cuotas") or 0)
+    importe = safe_float(payload.get("importe"))
 
+    # Defaults defensivos
     if payload.get("activo") is None:
         payload["activo"] = True
     if payload.get("pagado") is None:
@@ -977,13 +975,14 @@ def create_gasto(
 
     cuotas_restantes = max(cuotas_final - cuotas_pagadas, 0)
 
-    payload["cuotas"]             = cuotas_final
-    payload["cuotas_pagadas"]     = cuotas_pagadas
-    payload["cuotas_restantes"]   = cuotas_restantes
-    payload["importe_cuota"]      = round(importe, 2)
-    payload["total"]              = round(cuotas_final * importe, 2)
-    payload["importe_pendiente"]  = round(cuotas_restantes * importe, 2)
+    payload["cuotas"] = cuotas_final
+    payload["cuotas_pagadas"] = cuotas_pagadas
+    payload["cuotas_restantes"] = cuotas_restantes
+    payload["importe_cuota"] = round(importe, 2)
+    payload["total"] = round(cuotas_final * importe, 2)
+    payload["importe_pendiente"] = round(cuotas_restantes * importe, 2)
 
+    # Reglas por periodicidad
     if per_str == "PAGO UNICO":
         payload["inactivatedon"] = now_expr
         payload["activo"] = False
@@ -997,12 +996,12 @@ def create_gasto(
 
     db_obj = models.Gasto(
         **payload,
-        user_id=current_user.id,  # 👈 dueño del gasto
+        user_id=current_user.id,  # dueño del gasto
     )
     db.add(db_obj)
 
-    # --- Ajuste de liquidez en CREATE ---
-    # Regla: si es PAGO UNICO, restamos ya; si (por lo que sea) viene pagado=True, también restamos.
+    # Ajuste liquidez en CREATE:
+    # Regla: si es PAGO UNICO, restamos ya; si viene pagado=True, también restamos.
     if per_str == "PAGO UNICO" or bool(payload.get("pagado")) is True:
         adjust_liquidez(
             db,
@@ -1018,9 +1017,9 @@ def create_gasto(
     return db_obj
 
 
-# =========================
+# ============================================================
 # UPDATE
-# =========================
+# ============================================================
 
 @router.put("/{gasto_id}", response_model=GastoSchema)
 def update_gasto(
@@ -1038,20 +1037,16 @@ def update_gasto(
     """
     db_obj = (
         db.query(models.Gasto)
-        .filter(
-            models.Gasto.id == gasto_id,
-            models.Gasto.user_id == current_user.id,
-        )
+        .filter(models.Gasto.id == gasto_id, models.Gasto.user_id == current_user.id)
         .first()
     )
     if not db_obj:
-        raise HTTPException(
-            status_code=404,
-            detail="Gasto no encontrado o no autorizado",
-        )
+        raise HTTPException(status_code=404, detail="Gasto no encontrado o no autorizado")
 
+    # Sólo campos presentes
     incoming = gasto_in.model_dump(exclude_unset=True)
 
+    # Normalización de strings vacíos (incluye comentarios)
     _str_empty_to_none(incoming, [
         "tienda",
         "proveedor_id",
@@ -1066,19 +1061,21 @@ def update_gasto(
         "rama",
         "comentarios",
     ])
+
+    # Uppercase para los campos previstos (NO comentarios)
     _upperize_payload(incoming)
 
     # Nunca permitimos cambiar user_id desde fuera
     incoming.pop("user_id", None)
 
     # --- Snapshot PRE (para deltas de liquidez y sync préstamo) ---
-    old_pagado   = bool(getattr(db_obj, "pagado", False))
-    old_per      = (getattr(db_obj, "periodicidad", "") or "").upper().strip()
-    old_cta      = getattr(db_obj, "cuenta_id", None)
-    old_importe  = safe_float(getattr(db_obj, "importe", 0.0))
-    prev_cp      = int(getattr(db_obj, "cuotas_pagadas", 0) or 0)
-    prestamo_id  = getattr(db_obj, "prestamo_id", None)
-    old_seg      = (getattr(db_obj, "segmento_id", None) or "").upper().strip()
+    old_pagado = bool(getattr(db_obj, "pagado", False))
+    old_per = (getattr(db_obj, "periodicidad", "") or "").upper().strip()
+    old_cta = getattr(db_obj, "cuenta_id", None)
+    old_importe = safe_float(getattr(db_obj, "importe", 0.0))
+    prev_cp = int(getattr(db_obj, "cuotas_pagadas", 0) or 0)
+    prestamo_id = getattr(db_obj, "prestamo_id", None)
+    old_seg = (getattr(db_obj, "segmento_id", None) or "").upper().strip()
 
     # Pagos relacionados (aporta/unidades a financiación) – antes de tocar campos
     _apply_pago_relacionado_update(db, db_obj, incoming)
@@ -1093,8 +1090,8 @@ def update_gasto(
             db_obj.inactivatedon = None
 
     # Determinar periodicidad/importe destino
-    per_str  = (incoming.get("periodicidad", db_obj.periodicidad) or "").upper().strip()
-    importe  = safe_float(
+    per_str = (incoming.get("periodicidad", db_obj.periodicidad) or "").upper().strip()
+    importe = safe_float(
         incoming.get(
             "importe",
             db_obj.importe if db_obj.importe is not None else db_obj.importe_cuota,
@@ -1114,15 +1111,15 @@ def update_gasto(
             pass
 
     # Cuotas finales
-    cuotas_raw   = incoming.get("cuotas", db_obj.cuotas)
+    cuotas_raw = incoming.get("cuotas", db_obj.cuotas)
     cuotas_final = int(cuotas_raw) if cuotas_raw is not None else int(db_obj.cuotas or 1)
     if cuotas_final <= 0:
         cuotas_final = 1
 
     # Clasificación
-    is_pu           = (per_str == "PAGO UNICO")
+    is_pu = (per_str == "PAGO UNICO")
     is_financiacion = (not is_pu) and (cuotas_final > 1)
-    is_recurrente   = (
+    is_recurrente = (
         (not is_pu)
         and (not is_financiacion)
         and (per_str in ("MENSUAL", "TRIMESTRAL", "SEMESTRAL", "ANUAL"))
@@ -1134,31 +1131,31 @@ def update_gasto(
 
     # Recalcula agregados del gasto en función de la clasificación
     if is_recurrente:
-        cuotas_final       = 1
-        cuotas_pagadas     = max(0, cp_val)
-        cuotas_restantes   = 0
-        importe_cuota      = round(importe, 2)
-        total_calc         = round(1 * importe, 2)
-        importe_pendiente  = 0.0
+        cuotas_final = 1
+        cuotas_pagadas = max(0, cp_val)
+        cuotas_restantes = 0
+        importe_cuota = round(importe, 2)
+        total_calc = round(1 * importe, 2)
+        importe_pendiente = 0.0
     elif is_financiacion:
-        cuotas_pagadas     = max(0, min(cp_val, cuotas_final))
-        cuotas_restantes   = max(cuotas_final - cuotas_pagadas, 0)
-        importe_cuota      = round(importe, 2)
-        total_calc         = round(cuotas_final * importe, 2)
-        importe_pendiente  = round(cuotas_restantes * importe, 2)
+        cuotas_pagadas = max(0, min(cp_val, cuotas_final))
+        cuotas_restantes = max(cuotas_final - cuotas_pagadas, 0)
+        importe_cuota = round(importe, 2)
+        total_calc = round(cuotas_final * importe, 2)
+        importe_pendiente = round(cuotas_restantes * importe, 2)
     else:
         # PAGO ÚNICO u otros casos 1:N sin ser recurrente
-        cuotas_pagadas     = max(0, min(cp_val, cuotas_final))
-        cuotas_restantes   = max(cuotas_final - cuotas_pagadas, 0)
-        importe_cuota      = round(importe, 2)
-        total_calc         = round(cuotas_final * importe, 2)
-        importe_pendiente  = round(cuotas_restantes * importe, 2)
+        cuotas_pagadas = max(0, min(cp_val, cuotas_final))
+        cuotas_restantes = max(cuotas_final - cuotas_pagadas, 0)
+        importe_cuota = round(importe, 2)
+        total_calc = round(cuotas_final * importe, 2)
+        importe_pendiente = round(cuotas_restantes * importe, 2)
 
-    incoming["cuotas"]            = cuotas_final
-    incoming["cuotas_pagadas"]    = cuotas_pagadas
-    incoming["cuotas_restantes"]  = cuotas_restantes
-    incoming["importe_cuota"]     = importe_cuota
-    incoming["total"]             = total_calc
+    incoming["cuotas"] = cuotas_final
+    incoming["cuotas_pagadas"] = cuotas_pagadas
+    incoming["cuotas_restantes"] = cuotas_restantes
+    incoming["importe_cuota"] = importe_cuota
+    incoming["total"] = total_calc
     incoming["importe_pendiente"] = importe_pendiente
 
     # Persiste cambios en el objeto
@@ -1166,39 +1163,39 @@ def update_gasto(
         setattr(db_obj, field, value)
 
     # --- Snapshot POST (para deltas de liquidez) ---
-    new_pagado   = bool(getattr(db_obj, "pagado", False))
-    new_per      = (getattr(db_obj, "periodicidad", "") or "").upper().strip()
-    new_cta      = getattr(db_obj, "cuenta_id", None)
-    new_importe  = safe_float(
+    new_pagado = bool(getattr(db_obj, "pagado", False))
+    new_per = (getattr(db_obj, "periodicidad", "") or "").upper().strip()
+    new_cta = getattr(db_obj, "cuenta_id", None)
+    new_importe = safe_float(
         getattr(db_obj, "importe", 0.0)
         if db_obj.importe is not None
         else getattr(db_obj, "importe_cuota", 0.0)
     )
-    new_seg      = (getattr(db_obj, "segmento_id", None) or "").upper().strip()
+    new_seg = (getattr(db_obj, "segmento_id", None) or "").upper().strip()
 
+    # Blindaje COT: si era o pasa a ser contenedor cotidiano, no tocar liquidez aquí.
     is_cot_before = (old_seg == SEG_COT)
-    is_cot_after  = (new_seg == SEG_COT)
+    is_cot_after = (new_seg == SEG_COT)
     skip_liquidez_for_cot = is_cot_before or is_cot_after
 
     # Liquidez en UPDATE:
-    # Consideramos "efectivo" si es PAGO UNICO o si está pagado=True,
-    # PERO si el gasto es COTIDIANO (antes o después) NO tocamos liquidez aquí.
+    # Consideramos "efectivo" si es PAGO UNICO o si está pagado=True.
     efectivo_antes = (old_per == "PAGO UNICO") or (old_pagado is True)
-    efectivo_desp  = (new_per == "PAGO UNICO") or (new_pagado is True)
+    efectivo_desp = (new_per == "PAGO UNICO") or (new_pagado is True)
 
     if not skip_liquidez_for_cot:
         if efectivo_antes and efectivo_desp:
-            # revertimos efecto anterior y aplicamos el nuevo (para cambios de importe / cuenta)
+            # Revertimos efecto anterior y aplicamos el nuevo (para cambios de importe / cuenta)
             if old_cta:
                 adjust_liquidez(db, old_cta, +old_importe)
             if new_cta:
                 adjust_liquidez(db, new_cta, -new_importe)
         elif efectivo_antes and not efectivo_desp:
-            # deja de ser efectivo → devolvemos lo restado antes
+            # Deja de ser efectivo → devolvemos lo restado antes
             if old_cta:
                 adjust_liquidez(db, old_cta, +old_importe)
         elif not efectivo_antes and efectivo_desp:
-            # pasa a ser efectivo → aplicamos ahora
+            # Pasa a ser efectivo → aplicamos ahora
             if new_cta:
                 adjust_liquidez(db, new_cta, -new_importe)
 
@@ -1212,18 +1209,15 @@ def update_gasto(
     return db_obj
 
 
-# =========================
+# ============================================================
 # PAGAR
-# =========================
+# ============================================================
 
 @router.put("/{gasto_id}/pagar", response_model=GastoSchema)
 def pagar_gasto(
     gasto_id: str,
     db: Session = Depends(get_db),
-    ajustar_liquidez: bool = Query(
-        True,
-        description="Si False, no modifica liquidez de la cuenta",
-    ),
+    ajustar_liquidez: bool = Query(True, description="Si False, no modifica liquidez de la cuenta"),
     current_user: models.User = Depends(require_user),
 ):
     """
@@ -1236,17 +1230,11 @@ def pagar_gasto(
     """
     g = (
         db.query(models.Gasto)
-        .filter(
-            models.Gasto.id == gasto_id,
-            models.Gasto.user_id == current_user.id,
-        )
+        .filter(models.Gasto.id == gasto_id, models.Gasto.user_id == current_user.id)
         .first()
     )
     if not g:
-        raise HTTPException(
-            status_code=404,
-            detail="Gasto no encontrado o no autorizado",
-        )
+        raise HTTPException(status_code=404, detail="Gasto no encontrado o no autorizado")
 
     per = (g.periodicidad or "").upper().strip()
     seg = (g.segmento_id or "").upper().strip()
@@ -1255,14 +1243,12 @@ def pagar_gasto(
     # Liquidez: solo si ajustar_liquidez=True Y NO es contenedor COTIDIANO
     if ajustar_liquidez and not is_cot:
         if per != "PAGO UNICO":
-            per_unit = safe_float(
-                g.importe if g.importe is not None else g.importe_cuota
-            )
+            per_unit = safe_float(g.importe if g.importe is not None else g.importe_cuota)
             if per_unit > 0 and g.cuenta_id:
                 adjust_liquidez(db, g.cuenta_id, -per_unit)
 
     g.pagado = True
-    g.ultimo_pago_on = func.now()  
+    g.ultimo_pago_on = func.now()
 
     cuotas_total = int(g.cuotas or 0)
     cuotas_pagadas_old = int(g.cuotas_pagadas or 0)
@@ -1270,11 +1256,7 @@ def pagar_gasto(
 
     is_pu = (per == "PAGO UNICO")
     is_financiacion = (not is_pu) and (cuotas_total > 1)
-    is_recurrente = (
-        (not is_pu)
-        and (not is_financiacion)
-        and (per in ("MENSUAL", "TRIMESTRAL", "SEMESTRAL", "ANUAL"))
-    )
+    is_recurrente = (not is_pu) and (not is_financiacion) and (per in ("MENSUAL", "TRIMESTRAL", "SEMESTRAL", "ANUAL"))
 
     if is_financiacion:
         if cuotas_total > 0 and cuotas_pagadas_new > cuotas_total:
@@ -1282,28 +1264,28 @@ def pagar_gasto(
         g.cuotas_pagadas = cuotas_pagadas_new
         g.cuotas_restantes = max(cuotas_total - cuotas_pagadas_new, 0)
         per_unit = g.importe if g.importe is not None else (g.importe_cuota or 0.0)
-        g.importe_pendiente = round(
-            float(per_unit) * float(g.cuotas_restantes or 0), 2
-        )
+        g.importe_pendiente = round(float(per_unit) * float(g.cuotas_restantes or 0), 2)
+
         if cuotas_total > 1 and (g.cuotas_restantes or 0) == 0:
             g.activo = False
             g.kpi = False
             g.inactivatedon = func.now()
+
     elif is_recurrente:
         g.cuotas_pagadas = max(0, cuotas_pagadas_new)
         g.cuotas_restantes = 0
         g.importe_pendiente = 0.0
         if per not in ("MENSUAL", "PAGO UNICO"):
             g.kpi = False
+
     else:
         if cuotas_total > 0 and cuotas_pagadas_new > cuotas_total:
             cuotas_pagadas_new = cuotas_total
         g.cuotas_pagadas = cuotas_pagadas_new
         g.cuotas_restantes = max(cuotas_total - cuotas_pagadas_new, 0)
         per_unit = g.importe if g.importe is not None else (g.importe_cuota or 0.0)
-        g.importe_pendiente = round(
-            float(per_unit) * float(g.cuotas_restantes or 0), 2
-        )
+        g.importe_pendiente = round(float(per_unit) * float(g.cuotas_restantes or 0), 2)
+
         if per not in ("MENSUAL", "PAGO UNICO"):
             g.kpi = False
         if cuotas_total > 1 and (g.cuotas_restantes or 0) == 0:
@@ -1316,7 +1298,7 @@ def pagar_gasto(
         _mark_next_unpaid_installment_as_paid(db, g.prestamo_id, g.id)
         _recompute_pendientes_prestamo(db, g.prestamo_id)
 
-    # COT blindaje
+    # Blindaje COT
     if seg == SEG_COT:
         g.activo = True
         if per == "MENSUAL":
@@ -1330,9 +1312,9 @@ def pagar_gasto(
     return g
 
 
-# =========================
+# ============================================================
 # DELETE con protección dependencias + reversión pagos relacionados
-# =========================
+# ============================================================
 
 @router.delete("/{gasto_id}", status_code=status.HTTP_204_NO_CONTENT)
 def delete_gasto(
@@ -1340,23 +1322,21 @@ def delete_gasto(
     force: bool = Query(
         False,
         description=(
-            "Si True, desvincula pagos relacionados (referencia_gasto=NULL) "
-            "antes de borrar."
+            "Si True, desvincula pagos relacionados (referencia_gasto=NULL) antes de borrar."
         ),
     ),
     cascade_prestamo: bool = Query(
         True,
-        description=(
-            "Si el gasto tiene prestamo_id, borra cuotas->prestamo->gasto."
-        ),
+        description=("Si el gasto tiene prestamo_id, borra cuotas->prestamo->gasto."),
     ),
     db: Session = Depends(get_db),
     current_user: models.User = Depends(require_user),
 ):
     """
-    Borra el gasto del usuario autenticado. Si cascade_prestamo=True y el gasto
-    pertenece a un préstamo (prestamo_id no nulo), borra también todas sus cuotas
-    y el propio préstamo.
+    Borra el gasto del usuario autenticado.
+
+    Si cascade_prestamo=True y el gasto pertenece a un préstamo (prestamo_id no nulo),
+    borra también todas sus cuotas y el propio préstamo.
 
     Si hay hijos (pagos relacionados) y no se pasa force=true, lanza 409.
 
@@ -1368,24 +1348,16 @@ def delete_gasto(
     """
     g = (
         db.query(models.Gasto)
-        .filter(
-            models.Gasto.id == gasto_id,
-            models.Gasto.user_id == current_user.id,
-        )
+        .filter(models.Gasto.id == gasto_id, models.Gasto.user_id == current_user.id)
         .first()
     )
     if not g:
-        raise HTTPException(
-            status_code=404,
-            detail="Gasto no encontrado o no autorizado",
-        )
+        raise HTTPException(status_code=404, detail="Gasto no encontrado o no autorizado")
 
+    # Hijos que referencian a este gasto
     hijos = (
         db.query(models.Gasto)
-        .filter(
-            models.Gasto.referencia_gasto == gasto_id,
-            models.Gasto.user_id == current_user.id,
-        )
+        .filter(models.Gasto.referencia_gasto == gasto_id, models.Gasto.user_id == current_user.id)
         .all()
     )
     if hijos:
@@ -1412,10 +1384,7 @@ def delete_gasto(
     is_cot = (seg == SEG_COT)
 
     pagado_flag = bool(getattr(g, "pagado", False))
-    importe_efectivo = safe_float(
-        g.importe if g.importe is not None else g.importe_cuota
-    )
-
+    importe_efectivo = safe_float(g.importe if g.importe is not None else g.importe_cuota)
     efectivo = (per == "PAGO UNICO") or pagado_flag
 
     if not is_cot and efectivo and importe_efectivo > 0 and g.cuenta_id:
@@ -1428,18 +1397,15 @@ def delete_gasto(
             except Exception:
                 same_month = False
 
+        # Sólo revertimos liquidez si el gasto está en el mes actual (evita reescrituras históricas)
         if same_month:
             adjust_liquidez(db, g.cuenta_id, +importe_efectivo)
 
     # Cascada de préstamo si aplica
     if cascade_prestamo and getattr(g, "prestamo_id", None):
         pid = g.prestamo_id
-        db.query(models.PrestamoCuota).filter(
-            models.PrestamoCuota.prestamo_id == pid
-        ).delete(synchronize_session=False)
-        db.query(models.Prestamo).filter(
-            models.Prestamo.id == pid
-        ).delete(synchronize_session=False)
+        db.query(models.PrestamoCuota).filter(models.PrestamoCuota.prestamo_id == pid).delete(synchronize_session=False)
+        db.query(models.Prestamo).filter(models.Prestamo.id == pid).delete(synchronize_session=False)
         db.flush()
 
     db.delete(g)
@@ -1447,9 +1413,9 @@ def delete_gasto(
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
-# =========================
+# ============================================================
 # ACTIVAR / INACTIVAR
-# =========================
+# ============================================================
 
 @router.put("/{gasto_id}/activar", response_model=GastoSchema)
 def activar_gasto(
@@ -1463,17 +1429,12 @@ def activar_gasto(
     """
     g = (
         db.query(models.Gasto)
-        .filter(
-            models.Gasto.id == gasto_id,
-            models.Gasto.user_id == current_user.id,
-        )
+        .filter(models.Gasto.id == gasto_id, models.Gasto.user_id == current_user.id)
         .first()
     )
     if not g:
-        raise HTTPException(
-            status_code=404,
-            detail="Gasto no encontrado o no autorizado",
-        )
+        raise HTTPException(status_code=404, detail="Gasto no encontrado o no autorizado")
+
     g.activo = True
     g.kpi = True
     g.inactivatedon = None
@@ -1494,17 +1455,12 @@ def inactivar_gasto(
     """
     g = (
         db.query(models.Gasto)
-        .filter(
-            models.Gasto.id == gasto_id,
-            models.Gasto.user_id == current_user.id,
-        )
+        .filter(models.Gasto.id == gasto_id, models.Gasto.user_id == current_user.id)
         .first()
     )
     if not g:
-        raise HTTPException(
-            status_code=404,
-            detail="Gasto no encontrado o no autorizado",
-        )
+        raise HTTPException(status_code=404, detail="Gasto no encontrado o no autorizado")
+
     g.activo = False
     g.kpi = False
     g.inactivatedon = func.now()
@@ -1513,9 +1469,10 @@ def inactivar_gasto(
     db.refresh(g)
     return g
 
-# =========================
+
+# ============================================================
 # FINANCIACIONES (VIEW) – Mes actual y Previo
-# =========================
+# ============================================================
 
 @router.get("/financiaciones/mes-actual")
 def financiaciones_mes_actual(
