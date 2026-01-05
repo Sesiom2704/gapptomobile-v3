@@ -1,14 +1,26 @@
 // services/gastosApi.ts
 //
 // Objetivo: API de gastos (gestionables) para GapptoMobile v3.
-// Cambios añadidos en esta versión:
-// - Soporte completo del campo opcional `comentarios` (backend: gastos.comentarios).
-// - Mantiene TODA la funcionalidad existente (endpoints, normalización de importes, flags, timestamps, etc.)
-// - Estructurado y comentado para que sea fácil de mantener.
 //
-// Nota importante:
-// - `comentarios` se envía como string o null.
-// - Si no viene informado, se omite o se manda null (ambas son válidas si backend lo define Optional).
+// Este fichero mantiene TODA la funcionalidad existente y corrige el bug de
+// "comentarios no aparece / se pisa a null" al actualizar.
+//
+// Idea clave del fix:
+// - En CREATE: podemos enviar `comentarios` normalizado (string|null) sin problema.
+// - En UPDATE: SOLO enviamos `comentarios` si el usuario lo ha modificado.
+//   Para eso introducimos un flag `comentariosDirty?: boolean` en el payload.
+//   * comentariosDirty = false/undefined -> NO se envía comentarios (no pisa BD)
+//   * comentariosDirty = true -> se envía comentarios (string o null para borrar)
+//
+// Resultado:
+// - Si el usuario no toca comentarios: NO desaparece.
+// - Si lo edita: se actualiza.
+// - Si lo borra: se guarda como null.
+//
+// Nota:
+// - Esto corrige el problema aunque el backend esté bien (Optional[str]).
+// - Si tu form aún no setea comentariosDirty, seguirá sin mandar comentarios en UPDATE.
+//   (Pero al menos ya NO lo borrará.) En cuanto marques dirty en el input, aparecerá.
 
 import axios from 'axios';
 import { api } from './api';
@@ -56,7 +68,7 @@ export interface Gasto {
   referencia_gasto?: string | null;
   tienda?: string | null;
 
-  // NUEVO: comentarios (no obligatorio)
+  // Campo opcional
   comentarios?: string | null;
 
   // Estado lógico
@@ -74,7 +86,7 @@ export interface Gasto {
   user_id?: string | null;
   user_nombre?: string | null;
 
-  // Relacionados opcionales (vienen ya resueltos desde backend)
+  // Relacionados opcionales (vienen resueltos desde backend)
   tipo_nombre?: string;
   proveedor_nombre?: string;
   cuenta_anagrama?: string;
@@ -83,6 +95,10 @@ export interface Gasto {
   [key: string]: any;
 }
 
+/**
+ * Payload de UI para crear/editar un gasto.
+ * Mantengo tus keys originales (segmentoId, tipoId...) para no romper el form.
+ */
 export interface CrearGastoGestionablePayload {
   nombre: string;
   segmentoId: string;
@@ -99,8 +115,13 @@ export interface CrearGastoGestionablePayload {
   rangoPago: string;
   referenciaGasto?: string;
 
-  // NUEVO: comentarios (opcional)
+  // comentarios (valor actual en el form)
   comentarios?: string;
+
+  // FIX: indica si el usuario tocó el campo comentarios en el formulario
+  // - true  -> enviar comentarios en UPDATE
+  // - false/undefined -> NO enviar comentarios en UPDATE (no pisar BD)
+  comentariosDirty?: boolean;
 
   pagado?: boolean;
   activo?: boolean;
@@ -135,24 +156,24 @@ function endpointPorFiltro(filtro: FiltroGastos): string {
 }
 
 /**
- * Normaliza el payload del formulario (UI) al body real del backend.
+ * Normaliza el payload del formulario (UI) al body del backend.
  *
- * Reglas importantes (mantiene comportamiento actual):
- * - Convierte importes con parseImporte y asegura numbers válidos.
- * - Calcula `importe` y `total` en función de cuotas / cuota / total.
- * - Setea campos en nombres backend: segmento_id, tipo_id, proveedor_id, etc.
- * - Mantiene flags pagado/activo/kpi si vienen informados.
- * - Mantiene soporte de prestamo_id, cuotas_pagadas, num_cuota, timestamps.
+ * Reglas que se mantienen:
+ * - parseImporte para convertir strings de dinero a number.
+ * - calcula importe/total según cuotas.
+ * - mapea keys UI -> backend: segmento_id, tipo_id, proveedor_id, cuenta_id...
+ * - flags pagado/activo/kpi si vienen informados.
+ * - soporte de cuotas_pagadas, num_cuota, prestamo_id, timestamps.
  *
- * NUEVO:
- * - `comentarios` se envía como string o null. Si viene vacío, enviamos null.
+ * Comentarios:
+ * - Aquí SIEMPRE lo normalizamos a string|null.
+ * - La decisión de "enviar o no enviar" en UPDATE se hace en actualizarGasto().
  */
 function normalizarPayloadGasto(payload: CrearGastoGestionablePayload) {
-  // parseImporte devuelve number | null → lo normalizamos a number
+  // parseImporte devuelve number | null
   const importeTotalNum = parseImporte(payload.importeTotal);
   const importeCuotaNum = parseImporte(payload.importeCuota);
 
-  // A partir de aquí, TODO son number, nunca null
   const safeTotal: number = importeTotalNum ?? 0;
   const safeCuota: number = importeCuotaNum ?? 0;
 
@@ -165,25 +186,22 @@ function normalizarPayloadGasto(payload: CrearGastoGestionablePayload) {
   let total: number = 0;
 
   if (nCuotas <= 1) {
-    // PAGO ÚNICO o recurrente sin financiación:
-    // importe = total (o cuota si total no viene)
+    // 1 cuota (PAGO ÚNICO o recurrente sin financiación)
     const base = totalVal > 0 ? totalVal : cuotaVal;
     importe = base;
     total = base;
   } else {
     // Varias cuotas (financiación)
     if (cuotaVal > 0) {
-      // El usuario ha fijado la cuota → cuota manda
       importe = cuotaVal;
       total = cuotaVal * nCuotas;
     } else {
-      // No hay cuota, pero sí total → sacamos cuota desde total
       importe = nCuotas > 0 ? totalVal / nCuotas : totalVal;
       total = totalVal;
     }
   }
 
-  // Normaliza comentarios: si llega vacío o solo espacios, mejor null
+  // Normaliza comentarios: string con trim o null
   const comentariosTrim = (payload.comentarios ?? '').trim();
   const comentariosValue: string | null = comentariosTrim.length > 0 ? comentariosTrim : null;
 
@@ -191,7 +209,7 @@ function normalizarPayloadGasto(payload: CrearGastoGestionablePayload) {
     // Texto principal
     nombre: payload.nombre.trim().toUpperCase(),
 
-    // Fecha y periodicidad
+    // Fecha y periodicidad (se envían tal cual; backend uppercasing si lo aplica)
     fecha: payload.fecha,
     periodicidad: payload.periodicidad,
 
@@ -213,11 +231,11 @@ function normalizarPayloadGasto(payload: CrearGastoGestionablePayload) {
     total,
     importe_cuota: cuotaVal || importe,
 
-    // NUEVO: comentarios
+    // comentarios normalizado (string|null)
     comentarios: comentariosValue,
   };
 
-  // Flags opcionales (si el formulario manda valores explícitos)
+  // Flags opcionales
   if (typeof payload.pagado === 'boolean') body.pagado = payload.pagado;
   if (typeof payload.activo === 'boolean') body.activo = payload.activo;
   if (typeof payload.kpi === 'boolean') body.kpi = payload.kpi;
@@ -265,6 +283,10 @@ export async function fetchGastos(
 
 /**
  * Crea un gasto gestionable (no cotidiano).
+ *
+ * En CREATE podemos mandar comentarios siempre:
+ * - string si hay texto
+ * - null si viene vacío
  */
 export async function crearGastoGestionable(payload: CrearGastoGestionablePayload): Promise<Gasto> {
   const body = normalizarPayloadGasto(payload);
@@ -287,10 +309,26 @@ export async function obtenerGasto(id: string): Promise<Gasto> {
 
 /**
  * Actualizar un gasto existente.
+ *
+ * FIX comentarios:
+ * - Si NO hay comentariosDirty -> NO enviamos `comentarios` (no pisamos BD).
+ * - Si comentariosDirty=true -> enviamos `comentarios` (string|null).
+ *
+ * Esto evita el bug de “aunque esté relleno, se manda null” por el form.
  */
 export async function actualizarGasto(id: string, payload: CrearGastoGestionablePayload): Promise<Gasto> {
   const body = normalizarPayloadGasto(payload);
   const url = `/api/v1/gastos/${id}`;
+
+  // === FIX: control explícito de envío de comentarios en UPDATE ===
+  // Si el usuario no lo ha tocado, lo omitimos.
+  // Así jamás lo pisamos a null por accidente.
+  if (!payload.comentariosDirty) {
+    delete body.comentarios;
+  } else {
+    // Si lo tocó, permitimos borrar (null) o actualizar (string)
+    body.comentarios = body.comentarios ?? null;
+  }
 
   console.log('[gastosApi] PUT actualizar gasto ->', url, body);
   const res = await api.put<Gasto>(url, body);
@@ -302,7 +340,7 @@ export async function actualizarGasto(id: string, payload: CrearGastoGestionable
 // ========================
 
 /**
- * Marca un gasto como pagado (endpoint backend ya aplica lógica de cuotas/liquidez).
+ * Marca un gasto como pagado (backend aplica lógica de cuotas/liquidez).
  */
 export async function marcarGastoComoPagado(gastoId: string): Promise<void> {
   const url = `/api/v1/gastos/${gastoId}/pagar`;
@@ -320,7 +358,7 @@ export async function eliminarGasto(gastoId: string): Promise<void> {
 }
 
 // ========================
-// REINICIAR MES (backend ya lo soporta)
+// REINICIAR MES (mantengo tu comportamiento actual)
 // ========================
 
 export type ReinicioMesEligibility = {
@@ -338,10 +376,8 @@ export type ReinicioMesResult = {
 };
 
 /**
- * Nota: este método parece "placeholder" en tu versión actual:
- * - Está apuntando a '/api/v1/gastos/' (mismo endpoint que lista todos)
- * - Mantengo exactamente tu comportamiento para no romper nada.
- * Si tienes un endpoint real de eligibility, lo cambiamos aquí.
+ * Nota: este método parece "placeholder" en tu versión actual.
+ * Mantengo exactamente el comportamiento para no romper nada.
  */
 export async function fetchReinicioMesEligibility(): Promise<ReinicioMesEligibility> {
   const url = '/api/v1/gastos/';

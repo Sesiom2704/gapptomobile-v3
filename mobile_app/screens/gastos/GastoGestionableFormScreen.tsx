@@ -20,6 +20,10 @@
  * Importante:
  * - No se elimina ninguna funcionalidad existente.
  * - Se mantiene la lógica de periodicidad preset extra (solo PAGO UNICO).
+ *
+ * AJUSTE NUEVO (comentarios):
+ * - Se introduce `comentariosDirty` para que el API sepa cuándo debe enviar `comentarios`.
+ *   Si no está dirty, el update NO debe pisar comentarios existentes en BD.
  */
 
 import React, { useEffect, useMemo, useRef, useState } from 'react';
@@ -156,9 +160,16 @@ export const GastoGestionableFormScreen: React.FC<Props> = ({ navigation, route 
   const [nombre, setNombre] = useState<string>(gastoSource?.nombre ?? '');
 
   /**
-   * Campo "Comentarios" (por ahora solo UI).
+   * Campo "Comentarios"
    */
   const [comentarios, setComentarios] = useState<string>((gastoAny?.comentarios ?? '') as string);
+
+  /**
+   * ✅ NUEVO: bandera dirty para comentarios.
+   * - En edición: false (no pisar si el usuario no toca el campo)
+   * - Se pone true cuando el usuario escribe/borra.
+   */
+  const [comentariosDirty, setComentariosDirty] = useState<boolean>(false);
 
   const [segmentoId, setSegmentoId] = useState<string | null>(gastoSource?.segmento_id ?? null);
   const [tipoId, setTipoId] = useState<string | null>(gastoSource?.tipo_id ?? null);
@@ -278,7 +289,9 @@ export const GastoGestionableFormScreen: React.FC<Props> = ({ navigation, route 
     const hoy = now.toISOString().slice(0, 10);
 
     setNombre('');
+
     setComentarios('');
+    setComentariosDirty(false); // ✅ reset dirty
 
     setSegmentoId(null);
     setTipoId(null);
@@ -677,7 +690,11 @@ export const GastoGestionableFormScreen: React.FC<Props> = ({ navigation, route 
       fecha,
       rangoPago,
       referenciaGasto: referenciaGasto.trim() || undefined,
-      // comentarios: comentarios.trim() || undefined, // (pendiente backend)
+
+      // ✅ Enviamos comentarios y dirty flag.
+      // El service decidirá si incluirlo en el body final.
+      comentarios,
+      comentariosDirty,
     };
 
     try {
@@ -767,9 +784,12 @@ export const GastoGestionableFormScreen: React.FC<Props> = ({ navigation, route 
           <Text style={styles.label}>Comentarios</Text>
           <TextInput
             style={[styles.input, comentarios.trim() !== '' && styles.inputFilled]}
-            placeholder="(Pendiente) Añade notas o comentarios..."
+            placeholder="Añade notas o comentarios..."
             value={comentarios}
-            onChangeText={setComentarios}
+            onChangeText={(t) => {
+              setComentarios(t);
+              if (!comentariosDirty) setComentariosDirty(true); // ✅ marca dirty
+            }}
             editable={!readOnly}
             multiline
             numberOfLines={3}
