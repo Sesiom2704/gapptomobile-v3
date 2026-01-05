@@ -455,9 +455,9 @@ class Gasto(Base):
     referencia_gasto       = Column(String, ForeignKey("gastos.id"))
     prestamo_id            = sa.Column(sa.String)
 
-    # NUEVO
     inactivatedon          = Column(DateTime, nullable=True)
     ultimo_pago_on         = Column(DateTime, nullable=True)
+    comentarios            = Column(text, nullable=True)
 
     proveedor_rel  = relationship("Proveedor", back_populates="gastos")
     tipo_rel       = relationship("TipoGasto", back_populates="gastos")

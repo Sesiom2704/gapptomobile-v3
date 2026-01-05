@@ -1,4 +1,15 @@
 // services/gastosApi.ts
+//
+// Objetivo: API de gastos (gestionables) para GapptoMobile v3.
+// Cambios añadidos en esta versión:
+// - Soporte completo del campo opcional `comentarios` (backend: gastos.comentarios).
+// - Mantiene TODA la funcionalidad existente (endpoints, normalización de importes, flags, timestamps, etc.)
+// - Estructurado y comentado para que sea fácil de mantener.
+//
+// Nota importante:
+// - `comentarios` se envía como string o null.
+// - Si no viene informado, se omite o se manda null (ambas son válidas si backend lo define Optional).
+
 import axios from 'axios';
 import { api } from './api';
 import { parseImporte } from '../utils/format';
@@ -18,8 +29,8 @@ import {
 // Endpoints de backend
 // ========================
 const ENDPOINT_GASTOS_PENDIENTES = '/api/v1/gastos/pendientes';
-const ENDPOINT_GASTOS_ACTIVOS    = '/api/v1/gastos/activos';
-const ENDPOINT_GASTOS_TODOS      = '/api/v1/gastos/';
+const ENDPOINT_GASTOS_ACTIVOS = '/api/v1/gastos/activos';
+const ENDPOINT_GASTOS_TODOS = '/api/v1/gastos/';
 
 // ========================
 // Tipos básicos
@@ -44,6 +55,9 @@ export interface Gasto {
   total: number;
   referencia_gasto?: string | null;
   tienda?: string | null;
+
+  // NUEVO: comentarios (no obligatorio)
+  comentarios?: string | null;
 
   // Estado lógico
   activo?: boolean;
@@ -85,16 +99,19 @@ export interface CrearGastoGestionablePayload {
   rangoPago: string;
   referenciaGasto?: string;
 
+  // NUEVO: comentarios (opcional)
+  comentarios?: string;
+
   pagado?: boolean;
   activo?: boolean;
-  kpi?:    boolean;
+  kpi?: boolean;
 
   // (opcional si quieres que el backend pueda usarlos ahora o más adelante)
   cuotasPagadas?: number;
   prestamoId?: string;
   numCuota?: number;
 
-  // NUEVO: timestamps opcionales (para duplicado PAGO UNICO)
+  // timestamps opcionales (para duplicado PAGO UNICO)
   createOn?: string;
   modifiedOn?: string;
   inactivatedOn?: string;
@@ -117,6 +134,19 @@ function endpointPorFiltro(filtro: FiltroGastos): string {
   }
 }
 
+/**
+ * Normaliza el payload del formulario (UI) al body real del backend.
+ *
+ * Reglas importantes (mantiene comportamiento actual):
+ * - Convierte importes con parseImporte y asegura numbers válidos.
+ * - Calcula `importe` y `total` en función de cuotas / cuota / total.
+ * - Setea campos en nombres backend: segmento_id, tipo_id, proveedor_id, etc.
+ * - Mantiene flags pagado/activo/kpi si vienen informados.
+ * - Mantiene soporte de prestamo_id, cuotas_pagadas, num_cuota, timestamps.
+ *
+ * NUEVO:
+ * - `comentarios` se envía como string o null. Si viene vacío, enviamos null.
+ */
 function normalizarPayloadGasto(payload: CrearGastoGestionablePayload) {
   // parseImporte devuelve number | null → lo normalizamos a number
   const importeTotalNum = parseImporte(payload.importeTotal);
@@ -129,15 +159,14 @@ function normalizarPayloadGasto(payload: CrearGastoGestionablePayload) {
   const totalVal: number = isNaN(safeTotal) ? 0 : safeTotal;
   const cuotaVal: number = isNaN(safeCuota) ? 0 : safeCuota;
 
-  const nCuotas: number =
-    payload.numCuotas && payload.numCuotas > 0 ? payload.numCuotas : 1;
+  const nCuotas: number = payload.numCuotas && payload.numCuotas > 0 ? payload.numCuotas : 1;
 
   let importe: number = 0;
   let total: number = 0;
 
   if (nCuotas <= 1) {
     // PAGO ÚNICO o recurrente sin financiación:
-    // importe = total
+    // importe = total (o cuota si total no viene)
     const base = totalVal > 0 ? totalVal : cuotaVal;
     importe = base;
     total = base;
@@ -154,45 +183,54 @@ function normalizarPayloadGasto(payload: CrearGastoGestionablePayload) {
     }
   }
 
+  // Normaliza comentarios: si llega vacío o solo espacios, mejor null
+  const comentariosTrim = (payload.comentarios ?? '').trim();
+  const comentariosValue: string | null = comentariosTrim.length > 0 ? comentariosTrim : null;
+
   const body: any = {
+    // Texto principal
     nombre: payload.nombre.trim().toUpperCase(),
+
+    // Fecha y periodicidad
     fecha: payload.fecha,
     periodicidad: payload.periodicidad,
+
+    // IDs
     segmento_id: payload.segmentoId,
     tipo_id: payload.tipoId,
     proveedor_id: payload.proveedorId,
-    tienda: payload.tienda ?? null,
     cuenta_id: payload.cuentaId,
+
+    // Campos opcionales
+    tienda: payload.tienda ?? null,
     referencia_vivienda_id: payload.viviendaId ?? null,
     rango_pago: payload.rangoPago,
     referencia_gasto: payload.referenciaGasto ?? null,
+
+    // Importes / cuotas
     cuotas: nCuotas,
     importe,
     total,
     importe_cuota: cuotaVal || importe,
+
+    // NUEVO: comentarios
+    comentarios: comentariosValue,
   };
 
-  // 👉 NUEVO: si el formulario manda pagado/activo, se incluyen
-  if (typeof payload.pagado === 'boolean') {
-    body.pagado = payload.pagado;
-  }
-  if (typeof payload.activo === 'boolean') {
-    body.activo = payload.activo;
-  }
-  if (typeof payload.kpi === 'boolean') {
-    body.kpi = payload.kpi;
-  }
-  if (typeof payload.cuotasPagadas === 'number') {
-    body.cuotas_pagadas = payload.cuotasPagadas;
-  }
-  if (typeof payload.numCuota === 'number') {
-    body.num_cuota = payload.numCuota;
-  }
+  // Flags opcionales (si el formulario manda valores explícitos)
+  if (typeof payload.pagado === 'boolean') body.pagado = payload.pagado;
+  if (typeof payload.activo === 'boolean') body.activo = payload.activo;
+  if (typeof payload.kpi === 'boolean') body.kpi = payload.kpi;
+
+  // Edición / financiación / préstamo
+  if (typeof payload.cuotasPagadas === 'number') body.cuotas_pagadas = payload.cuotasPagadas;
+  if (typeof payload.numCuota === 'number') body.num_cuota = payload.numCuota;
+
   if (typeof payload.prestamoId === 'string' && payload.prestamoId.trim() !== '') {
     body.prestamo_id = payload.prestamoId.trim();
   }
 
-  // NUEVO: timestamps opcionales (si backend los soporta)
+  // Timestamps opcionales (si backend los soporta)
   if (typeof payload.createOn === 'string') body.createon = payload.createOn;
   if (typeof payload.modifiedOn === 'string') body.modifiedon = payload.modifiedOn;
   if (typeof payload.inactivatedOn === 'string') body.inactivatedon = payload.inactivatedOn;
@@ -228,11 +266,9 @@ export async function fetchGastos(
 /**
  * Crea un gasto gestionable (no cotidiano).
  */
-export async function crearGastoGestionable(
-  payload: CrearGastoGestionablePayload
-): Promise<Gasto> {
+export async function crearGastoGestionable(payload: CrearGastoGestionablePayload): Promise<Gasto> {
   const body = normalizarPayloadGasto(payload);
-  const url = '/api/v1/gastos/'; // 👈 importante la barra final
+  const url = '/api/v1/gastos/'; // importante la barra final
 
   console.log('[gastosApi] POST crear gasto ->', url, body);
   const res = await api.post<Gasto>(url, body);
@@ -252,10 +288,7 @@ export async function obtenerGasto(id: string): Promise<Gasto> {
 /**
  * Actualizar un gasto existente.
  */
-export async function actualizarGasto(
-  id: string,
-  payload: CrearGastoGestionablePayload
-): Promise<Gasto> {
+export async function actualizarGasto(id: string, payload: CrearGastoGestionablePayload): Promise<Gasto> {
   const body = normalizarPayloadGasto(payload);
   const url = `/api/v1/gastos/${id}`;
 
@@ -269,7 +302,7 @@ export async function actualizarGasto(
 // ========================
 
 /**
- * Toggle del campo PAGADO de un gasto gestionable.
+ * Marca un gasto como pagado (endpoint backend ya aplica lógica de cuotas/liquidez).
  */
 export async function marcarGastoComoPagado(gastoId: string): Promise<void> {
   const url = `/api/v1/gastos/${gastoId}/pagar`;
@@ -278,7 +311,7 @@ export async function marcarGastoComoPagado(gastoId: string): Promise<void> {
 }
 
 /**
- * Elimina/inactiva un gasto.
+ * Elimina un gasto.
  */
 export async function eliminarGasto(gastoId: string): Promise<void> {
   const url = `/api/v1/gastos/${gastoId}`;
@@ -304,6 +337,12 @@ export type ReinicioMesResult = {
   };
 };
 
+/**
+ * Nota: este método parece "placeholder" en tu versión actual:
+ * - Está apuntando a '/api/v1/gastos/' (mismo endpoint que lista todos)
+ * - Mantengo exactamente tu comportamiento para no romper nada.
+ * Si tienes un endpoint real de eligibility, lo cambiamos aquí.
+ */
 export async function fetchReinicioMesEligibility(): Promise<ReinicioMesEligibility> {
   const url = '/api/v1/gastos/';
   const res = await api.get<ReinicioMesEligibility>(url);

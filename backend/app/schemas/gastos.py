@@ -71,6 +71,7 @@ class GastoBase(BaseModel):
     # Relación con otros gastos / patrimonio
     referencia_gasto: Optional[str] = None
     referencia_vivienda_id: Optional[str] = None
+    comentarios: Optional[str] = None
 
     @field_serializer("importe", "total", when_used="json")
     def _ser_money_base(cls, v: Decimal | None):
@@ -122,6 +123,7 @@ class GastoUpdate(BaseModel):
     referencia_vivienda_id: Optional[str] = None
     cuotas_pagadas: Optional[int] = None
     inactivatedon: Optional[datetime] = None
+    comentarios: Optional[str] = None
 
     @field_serializer("importe", "total", when_used="json")
     def _ser_money_upd(cls, v: Decimal | None):
@@ -180,6 +182,7 @@ class GastoRead(BaseModel):
     createon: Optional[datetime] = None
     modifiedon: Optional[datetime] = None
     inactivatedon: Optional[datetime] = None  # NUEVO en v2/v3
+    comentarios: Optional[str] = None
 
     # Indica a Pydantic que puede construir este schema a partir de un objeto ORM
     model_config = ConfigDict(from_attributes=True)

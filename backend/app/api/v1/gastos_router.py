@@ -944,6 +944,7 @@ def create_gasto(
         "nombre",
         "rango_pago",
         "rama",
+        "comentarios",
     ])
     _upperize_payload(payload)
 
@@ -1063,6 +1064,7 @@ def update_gasto(
         "nombre",
         "rango_pago",
         "rama",
+        "comentarios",
     ])
     _upperize_payload(incoming)
 
