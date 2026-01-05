@@ -1,5 +1,3 @@
-# backend/app/api/v1/gastos_cotidianos_router.py
-
 """
 Router de GASTOS COTIDIANOS para GapptoMobile v3.
 
@@ -27,13 +25,22 @@ Cambios v3 importantes:
       filtrando por user_id.
 - Se respeta la regla:
     * TODO lo que insertamos en BD va en MAYÚSCULAS, excepto OBSERVACIONES.
+
+NUEVO (alertas, sin tablas nuevas):
+- Se devuelve "alerts" en create/update (el frontend decide UX: toast/badge/lista).
+- Regla presupuesto (NO electricidad):
+    * Si tras la operación el consumo >= 75% => notifica SIEMPRE (cada inserción).
+    * Si consumo >= 90% => notifica con severidad HIGH.
+    * Si se supera el presupuesto (contenedor < 0) => notifica HIGH con euros excedidos.
+- Regla electricidad (E3):
+    * Si el importe del gasto insertado/actualizado > presupuesto (gastos.importe_cuota del contenedor),
+      notifica HIGH.
+    * Electricidad queda excluida de alertas 75/90.
 """
 
 from __future__ import annotations
 
-import secrets
-import string
-from typing import Optional, List, Dict
+from typing import Optional, List, Dict, Any
 
 from fastapi import (
     APIRouter,
@@ -43,8 +50,7 @@ from fastapi import (
     status,
 )
 from sqlalchemy.orm import Session
-    # extract no se usa finalmente, pero se deja si luego añadimos listados
-from sqlalchemy import extract, or_, and_, func
+from sqlalchemy import extract, or_, func
 from sqlalchemy.exc import IntegrityError, DataError
 
 from backend.app.db.session import get_db
@@ -54,8 +60,6 @@ from backend.app.schemas.gastos_cotidianos import (
     GastoCotidianoCreateSchema,
     GastoCotidianoUpdateSchema,
 )
-from backend.app.schemas.gastos_cotidianos import ALLOWED_EVENTOS  # opcional
-
 from backend.app.utils.common import safe_float, adjust_liquidez
 from backend.app.utils.id_utils import generate_gasto_cotidiano_id
 from backend.app.core.constants import SEGMENTO_COTIDIANOS_ID
@@ -69,7 +73,7 @@ router = APIRouter(tags=["gastos_cotidianos"])
 # =======================================================
 CANON = {
     "COMIDA": "COM-TIPOGASTO-311A33BD",
-    "ELECTRICIDAD": "ELE-TIPOGASTO-47CC77E5",
+    "ELECTRICIDAD": "ELE-TIPOGASTO-47CC77E5",  # ✅ confirmado
     "GASOLINA": "TIP-GASOLINA-SW1ZQO",
     "ROPA": "ROP-TIPOGASTO-S227BB",
     "RESTAURANTES": "RES-TIPOGASTO-26ROES",
@@ -79,28 +83,14 @@ CANON = {
     "MANTENIMIENTO_VEHICULO": "MAV-TIPOGASTO-BVC356",
 }
 
-# legacy → canon (rellenar si usas IDs antiguos)
-LEGACY_TO_CANON: Dict[str, str] = {
-    # "RES-TIPOGASTO-AA877CE4": CANON["RESTAURANTES"],
-    # "TIP-ROPA-AZHQPH":        CANON["ROPA"],
-}
+LEGACY_TO_CANON: Dict[str, str] = {}
 
 
 def _canon_of(tipo_id: str) -> str:
-    """
-    Devuelve el tipo canónico de un tipo:
-    - Si es legacy y está en el mapa, devuelve el canónico.
-    - Si no, devuelve el mismo valor.
-    """
     return LEGACY_TO_CANON.get(tipo_id, tipo_id)
 
 
 def _tipo_equivalents(tipo_id: str) -> set[str]:
-    """
-    Conjunto de equivalentes que deben considerarse en filtros:
-    - Si llega un legacy → {legacy, canon}
-    - Si llega un canon  → {canon, legacy(s) conocidos}
-    """
     canon = _canon_of(tipo_id)
     eq = {canon}
     for legacy, c in LEGACY_TO_CANON.items():
@@ -109,26 +99,13 @@ def _tipo_equivalents(tipo_id: str) -> set[str]:
     return eq
 
 
-# -------------------------------------------------------
-# Validación de negocio: tipo_id debe ser de COTIDIANOS
-# -------------------------------------------------------
-
 def _ensure_tipo_in_cotidianos(db: Session, tipo_id: Optional[str]):
-    """
-    Valida que el tipo_gasto referenciado:
-      - exista
-      - tenga segmento_id == COT-12345 (SEGMENTO_COTIDIANOS_ID)
-    """
     if not tipo_id:
-        raise HTTPException(
-            status_code=422, detail="tipo_id es obligatorio."
-        )
+        raise HTTPException(status_code=422, detail="tipo_id es obligatorio.")
     tid = _canon_of(tipo_id)
     tipo: models.TipoGasto | None = db.get(models.TipoGasto, tid)
     if not tipo:
-        raise HTTPException(
-            status_code=422, detail="tipo_id no existe."
-        )
+        raise HTTPException(status_code=422, detail="tipo_id no existe.")
     if getattr(tipo, "segmento_id", None) != SEGMENTO_COTIDIANOS_ID:
         raise HTTPException(
             status_code=422,
@@ -166,15 +143,6 @@ def _find_target_gasto(
     tipo_id: str,
     user_id: str | None = None,
 ) -> Optional[models.Gasto]:
-    """
-    Busca el Gasto 'objetivo' a ajustar para un tipo dado.
-
-    Criterio:
-    - tipo_id = tipo indicado.
-    - activo=True.
-    - Si se pasa user_id, solo gastos de ese usuario.
-    - Ordenado por fecha desc, id desc (último gasto activo de ese tipo).
-    """
     q = (
         db.query(models.Gasto)
         .filter(models.Gasto.tipo_id == tipo_id, models.Gasto.activo.is_(True))
@@ -186,19 +154,11 @@ def _find_target_gasto(
     return q.first()
 
 
-# ===== Liquidez: helpers =====
-
 def _cuenta_of_target_gasto(
     db: Session,
     tipo_id: str | None,
     user_id: str | None = None,
 ) -> str | None:
-    """
-    Devuelve la cuenta_id del Gasto 'contenedor' asociado a un tipo cotidiano.
-
-    - Si no hay contenedor o no se encuentra, devuelve None.
-    - Se respeta user_id para aislar datos entre usuarios.
-    """
     if not tipo_id:
         return None
 
@@ -210,14 +170,11 @@ def _cuenta_of_target_gasto(
     if not g:
         return None
 
-    # Varios posibles campos legacy:
     for attr in ("cuenta_id", "cuenta_bancaria_id", "cuentabancaria_id"):
         if hasattr(g, attr) and getattr(g, attr) is not None:
             return str(getattr(g, attr))
 
-    if hasattr(g, "cuenta") and getattr(g, "cuenta") is not None and hasattr(
-        g.cuenta, "id"
-    ):
+    if hasattr(g, "cuenta") and getattr(g, "cuenta") is not None and hasattr(g.cuenta, "id"):
         return str(g.cuenta.id)
 
     return None
@@ -230,15 +187,6 @@ def _apply_delta_to_gasto_importe(
     force_pagado: bool = False,
     user_id: str | None = None,
 ) -> Optional[dict]:
-    """
-    Aplica un delta al 'importe' del Gasto objetivo (por tipo_id) DEL USUARIO.
-
-    - delta < 0  => consume presupuesto.
-    - delta > 0  => devuelve presupuesto.
-    - No se capa a 0: se permite negativo (sobrepasar presupuesto).
-    - force_pagado=True  => pagado=True siempre.
-    - force_pagado=False => pagado=(nuevo_importe <= 0).
-    """
     if not tipo_id:
         return None
 
@@ -256,12 +204,19 @@ def _apply_delta_to_gasto_importe(
         target.pagado = new_val <= 0
 
     nombre = getattr(target, "nombre", None) or target.id
+
+    # ✅ Confirmado por ti: presupuesto total del contenedor = gastos.importe_cuota
+    budget_total = safe_float(getattr(target, "importe_cuota", None))
+
     return {
         "gasto_id": target.id,
         "gasto_nombre": nombre,
         "old": old_val,
         "new": new_val,
         "exceeded": new_val < 0,
+        "budget_total": budget_total,
+        "budget_remaining_old": old_val,
+        "budget_remaining_new": new_val,
     }
 
 
@@ -272,19 +227,8 @@ def _adjust_container_and_liquidez(
     delta: float,
     force_pagado: bool = False,
     user_id: str | None = None,
-    apply_liquidez: bool = True,  # ✅ nuevo: permite NO tocar liquidez (INVITADO)
+    apply_liquidez: bool = True,
 ) -> Optional[dict]:
-    """
-    Aplica un delta al contenedor en GASTOS y a la liquidez de la cuenta asociada
-    DEL USUARIO indicado.
-
-    - Ajusta el contenedor (si existe):
-        importe_nuevo = importe_viejo + delta
-        pagado:
-          * force_pagado=True  => pagado=True
-          * force_pagado=False => pagado=(nuevo_importe <= 0)
-    - Ajusta CUENTAS_BANCARIAS.liquidez con el mismo delta.
-    """
     delta = float(delta or 0.0)
     if not tipo_id or delta == 0.0:
         return None
@@ -300,13 +244,158 @@ def _adjust_container_and_liquidez(
             user_id=user_id,
         )
 
-    eff_cuenta_id = cuenta_id or _cuenta_of_target_gasto(
-        db, tipo_id, user_id=user_id
-    )
+    eff_cuenta_id = cuenta_id or _cuenta_of_target_gasto(db, tipo_id, user_id=user_id)
     if eff_cuenta_id and apply_liquidez:
         adjust_liquidez(db, eff_cuenta_id, delta)
 
     return info
+
+
+# =======================================================
+# ALERTAS (sin BD adicional)
+# =======================================================
+
+def _mk_alert(
+    severity: str,
+    code: str,
+    title: str,
+    message: str,
+    extra: Optional[dict] = None,
+) -> dict:
+    payload: dict[str, Any] = {
+        "severity": severity,  # HIGH | MEDIUM | LOW
+        "code": code,
+        "title": title,
+        "message": message,
+    }
+    if extra:
+        payload["extra"] = extra
+    return payload
+
+
+def _pct_spent(total: float, remaining: float) -> float | None:
+    """
+    % consumido = (total - remaining) / total
+    total = gastos.importe_cuota (presupuesto)
+    remaining = gastos.importe (restante)
+    """
+    t = float(total or 0.0)
+    if t <= 0:
+        return None
+    spent = t - float(remaining or 0.0)
+    return spent / t
+
+
+def _compute_alerts(
+    *,
+    info: Optional[dict],
+    is_electricidad: bool,
+    expense_amount: float,
+) -> List[dict]:
+    """
+    Reglas según tu decisión:
+
+    - Presupuesto general (NO electricidad):
+        * Si % consumido >= 75% -> notificar SIEMPRE en cada inserción/actualización.
+        * >= 90% => HIGH; entre 75% y 90% => MEDIUM.
+        * Si se supera presupuesto (contenedor restante < 0) => HIGH con euros excedidos.
+
+    - Electricidad (E3):
+        * Si expense_amount > budget_total (importe_cuota del contenedor) => HIGH.
+        * Electricidad NO aplica 75/90.
+
+    Nota: Sin tablas nuevas no hay dedupe mensual; es intencional.
+    """
+    if not info:
+        return []
+
+    alerts: List[dict] = []
+
+    budget_total = float(info.get("budget_total") or 0.0)
+    remaining_new = float(info.get("budget_remaining_new") or 0.0)
+
+    # (2) Exceso de presupuesto: lo más relevante -> devolvemos SOLO esta alerta
+    if info.get("exceeded"):
+        exceso = abs(float(info.get("new") or 0.0))
+        return [
+            _mk_alert(
+                severity="HIGH",
+                code="BUDGET_OVER",
+                title="Presupuesto superado",
+                message=(
+                    f"Has superado el presupuesto en {exceso:.2f}€ "
+                    f"para {info.get('gasto_nombre')}."
+                ),
+                extra={
+                    "gasto_id": info.get("gasto_id"),
+                    "gasto_nombre": info.get("gasto_nombre"),
+                    "exceso_eur": exceso,
+                    "budget_total": budget_total,
+                    "budget_remaining": remaining_new,
+                },
+            )
+        ]
+
+    # (3) Electricidad (E3): gasto > presupuesto del contenedor
+    if is_electricidad:
+        if budget_total > 0 and float(expense_amount or 0.0) > budget_total:
+            alerts.append(
+                _mk_alert(
+                    severity="HIGH",
+                    code="ELECTRICITY_OVER_BUDGET",
+                    title="Electricidad por encima del presupuesto",
+                    message=(
+                        f"El gasto de electricidad ({float(expense_amount):.2f}€) "
+                        f"supera el presupuesto ({budget_total:.2f}€)."
+                    ),
+                    extra={
+                        "gasto_id": info.get("gasto_id"),
+                        "gasto_nombre": info.get("gasto_nombre"),
+                        "expense_amount": float(expense_amount),
+                        "budget_total": budget_total,
+                    },
+                )
+            )
+        return alerts
+
+    # (1) Presupuesto general: a partir de 75% notificar siempre
+    pct = _pct_spent(budget_total, remaining_new)
+    if pct is None:
+        return alerts
+
+    if pct >= 0.90:
+        sev = "HIGH"
+        code = "BUDGET_90_PLUS"
+        title = "Presupuesto al 90% o más"
+    elif pct >= 0.75:
+        sev = "MEDIUM"
+        code = "BUDGET_75_PLUS"
+        title = "Presupuesto al 75% o más"
+    else:
+        return alerts  # <75% => nada
+
+    spent = max(budget_total - remaining_new, 0.0)
+    alerts.append(
+        _mk_alert(
+            severity=sev,
+            code=code,
+            title=title,
+            message=(
+                f"{info.get('gasto_nombre')}: llevas {spent:.2f}€ de {budget_total:.2f}€ "
+                f"({pct * 100.0:.1f}%)."
+            ),
+            extra={
+                "gasto_id": info.get("gasto_id"),
+                "gasto_nombre": info.get("gasto_nombre"),
+                "budget_total": budget_total,
+                "budget_spent": spent,
+                "budget_remaining": remaining_new,
+                "budget_pct_spent": round(pct * 100.0, 2),
+            },
+        )
+    )
+
+    return alerts
 
 
 # --------------------------
@@ -318,20 +407,11 @@ def get_gasto_cotidiano(
     db: Session = Depends(get_db),
     current_user: models.User = Depends(require_user),
 ):
-    """
-    Devuelve un gasto cotidiano por id usando SOLO el ORM.
-
-    - Verifica que el gasto exista.
-    - Verifica que gasto.user_id == current_user.id (multiusuario).
-    - Si no se encuentra o no pertenece al usuario, devuelve 404.
-    """
     obj = db.get(models.GastoCotidiano, gasto_id)
     if not obj or obj.user_id != current_user.id:
-        raise HTTPException(
-            status_code=404,
-            detail="Gasto cotidiano no encontrado",
-        )
+        raise HTTPException(status_code=404, detail="Gasto cotidiano no encontrado")
     return obj
+
 
 # --------------------------
 # LISTAR (GET collection)
@@ -348,38 +428,21 @@ def list_gastos_cotidianos(
     db: Session = Depends(get_db),
     current_user: models.User = Depends(require_user),
 ):
-    """
-    Lista gastos cotidianos del usuario autenticado.
+    qry = db.query(models.GastoCotidiano).filter(models.GastoCotidiano.user_id == current_user.id)
 
-    Filtros soportados:
-    - month/year: filtra por fecha
-    - pagado
-    - tipo_id (canon/legacy equivalentes)
-    - q: búsqueda en evento/observaciones
-    - limit/offset
-    """
-
-    qry = db.query(models.GastoCotidiano).filter(
-        models.GastoCotidiano.user_id == current_user.id
-    )
-
-    # Filtro por mes/año (fecha)
     if year is not None:
         qry = qry.filter(extract("year", models.GastoCotidiano.fecha) == year)
     if month is not None:
         qry = qry.filter(extract("month", models.GastoCotidiano.fecha) == month)
 
-    # pagado
     if pagado is not None:
         qry = qry.filter(models.GastoCotidiano.pagado.is_(pagado))
 
-    # tipo_id con equivalentes canon/legacy
     if tipo_id:
         tipo_id = normalize_upper(tipo_id)
         eq = _tipo_equivalents(tipo_id)
         qry = qry.filter(models.GastoCotidiano.tipo_id.in_(list(eq)))
 
-    # búsqueda libre
     if q:
         qq = f"%{q.strip().upper()}%"
         qry = qry.filter(
@@ -389,11 +452,11 @@ def list_gastos_cotidianos(
             )
         )
 
-    # Orden + paginación
     qry = qry.order_by(models.GastoCotidiano.fecha.desc(), models.GastoCotidiano.id.desc())
     qry = qry.offset(offset).limit(limit)
 
     return qry.all()
+
 
 # --------------------------
 # SUGERIR CUENTA
@@ -404,17 +467,8 @@ def sugerir_cuenta(
     db: Session = Depends(get_db),
     current_user: models.User = Depends(require_user),
 ):
-    """
-    Devuelve la cuenta_id sugerida según el contenedor del tipo cotidiano indicado.
-
-    - Valida que tipo_id sea COTIDIANOS.
-    - Busca el contenedor GASTO del usuario actual (user_id).
-    - Si no hay contenedor -> sin sugerencia.
-    """
     _ensure_tipo_in_cotidianos(db, tipo_id)
-    cuenta_id = _cuenta_of_target_gasto(
-        db, tipo_id, user_id=current_user.id
-    )
+    cuenta_id = _cuenta_of_target_gasto(db, tipo_id, user_id=current_user.id)
     if not cuenta_id:
         return {"cuenta_id": None}
 
@@ -424,8 +478,7 @@ def sugerir_cuenta(
 
     return {
         "cuenta_id": cuenta_id,
-        "anagrama": getattr(cta, "anagrama", None)
-        or getattr(cta, "nombre", None),
+        "anagrama": getattr(cta, "anagrama", None) or getattr(cta, "nombre", None),
         "liquidez": getattr(cta, "liquidez", None),
     }
 
@@ -439,31 +492,18 @@ def create_gasto_cotidiano(
     db: Session = Depends(get_db),
     current_user: models.User = Depends(require_user),
 ):
-    """
-    Crea un GastoCotidiano para el usuario autenticado:
-
-    - Asigna user_id = current_user.id.
-    - Normaliza a MAYÚSCULAS tipo_id, proveedor_id y evento.
-      (OBSERVACIONES se mantiene como venga).
-    - Valida que tipo_id sea del segmento COTIDIANOS.
-    - Ajusta el contenedor GASTO del usuario y la liquidez de su cuenta.
-    """
     payload = gasto_in.model_dump()
     payload["pagado"] = bool(payload.get("pagado"))
 
-    # Normalización a MAYÚSCULAS (excepto observaciones)
     if payload.get("tipo_id") is not None:
         payload["tipo_id"] = normalize_upper(payload["tipo_id"])
     if payload.get("proveedor_id") is not None:
         payload["proveedor_id"] = normalize_upper(payload["proveedor_id"])
     if payload.get("evento") is not None:
         payload["evento"] = normalize_upper(payload["evento"])
-    # OBSERVACIONES se deja tal cual (puede tener minúsculas, etc.)
 
-    # user_id del propietario
     payload["user_id"] = current_user.id
 
-    # ID generado en backend
     payload.pop("id", None)
     payload["id"] = generate_gasto_cotidiano_id(db)
 
@@ -480,10 +520,8 @@ def create_gasto_cotidiano(
         db.add(db_obj)
 
         importe_val = safe_float(payload.get("importe"))
-        # Insertar GC => RESTA contenedor + liquidez
         delta_budget = -importe_val
 
-        info = None
         info = _adjust_container_and_liquidez(
             db,
             tipo_id=tipo_id,
@@ -491,12 +529,19 @@ def create_gasto_cotidiano(
             delta=delta_budget,
             force_pagado=is_electricidad,
             user_id=current_user.id,
-            apply_liquidez=bool(payload.get("pagado")),  # ✅ si INVITADO -> False -> no toca liquidez
+            apply_liquidez=bool(payload.get("pagado")),
+        )
+
+        alerts = _compute_alerts(
+            info=info,
+            is_electricidad=is_electricidad,
+            expense_amount=importe_val,
         )
 
         db.commit()
         db.refresh(db_obj)
 
+        # Mensajería legacy (se mantiene)
         if info:
             if info["exceeded"]:
                 msg = (
@@ -508,33 +553,24 @@ def create_gasto_cotidiano(
                 if info["new"] > 0:
                     msg = "Insertado. Dentro de presupuesto."
                 elif info["new"] == 0:
-                    msg = (
-                        "Insertado. Presupuesto justo (0€) "
-                        "y marcado como PAGADO."
-                    )
+                    msg = "Insertado. Presupuesto justo (0€) y marcado como PAGADO."
                 else:
-                    msg = (
-                        "Insertado. Presupuesto sobrepasado "
-                        "(importe negativo) y marcado como PAGADO."
-                    )
+                    msg = "Insertado. Presupuesto sobrepasado (importe negativo) y marcado como PAGADO."
         else:
             msg = "Insertado (no se ha encontrado contenedor para ajustar)."
 
         return {
             "message": msg,
             "data": GastoCotidianoSchema.model_validate(db_obj),
+            "alerts": alerts,
         }
 
     except IntegrityError as e:
         db.rollback()
-        raise HTTPException(
-            status_code=400, detail=f"IntegrityError: {str(e.orig)}"
-        )
+        raise HTTPException(status_code=400, detail=f"IntegrityError: {str(e.orig)}")
     except DataError as e:
         db.rollback()
-        raise HTTPException(
-            status_code=400, detail=f"DataError: {str(e.orig)}"
-        )
+        raise HTTPException(status_code=400, detail=f"DataError: {str(e.orig)}")
 
 
 # --------------------------
@@ -547,31 +583,18 @@ def update_gasto_cotidiano(
     db: Session = Depends(get_db),
     current_user: models.User = Depends(require_user),
 ):
-    """
-    Actualiza un gasto cotidiano del usuario actual:
-
-    - Verifica que el gasto exista y pertenezca al usuario.
-    - Aplica cambios a campos permitidos.
-    - Recalcula el impacto en el contenedor GASTO del usuario y su liquidez:
-        * Revierte primero el importe antiguo.
-        * Aplica después el importe nuevo.
-    """
     db_obj = db.get(models.GastoCotidiano, gasto_id)
     if not db_obj or db_obj.user_id != current_user.id:
-        raise HTTPException(
-            status_code=404, detail="Gasto cotidiano no encontrado"
-        )
+        raise HTTPException(status_code=404, detail="Gasto cotidiano no encontrado")
 
     data = gasto_in.model_dump(exclude_unset=True)
 
-    # Normalizamos a mayúsculas lo que toca (tipo/proveedor/evento)
     if "tipo_id" in data and data["tipo_id"]:
         data["tipo_id"] = normalize_upper(data["tipo_id"])
     if "proveedor_id" in data and data["proveedor_id"]:
         data["proveedor_id"] = normalize_upper(data["proveedor_id"])
     if "evento" in data and data["evento"] is not None:
         data["evento"] = normalize_upper(data["evento"])
-    # OBSERVACIONES se mantiene como venga
 
     old_tipo_id = db_obj.tipo_id
     old_cuenta_id = db_obj.cuenta_id
@@ -589,17 +612,11 @@ def update_gasto_cotidiano(
     if "importe" in data and data["importe"] is not None:
         db_obj.importe = safe_float(data["importe"])
     if "litros" in data:
-        db_obj.litros = (
-            None if data["litros"] is None else safe_float(data["litros"])
-        )
+        db_obj.litros = None if data["litros"] is None else safe_float(data["litros"])
     if "km" in data:
         db_obj.km = None if data["km"] is None else safe_float(data["km"])
     if "precio_litro" in data:
-        db_obj.precio_litro = (
-            None
-            if data["precio_litro"] is None
-            else safe_float(data["precio_litro"])
-        )
+        db_obj.precio_litro = None if data["precio_litro"] is None else safe_float(data["precio_litro"])
     if "evento" in data:
         db_obj.evento = data["evento"]
     if "observaciones" in data:
@@ -639,6 +656,12 @@ def update_gasto_cotidiano(
                 user_id=current_user.id,
             )
 
+        alerts = _compute_alerts(
+            info=info_new,
+            is_electricidad=is_electricidad_new,
+            expense_amount=new_importe,
+        )
+
         db.commit()
         db.refresh(db_obj)
 
@@ -653,33 +676,24 @@ def update_gasto_cotidiano(
                 if info_new["new"] > 0:
                     msg = "Ajuste aplicado, dentro de presupuesto."
                 elif info_new["new"] == 0:
-                    msg = (
-                        "Ajuste aplicado: presupuesto justo (0€) "
-                        "y marcado como PAGADO."
-                    )
+                    msg = "Ajuste aplicado: presupuesto justo (0€) y marcado como PAGADO."
                 else:
-                    msg = (
-                        "Ajuste aplicado: presupuesto sobrepasado "
-                        "(importe negativo) y marcado como PAGADO."
-                    )
+                    msg = "Ajuste aplicado: presupuesto sobrepasado (importe negativo) y marcado como PAGADO."
         else:
             msg = "Actualizado sin contenedor asociado o sin importe."
 
         return {
             "message": msg,
             "data": GastoCotidianoSchema.model_validate(db_obj),
+            "alerts": alerts,
         }
 
     except IntegrityError as e:
         db.rollback()
-        raise HTTPException(
-            status_code=400, detail=f"IntegrityError: {str(e.orig)}"
-        )
+        raise HTTPException(status_code=400, detail=f"IntegrityError: {str(e.orig)}")
     except DataError as e:
         db.rollback()
-        raise HTTPException(
-            status_code=400, detail=f"DataError: {str(e.orig)}"
-        )
+        raise HTTPException(status_code=400, detail=f"DataError: {str(e.orig)}")
 
 
 # --------------------------
@@ -691,18 +705,9 @@ def delete_gasto_cotidiano(
     db: Session = Depends(get_db),
     current_user: models.User = Depends(require_user),
 ):
-    """
-    Borra un gasto cotidiano del usuario:
-
-    - Verifica propiedad (user_id).
-    - Revierte el efecto en contenedor GASTO y liquidez.
-    - En caso de ELECTRICIDAD, desmarca el contenedor como pagado.
-    """
     db_obj = db.get(models.GastoCotidiano, gasto_id)
     if not db_obj or db_obj.user_id != current_user.id:
-        raise HTTPException(
-            status_code=404, detail="Gasto cotidiano no encontrado"
-        )
+        raise HTTPException(status_code=404, detail="Gasto cotidiano no encontrado")
 
     old_tipo_id = db_obj.tipo_id
     old_cuenta_id = db_obj.cuenta_id
@@ -725,9 +730,7 @@ def delete_gasto_cotidiano(
         if canon_tipo == CANON["ELECTRICIDAD"]:
             cont_tipo = _container_tipo_for_cotidiano(old_tipo_id)
             if cont_tipo:
-                target = _find_target_gasto(
-                    db, cont_tipo, user_id=current_user.id
-                )
+                target = _find_target_gasto(db, cont_tipo, user_id=current_user.id)
                 if target:
                     target.pagado = False
 
@@ -737,11 +740,7 @@ def delete_gasto_cotidiano(
 
     except IntegrityError as e:
         db.rollback()
-        raise HTTPException(
-            status_code=400, detail=f"IntegrityError: {str(e.orig)}"
-        )
+        raise HTTPException(status_code=400, detail=f"IntegrityError: {str(e.orig)}")
     except DataError as e:
         db.rollback()
-        raise HTTPException(
-            status_code=400, detail=f"DataError: {str(e.orig)}"
-        )
+        raise HTTPException(status_code=400, detail=f"DataError: {str(e.orig)}")
