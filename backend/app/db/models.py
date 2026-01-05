@@ -13,7 +13,7 @@
 from sqlalchemy import (
     Column, String, Integer, Float, Boolean,
     Date, DateTime, ForeignKey, CheckConstraint, ForeignKeyConstraint,
-    Enum as SAEnum, Text, UniqueConstraint, Numeric, Index, Column, DateTime
+    Enum as SAEnum, Text, UniqueConstraint, Numeric, Index, Column, DateTime, text
 )
 from datetime import datetime
 
@@ -119,23 +119,23 @@ class Patrimonio(Base):
     tipo_inmueble     = Column(
         PGEnum(TipoInmueble, name="tipo_inmueble", create_type=False),
         nullable=False,
-        server_default=Text("'VIVIENDA'::tipo_inmueble"),
+        server_default=text("'VIVIENDA'::tipo_inmueble"),
     )
     fecha_adquisicion = Column(Date, nullable=True)
-    activo            = Column(Boolean, nullable=False, server_default=Text("true"), index=True)
-    disponible        = Column(Boolean, nullable=False, server_default=Text("true"), index=True)
+    activo            = Column(Boolean, nullable=False, server_default=text("true"), index=True)
+    disponible        = Column(Boolean, nullable=False, server_default=text("true"), index=True)
 
     # Superficie original
     superficie_m2     = Column(Float, nullable=True)
 
     # Nuevos
-    participacion_pct     = Column(Float, nullable=False, server_default=Text("100.0"))
+    participacion_pct     = Column(Float, nullable=False, server_default=text("100.0"))
     superficie_construida = Column(Numeric(10, 2), nullable=True)
 
     habitaciones      = Column(Integer, nullable=True)
     banos             = Column(Integer, nullable=True)
-    garaje            = Column(Boolean, nullable=False, server_default=Text("false"))
-    trastero          = Column(Boolean, nullable=False, server_default=Text("false"))
+    garaje            = Column(Boolean, nullable=False, server_default=text("false"))
+    trastero          = Column(Boolean, nullable=False, server_default=text("false"))
 
     ingresos      = relationship("Ingreso", back_populates="vivienda_rel")
     gastos        = relationship("Gasto", back_populates="vivienda_rel")
@@ -184,25 +184,25 @@ class RendimientoPatrimonio(Base):
     year = Column(Integer, nullable=False, index=True)
 
     # Entradas
-    ingresos_alquiler    = Column(Numeric(12, 2), nullable=False, server_default=Text("0"))
-    meses_alquiler       = Column(Integer, nullable=False, server_default=Text("0"))  # 0..12
-    ingresos_adicionales = Column(Numeric(12, 2), nullable=False, server_default=Text("0"))
+    ingresos_alquiler    = Column(Numeric(12, 2), nullable=False, server_default=text("0"))
+    meses_alquiler       = Column(Integer, nullable=False, server_default=text("0"))  # 0..12
+    ingresos_adicionales = Column(Numeric(12, 2), nullable=False, server_default=text("0"))
 
     # Gastos
-    gastos_mejoras       = Column(Numeric(12, 2), nullable=False, server_default=Text("0"))  # CAPEX
-    gastos_mantenimiento = Column(Numeric(12, 2), nullable=False, server_default=Text("0"))  # OPEX
-    otros_gastos         = Column(Numeric(12, 2), nullable=False, server_default=Text("0"))
+    gastos_mejoras       = Column(Numeric(12, 2), nullable=False, server_default=text("0"))  # CAPEX
+    gastos_mantenimiento = Column(Numeric(12, 2), nullable=False, server_default=text("0"))  # OPEX
+    otros_gastos         = Column(Numeric(12, 2), nullable=False, server_default=text("0"))
 
     # Derivados
-    ocupacion_pct        = Column(Numeric(5, 2), nullable=False, server_default=Text("0"))   # 0..100
-    ingreso_bruto        = Column(Numeric(12, 2), nullable=False, server_default=Text("0"))
-    gasto_total          = Column(Numeric(12, 2), nullable=False, server_default=Text("0"))
-    ingreso_neto         = Column(Numeric(12, 2), nullable=False, server_default=Text("0"))
-    yield_bruto_pct      = Column(Numeric(7, 3), nullable=False, server_default=Text("0"))
-    yield_neto_pct       = Column(Numeric(7, 3), nullable=False, server_default=Text("0"))
+    ocupacion_pct        = Column(Numeric(5, 2), nullable=False, server_default=text("0"))   # 0..100
+    ingreso_bruto        = Column(Numeric(12, 2), nullable=False, server_default=text("0"))
+    gasto_total          = Column(Numeric(12, 2), nullable=False, server_default=text("0"))
+    ingreso_neto         = Column(Numeric(12, 2), nullable=False, server_default=text("0"))
+    yield_bruto_pct      = Column(Numeric(7, 3), nullable=False, server_default=text("0"))
+    yield_neto_pct       = Column(Numeric(7, 3), nullable=False, server_default=text("0"))
 
     # Snapshot de participación para ese año
-    participacion_pct    = Column(Numeric(5, 2), nullable=False, server_default=Text("100"))
+    participacion_pct    = Column(Numeric(5, 2), nullable=False, server_default=text("100"))
 
     createon            = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     modifiedon          = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
@@ -302,8 +302,8 @@ class CuentaBancaria(Base):
     banco_id   = Column(String, ForeignKey("proveedores.id"))
     referencia = Column(String)
     anagrama   = Column(String)
-    liquidez   = Column(Float, nullable=False, server_default=Text("0"))
-    liquidez_inicial   = Column(Float, nullable=False, server_default=Text("0"))
+    liquidez   = Column(Float, nullable=False, server_default=text("0"))
+    liquidez_inicial   = Column(Float, nullable=False, server_default=text("0"))
     # 👇 Nueva columna: propietario de la cuenta
     user_id    = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
     activo = Column(Boolean, default=True)
@@ -396,8 +396,8 @@ class Ingreso(Base):
     referencia_vivienda_id = Column(String, ForeignKey("patrimonio.id"))
     concepto               = Column(String)
     importe                = Column(Float)
-    activo                 = Column(Boolean, server_default=Text("true"))
-    cobrado                = Column(Boolean, server_default=Text("false"))
+    activo                 = Column(Boolean, server_default=text("true"))
+    cobrado                = Column(Boolean, server_default=text("false"))
     createon               = Column(DateTime, server_default=func.now())
     modifiedon             = Column(DateTime, onupdate=func.now())
     fecha_inicio           = Column(Date, nullable=True)
@@ -447,9 +447,9 @@ class Gasto(Base):
     cuotas_restantes       = Column(Integer)
     importe_pendiente      = Column(Float)
     rango_pago             = Column(String)
-    activo                 = Column(Boolean, server_default=Text("true"), index=True)
-    pagado                 = Column(Boolean, server_default=Text("false"), index=True)
-    kpi                    = Column(Boolean, server_default=Text("false"), index=True)
+    activo                 = Column(Boolean, server_default=text("true"), index=True)
+    pagado                 = Column(Boolean, server_default=text("false"), index=True)
+    kpi                    = Column(Boolean, server_default=text("false"), index=True)
     createon               = Column(DateTime, server_default=func.now())
     modifiedon             = Column(DateTime, onupdate=func.now())
     referencia_gasto       = Column(String, ForeignKey("gastos.id"))
@@ -515,7 +515,7 @@ class GastoCotidiano(Base):
     litros       = Column(Float)
     km           = Column(Float)
     precio_litro = Column(Float)
-    pagado       = Column(Boolean, server_default=Text("true"), index=True)
+    pagado       = Column(Boolean, server_default=text("true"), index=True)
 
     # Campos de conTexto
     evento        = Column(String(120), nullable=True)
@@ -555,7 +555,7 @@ class User(Base):
     email      = Column(String, unique=True, index=True, nullable=False)
     password   = Column(String, nullable=False)
     full_name  = Column(String, nullable=False)
-    is_active  = Column(Boolean, server_default=Text("true"))
+    is_active  = Column(Boolean, server_default=text("true"))
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     role       = Column(
         SAEnum(RoleEnum, name="role_enum"),
@@ -761,7 +761,7 @@ class Prestamo(Base):
     periodicidad = Column(String, nullable=True)
     plazo_meses = Column(Integer, nullable=False, default=0)
 
-    importe_principal = Column(Numeric(12, 2), nullable=False, server_default=Text("0"))
+    importe_principal = Column(Numeric(12, 2), nullable=False, server_default=text("0"))
 
     tipo_interes = Column(String, nullable=True)
     tin_pct = Column(Numeric, nullable=True)
@@ -882,7 +882,7 @@ class Inversion(Base):
     nombre = Column(String, nullable=False)
     descripcion = Column(sa.Text, nullable=True)
 
-    estado = Column(String, nullable=False, server_default=Text("'ACTIVA'"))
+    estado = Column(String, nullable=False, server_default=text("'ACTIVA'"))
     fase = Column(String, nullable=True)  # futuro
 
     fecha_creacion = Column(Date, nullable=False, server_default=func.current_date())
@@ -890,7 +890,7 @@ class Inversion(Base):
     fecha_objetivo_salida = Column(Date, nullable=True)
     fecha_cierre_real = Column(Date, nullable=True)
 
-    moneda = Column(String, nullable=False, server_default=Text("'EUR'"))
+    moneda = Column(String, nullable=False, server_default=text("'EUR'"))
 
     # Importes (sin caja real)
     aporte_estimado = Column(Numeric(14, 2), nullable=True)
