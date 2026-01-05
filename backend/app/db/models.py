@@ -410,8 +410,8 @@ class Ingreso(Base):
 
     user_id                = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
 
-    kpi               = Column(Boolean, nullable=False, server_default=sa.Text("true"))
-    ingresos_cobrados = Column(Integer, nullable=False, server_default=sa.Text("0"))
+    kpi               = Column(Boolean, nullable=False, server_default=sa.text("true"))
+    ingresos_cobrados = Column(Integer, nullable=False, server_default=sa.text("0"))
     inactivatedon     = Column(DateTime, nullable=True)
     ultimo_ingreso_on = Column(DateTime, nullable=True)
 
@@ -613,7 +613,7 @@ class CierreMensual(Base):
         PGUUID(as_uuid=True),
         primary_key=True,
         nullable=False,
-        server_default=sa.Text("gen_random_uuid()"),
+        server_default=sa.text("gen_random_uuid()"),
     )
 
     anio = sa.Column(sa.SmallInteger, nullable=False)
@@ -632,49 +632,49 @@ class CierreMensual(Base):
     # -------------------------
     # Ingresos
     # -------------------------
-    ingresos_esperados = sa.Column(sa.Float, nullable=False, server_default=sa.Text("0"))
-    ingresos_reales = sa.Column(sa.Float, nullable=False, server_default=sa.Text("0"))
-    desv_ingresos = sa.Column(sa.Float, nullable=False, server_default=sa.Text("0"))
+    ingresos_esperados = sa.Column(sa.Float, nullable=False, server_default=sa.text("0"))
+    ingresos_reales = sa.Column(sa.Float, nullable=False, server_default=sa.text("0"))
+    desv_ingresos = sa.Column(sa.Float, nullable=False, server_default=sa.text("0"))
 
     # -------------------------
     # Gastos (desglose)
     # -------------------------
-    gastos_gestionables_esperados = sa.Column(sa.Float, nullable=False, server_default=sa.Text("0"))
-    gastos_gestionables_reales = sa.Column(sa.Float, nullable=False, server_default=sa.Text("0"))
+    gastos_gestionables_esperados = sa.Column(sa.Float, nullable=False, server_default=sa.text("0"))
+    gastos_gestionables_reales = sa.Column(sa.Float, nullable=False, server_default=sa.text("0"))
 
-    gastos_cotidianos_esperados = sa.Column(sa.Float, nullable=False, server_default=sa.Text("0"))
-    gastos_cotidianos_reales = sa.Column(sa.Float, nullable=False, server_default=sa.Text("0"))
+    gastos_cotidianos_esperados = sa.Column(sa.Float, nullable=False, server_default=sa.text("0"))
+    gastos_cotidianos_reales = sa.Column(sa.Float, nullable=False, server_default=sa.text("0"))
 
-    gastos_esperados_total = sa.Column(sa.Float, nullable=False, server_default=sa.Text("0"))
-    gastos_reales_total = sa.Column(sa.Float, nullable=False, server_default=sa.Text("0"))
+    gastos_esperados_total = sa.Column(sa.Float, nullable=False, server_default=sa.text("0"))
+    gastos_reales_total = sa.Column(sa.Float, nullable=False, server_default=sa.text("0"))
 
     # -------------------------
     # Desviaciones
     # -------------------------
-    desv_gestionables = sa.Column(sa.Float, nullable=False, server_default=sa.Text("0"))
-    desv_cotidianos = sa.Column(sa.Float, nullable=False, server_default=sa.Text("0"))
-    desv_gastos_total = sa.Column(sa.Float, nullable=False, server_default=sa.Text("0"))
+    desv_gestionables = sa.Column(sa.Float, nullable=False, server_default=sa.text("0"))
+    desv_cotidianos = sa.Column(sa.Float, nullable=False, server_default=sa.text("0"))
+    desv_gastos_total = sa.Column(sa.Float, nullable=False, server_default=sa.text("0"))
 
     # -------------------------
     # Resultado
     # -------------------------
-    resultado_esperado = sa.Column(sa.Float, nullable=False, server_default=sa.Text("0"))
-    resultado_real = sa.Column(sa.Float, nullable=False, server_default=sa.Text("0"))
-    desv_resultado = sa.Column(sa.Float, nullable=False, server_default=sa.Text("0"))
+    resultado_esperado = sa.Column(sa.Float, nullable=False, server_default=sa.text("0"))
+    resultado_real = sa.Column(sa.Float, nullable=False, server_default=sa.text("0"))
+    desv_resultado = sa.Column(sa.Float, nullable=False, server_default=sa.text("0"))
 
     # -------------------------
     # Contadores
     # -------------------------
-    n_recurrentes_ing = sa.Column(sa.Integer, nullable=False, server_default=sa.Text("0"))
-    n_recurrentes_gas = sa.Column(sa.Integer, nullable=False, server_default=sa.Text("0"))
-    n_unicos_ing = sa.Column(sa.Integer, nullable=False, server_default=sa.Text("0"))
-    n_unicos_gas = sa.Column(sa.Integer, nullable=False, server_default=sa.Text("0"))
-    n_cotidianos = sa.Column(sa.Integer, nullable=False, server_default=sa.Text("0"))
+    n_recurrentes_ing = sa.Column(sa.Integer, nullable=False, server_default=sa.text("0"))
+    n_recurrentes_gas = sa.Column(sa.Integer, nullable=False, server_default=sa.text("0"))
+    n_unicos_ing = sa.Column(sa.Integer, nullable=False, server_default=sa.text("0"))
+    n_unicos_gas = sa.Column(sa.Integer, nullable=False, server_default=sa.text("0"))
+    n_cotidianos = sa.Column(sa.Integer, nullable=False, server_default=sa.text("0"))
 
     # -------------------------
     # Liquidez snapshot
     # -------------------------
-    liquidez_total = sa.Column(sa.Float, nullable=False, server_default=sa.Text("0"))
+    liquidez_total = sa.Column(sa.Float, nullable=False, server_default=sa.text("0"))
 
     detalles = relationship(
         "CierreMensualDetalle",
@@ -697,7 +697,7 @@ class CierreMensualDetalle(Base):
         PGUUID(as_uuid=True),
         primary_key=True,
         nullable=False,
-        server_default=sa.Text("gen_random_uuid()"),
+        server_default=sa.text("gen_random_uuid()"),
     )
     cierre_id = sa.Column(
         PGUUID(as_uuid=True),
@@ -714,11 +714,11 @@ class CierreMensualDetalle(Base):
     )
     tipo_detalle = sa.Column(sa.String, nullable=False)
 
-    esperado = sa.Column(sa.Float, nullable=False, server_default=sa.Text("0"))
-    real = sa.Column(sa.Float, nullable=False, server_default=sa.Text("0"))
-    desviacion = sa.Column(sa.Float, nullable=False, server_default=sa.Text("0"))
+    esperado = sa.Column(sa.Float, nullable=False, server_default=sa.text("0"))
+    real = sa.Column(sa.Float, nullable=False, server_default=sa.text("0"))
+    desviacion = sa.Column(sa.Float, nullable=False, server_default=sa.text("0"))
     cumplimiento_pct = sa.Column(sa.Float, nullable=True)
-    incluye_kpi = sa.Column(sa.Boolean, nullable=False, server_default=sa.Text("true"))
+    incluye_kpi = sa.Column(sa.Boolean, nullable=False, server_default=sa.text("true"))
 
     fecha_cierre = sa.Column(sa.DateTime, server_default=func.now())
     user_id = sa.Column(sa.Integer, sa.ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
