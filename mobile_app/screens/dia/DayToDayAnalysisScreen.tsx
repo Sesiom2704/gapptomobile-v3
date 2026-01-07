@@ -41,9 +41,6 @@ type SubtipoOption = {
   label: string;
 };
 
-// Contenedores principales (categorías de análisis)
-// ⚠️ Nota: en tu código original había un typo "RESTURACION".
-// Aquí normalizamos a "RESTAURACION" (backend) y añadimos compatibilidad si viniera el typo.
 const CATEGORY_OPTIONS = [
   { key: 'SUPERMERCADOS', label: 'Supermercados' },
   { key: 'SUMINISTROS', label: 'Suministros' },
@@ -61,9 +58,6 @@ const ALL_CATEGORY_LABEL = 'TODOS';
 
 // -----------------------------------------------------------------------------
 // Mapeo frontend alineado con backend (TIPO_TO_CATEGORY)
-// Motivo:
-// - (1) Desglose de “Mes en curso” por tipo: necesitamos saber los tipo_id conocidos.
-// - (2) En “TODOS”, agregamos proveedores y KPIs sin pedir endpoint nuevo.
 // -----------------------------------------------------------------------------
 const TIPO_TO_CATEGORY_FRONTEND: Record<string, string> = {
   'COM-TIPOGASTO-311A33BD': 'SUPERMERCADOS',
@@ -74,7 +68,6 @@ const TIPO_TO_CATEGORY_FRONTEND: Record<string, string> = {
   'PEA-TIPOGASTO-7HDY89': 'VEHICULOS',
 
   'ROP-TIPOGASTO-S227BB': 'ROPA',
-
   'RES-TIPOGASTO-26ROES': 'RESTAURACION',
 
   'TRA-TIPOGASTO-RB133Z': 'OCIO',
@@ -82,7 +75,6 @@ const TIPO_TO_CATEGORY_FRONTEND: Record<string, string> = {
   'ACT-TIPOGASTO-2X9H1Q': 'OCIO',
 };
 
-// Etiquetas de tipos para mostrar en UI
 const TIPO_LABELS: Record<string, string> = {
   'COM-TIPOGASTO-311A33BD': 'Compras (supermercado)',
   'ELE-TIPOGASTO-47CC77E5': 'Electricidad / suministros',
@@ -117,20 +109,7 @@ const SUBTIPOS_POR_CATEGORIA: Record<string, SubtipoOption[]> = {
     { id: 'HOS-TIPOGASTO-357FDG', label: 'Hospedaje' },
     { id: 'ACT-TIPOGASTO-2X9H1Q', label: 'Actividades' },
   ],
-  // “TODOS”: damos un set razonable (los tipo_id conocidos)
-  [ALL_CATEGORY_KEY]: [
-    { id: null, label: 'Todos los tipos' },
-    { id: 'COM-TIPOGASTO-311A33BD', label: 'Compras (supermercado)' },
-    { id: 'ELE-TIPOGASTO-47CC77E5', label: 'Electricidad / suministros' },
-    { id: 'TIP-GASOLINA-SW1ZQO', label: 'Combustible' },
-    { id: 'PEA-TIPOGASTO-7HDY89', label: 'Peajes' },
-    { id: 'MAV-TIPOGASTO-BVC356', label: 'Mantenimiento' },
-    { id: 'ROP-TIPOGASTO-S227BB', label: 'Ropa' },
-    { id: 'RES-TIPOGASTO-26ROES', label: 'Restauración' },
-    { id: 'TRA-TIPOGASTO-RB133Z', label: 'Transporte' },
-    { id: 'HOS-TIPOGASTO-357FDG', label: 'Hospedaje' },
-    { id: 'ACT-TIPOGASTO-2X9H1Q', label: 'Actividades' },
-  ],
+  [ALL_CATEGORY_KEY]: [{ id: null, label: 'Todos los tipos' }], // NO se muestra por regla
 };
 
 // --------------------
@@ -172,7 +151,6 @@ function normalizeProviderName(name: string) {
 
 function normalizeCategoryKey(key: string | null) {
   if (!key) return null;
-  // Compatibilidad con typo legado "RESTURACION"
   if (key === 'RESTURACION') return 'RESTAURACION';
   return key;
 }
@@ -222,33 +200,46 @@ export const DayToDayAnalysisScreen: React.FC = () => {
   // Mostrar/ocultar bloque de filtros
   const [filtrosAbiertos, setFiltrosAbiertos] = useState(false);
 
-  // Quién paga: TODOS / YO / OTRO
+  // Quién paga
   const [pagoFiltro, setPagoFiltro] = useState<PagoFiltro>('YO');
 
   // Categoría seleccionada (incluye ALL)
   const [selectedCategoryKey, setSelectedCategoryKey] = useState<string | null>(null);
 
-  // Subgasto (tipoId) dentro de categoría
+  // Subgasto (tipoId)
   const [selectedSubtipoId, setSelectedSubtipoId] = useState<string | null>(null);
 
-  // Datos backend
+  // Datos backend (principal)
   const [data, setData] = useState<DayToDayAnalysisResponse | null>(null);
   const [loading, setLoading] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
 
-  // (1) Mes en curso plegable + desglose por tipo
+  // Mes en curso plegable + desglose por tipo
   const [monthExpanded, setMonthExpanded] = useState(false);
   const [monthBreakdownLoading, setMonthBreakdownLoading] = useState(false);
   const [monthBreakdownError, setMonthBreakdownError] = useState<string | null>(null);
   const [monthBreakdownItems, setMonthBreakdownItems] = useState<MonthBreakdownItem[]>([]);
   const monthBreakdownCacheRef = useRef<Record<string, MonthBreakdownItem[]>>({});
 
+  // ✅ Nueva llamada: tendencia últimos 7 días del gasto seleccionado
+  const [selectedTrend7d, setSelectedTrend7d] = useState<Last7DayItem[]>([]);
+  const [selectedTrendLoading, setSelectedTrendLoading] = useState(false);
+  const [selectedTrendError, setSelectedTrendError] = useState<string | null>(null);
+
   // Si cambia categoría, resetea subgasto
   useEffect(() => {
     setSelectedSubtipoId(null);
   }, [selectedCategoryKey]);
 
-  // Para dividir contenedores (filtros) en filas de 3
+  // Si está seleccionado “TODOS”, subgasto a null (regla 1)
+  useEffect(() => {
+    const normalizedCat = normalizeCategoryKey(selectedCategoryKey);
+    if (normalizedCat === ALL_CATEGORY_KEY && selectedSubtipoId) {
+      setSelectedSubtipoId(null);
+    }
+  }, [selectedCategoryKey, selectedSubtipoId]);
+
+  // Para dividir contenedores en filas de 3
   const categoryRows = useMemo<CategoryOption[][]>(() => {
     const rows: CategoryOption[][] = [];
     for (let i = 0; i < CATEGORY_OPTIONS.length; i += 3) {
@@ -272,7 +263,6 @@ export const DayToDayAnalysisScreen: React.FC = () => {
       const isAll = normalizedCat === ALL_CATEGORY_KEY;
 
       if (selectedView === 'CATEGORIA') {
-        // Si hay subtipo, manda tipoId (analyticsApi lo mapea a tipo_id)
         if (selectedSubtipoId) {
           params.tipoId = selectedSubtipoId;
         } else if (normalizedCat && !isAll) {
@@ -305,7 +295,7 @@ export const DayToDayAnalysisScreen: React.FC = () => {
     fetchData();
   }, [fetchData]);
 
-  // Al cambiar contexto, cerramos mes expandido (UX clara) y limpiamos estado de desglose
+  // Al cambiar contexto, cerramos mes expandido
   useEffect(() => {
     setMonthExpanded(false);
     setMonthBreakdownError(null);
@@ -324,13 +314,12 @@ export const DayToDayAnalysisScreen: React.FC = () => {
   const categoriasMes = data?.categorias_mes ?? [];
   const categoryKpis = data?.category_kpis ?? {};
   const proveedoresPorCategoria = data?.proveedores_por_categoria ?? {};
-  const ultimos7Dias: Last7DayItem[] = data?.ultimos_7_dias ?? [];
+  const ultimos7DiasGeneral: Last7DayItem[] = data?.ultimos_7_dias ?? [];
 
-  // (3) Backend insights (Opción B) + fallback a alertas strings
   const insights: InsightItem[] = data?.insights ?? [];
   const alertasStrings: string[] = data?.alertas ?? [];
 
-  // Categorías con “TODOS” al principio (requisito 2)
+  // Categorías con “TODOS” al principio
   const categoriasMesConTodos = useMemo(() => {
     const totalImporte = month?.gastado_mes ?? 0;
     const todos = {
@@ -342,7 +331,7 @@ export const DayToDayAnalysisScreen: React.FC = () => {
     return [todos, ...categoriasMes];
   }, [categoriasMes, month?.gastado_mes]);
 
-  // Categoría seleccionada efectiva (incluye TODOS)
+  // Categoría seleccionada efectiva
   const effectiveSelectedCategory = useMemo(() => {
     if (!data) return null;
 
@@ -353,27 +342,26 @@ export const DayToDayAnalysisScreen: React.FC = () => {
     }
 
     if (categoriasMes.length) {
-      const fromState =
-        normalizedCat && categoriasMes.find((c) => c.key === normalizedCat);
+      const fromState = normalizedCat && categoriasMes.find((c) => c.key === normalizedCat);
       return fromState || categoriasMes[0];
     }
 
     return null;
   }, [data, categoriasMes, selectedCategoryKey, month?.gastado_mes]);
 
-  // KPIs de categoría seleccionada:
-  // - para categorías reales: backend
-  // - para TODOS: calculamos con lo que ya trae backend (suma tickets)
+  const isAllSelected = effectiveSelectedCategory?.key === ALL_CATEGORY_KEY;
+
+  // KPIs categoría seleccionada
   const selectedCategoryKpis = useMemo(() => {
     if (!effectiveSelectedCategory) return null;
 
     if (effectiveSelectedCategory.key === ALL_CATEGORY_KEY) {
-      const ticketsTotal = Object.values(categoryKpis).reduce((acc, k) => acc + (k?.tickets ?? 0), 0);
+      const ticketsTotal = Object.values(categoryKpis).reduce(
+        (acc, k) => acc + (k?.tickets ?? 0),
+        0
+      );
       const importeMes = month?.gastado_mes ?? 0;
       const ticketMedio = ticketsTotal > 0 ? importeMes / ticketsTotal : 0;
-
-      // variaciones: si hay kpis_evolucion lo usamos para importe; tickets no viene como KPI global,
-      // así que lo dejamos a 0 (o puedes calcularlo si decides extender backend).
       const varImportePct = data?.kpis_evolucion?.variacion_mes_pct ?? 0;
 
       return {
@@ -388,9 +376,7 @@ export const DayToDayAnalysisScreen: React.FC = () => {
     return categoryKpis[effectiveSelectedCategory.key] ?? null;
   }, [effectiveSelectedCategory, categoryKpis, month?.gastado_mes, data?.kpis_evolucion?.variacion_mes_pct]);
 
-  // Proveedores:
-  // - categoría real: backend
-  // - TODOS: agregación por nombre sumando importes y compras
+  // Proveedores (TODOS => agregación)
   const selectedProveedores: ProviderItem[] = useMemo(() => {
     if (!effectiveSelectedCategory) return [];
 
@@ -426,17 +412,13 @@ export const DayToDayAnalysisScreen: React.FC = () => {
     return proveedoresPorCategoria[effectiveSelectedCategory.key] ?? [];
   }, [effectiveSelectedCategory, proveedoresPorCategoria]);
 
-  const maxImporte7d = useMemo(() => {
-    if (!ultimos7Dias.length) return 1;
-    return Math.max(1, ...ultimos7Dias.map((d) => d.importe));
-  }, [ultimos7Dias]);
-
+  // Subtipos (NO se muestran si TODOS)
   const subtipoOptions: SubtipoOption[] = useMemo(() => {
     if (!effectiveSelectedCategory) return [];
     return SUBTIPOS_POR_CATEGORIA[effectiveSelectedCategory.key] ?? [];
   }, [effectiveSelectedCategory]);
 
-  // Desglose visual de la diferencia vs ayer (HOY)
+  // Diff vs ayer (HOY)
   const diffRaw = today?.diff_vs_ayer ?? '';
   let diffMain = diffRaw || '—';
   let diffSuffix = '';
@@ -471,11 +453,7 @@ export const DayToDayAnalysisScreen: React.FC = () => {
   );
 
   // --------------------
-  // (1) Desglose “Mes en curso” por tipo
-  // Estrategia sin tocar backend:
-  // - Al abrir: hacemos N llamadas a getDayToDayAnalysis({ pago, tipoId })
-  // - Cada una trae month.presupuesto_mes y month.gastado_mes para ese tipo
-  // - Cache por “contexto” (pago + vista + categoría)
+  // Mes en curso: desglose por tipo
   // --------------------
 
   const buildMonthBreakdownContextKey = useCallback(() => {
@@ -539,7 +517,6 @@ export const DayToDayAnalysisScreen: React.FC = () => {
       ];
 
       const filtered = results
-        // Evita ruido: no mostramos tipos con 0/0
         .filter((x) => (x.presupuesto ?? 0) > 0 || (x.gastado ?? 0) > 0)
         .sort((a, b) => {
           const ia = categoryOrder.indexOf(a.categoriaKey);
@@ -562,10 +539,66 @@ export const DayToDayAnalysisScreen: React.FC = () => {
   const onToggleMonthExpanded = useCallback(async () => {
     setMonthExpanded((prev) => !prev);
 
-    // Si abrimos, cargamos desglose
     const willOpen = !monthExpanded;
     if (willOpen) await fetchMonthBreakdown();
   }, [fetchMonthBreakdown, monthExpanded]);
+
+  // --------------------
+  // ✅ NUEVA llamada: tendencia 7 días del gasto seleccionado
+  // --------------------
+  const fetchSelectedTrend7d = useCallback(async () => {
+    try {
+      setSelectedTrendLoading(true);
+      setSelectedTrendError(null);
+
+      const normalizedCat = normalizeCategoryKey(selectedCategoryKey);
+      const isAll = normalizedCat === ALL_CATEGORY_KEY;
+
+      const params: any = { pago: pagoFiltro };
+
+      // Priorizamos subtipo si existe
+      if (selectedSubtipoId) {
+        params.tipoId = selectedSubtipoId;
+      } else if (normalizedCat && !isAll) {
+        params.categoria = normalizedCat;
+      } // ALL => sin categoria/tipoId
+
+      const resp = await getDayToDayAnalysis(params);
+      setSelectedTrend7d(resp?.ultimos_7_dias ?? []);
+    } catch (e) {
+      console.log('[DayToDayAnalysisScreen] Error selected trend 7d', e);
+      setSelectedTrendError('No se pudo cargar la tendencia del gasto seleccionado.');
+      setSelectedTrend7d([]);
+    } finally {
+      setSelectedTrendLoading(false);
+    }
+  }, [pagoFiltro, selectedCategoryKey, selectedSubtipoId]);
+
+  /**
+   * ✅ CLAVE del bug que reportas:
+   * Antes solo se cargaba en vista CATEGORIA.
+   * Ahora se carga siempre que haya categoría efectiva (GENERAL o CATEGORIA),
+   * y por tanto la sección SIEMPRE tiene datos.
+   */
+  useEffect(() => {
+    if (!data) return;
+    if (!effectiveSelectedCategory) return;
+    // Evita llamar antes de que selectedCategoryKey esté inicializado
+    if (!selectedCategoryKey) return;
+
+    fetchSelectedTrend7d();
+  }, [data, effectiveSelectedCategory, selectedCategoryKey, selectedSubtipoId, pagoFiltro, fetchSelectedTrend7d]);
+
+  // Helpers gráfico
+  const maxImporte7dGeneral = useMemo(() => {
+    if (!ultimos7DiasGeneral.length) return 1;
+    return Math.max(1, ...ultimos7DiasGeneral.map((d) => d.importe));
+  }, [ultimos7DiasGeneral]);
+
+  const maxImporte7dSelected = useMemo(() => {
+    if (!selectedTrend7d.length) return 1;
+    return Math.max(1, ...selectedTrend7d.map((d) => d.importe));
+  }, [selectedTrend7d]);
 
   // --------------------
   // Render
@@ -649,7 +682,6 @@ export const DayToDayAnalysisScreen: React.FC = () => {
                   <View style={{ marginTop: 12 }}>
                     <Text style={analysisStyles.filterLabel}>Contenedores</Text>
 
-                    {/* ✅ Incluimos “TODOS” en filtros */}
                     <FilterRow columns={3}>
                       <FilterPill
                         label={ALL_CATEGORY_LABEL}
@@ -800,6 +832,43 @@ export const DayToDayAnalysisScreen: React.FC = () => {
                   </View>
                 </View>
               </View>
+
+              {/* Tendencia GENERAL debajo de Semana */}
+              <View style={panelStyles.section}>
+                <SectionHeader
+                  title="Tendencia últimos 7 días"
+                  onInfo={() =>
+                    info.open(
+                      'Tendencia últimos 7 días',
+                      'Evolución del gasto diario (cotidianos) en los últimos 7 días para el filtro actual.'
+                    )
+                  }
+                />
+
+                <View style={panelStyles.card}>
+                  <Text style={analysisStyles.cardSubtitle}>
+                    Gasto diario en gastos cotidianos (últimos 7 días).
+                  </Text>
+
+                  <View style={styles.barChartContainer}>
+                    {ultimos7DiasGeneral.map((d, idx) => {
+                      const heightPct =
+                        maxImporte7dGeneral > 0 ? (d.importe / maxImporte7dGeneral) * 100 : 0;
+                      return (
+                        <View key={`${d.fecha ?? d.label}-${idx}`} style={styles.barItem}>
+                          <View style={styles.barWrapper}>
+                            <View style={[styles.bar, { height: `${heightPct}%` }]} />
+                          </View>
+                          <Text style={styles.barLabel}>{d.label}</Text>
+                          <Text style={styles.barValue}>
+                            {d.importe > 0 ? d.importe.toFixed(1) + '€' : '—'}
+                          </Text>
+                        </View>
+                      );
+                    })}
+                  </View>
+                </View>
+              </View>
             </>
           )}
 
@@ -822,11 +891,11 @@ export const DayToDayAnalysisScreen: React.FC = () => {
                 }
               />
 
-              <TouchableOpacity
-                style={panelStyles.card}
-                activeOpacity={0.9}
-                onPress={onToggleMonthExpanded}
-              >
+              <TouchableOpacity style={panelStyles.card} activeOpacity={0.9} onPress={async () => {
+                setMonthExpanded((prev) => !prev);
+                const willOpen = !monthExpanded;
+                if (willOpen) await fetchMonthBreakdown();
+              }}>
                 <View style={styles.monthHeaderRow}>
                   <View style={{ flex: 1 }}>
                     <View style={styles.monthRow}>
@@ -933,7 +1002,7 @@ export const DayToDayAnalysisScreen: React.FC = () => {
             </View>
           )}
 
-          {/* DISTRIBUCIÓN POR CATEGORÍA (incluye TODOS primero) */}
+          {/* DISTRIBUCIÓN POR CATEGORÍA */}
           {data && (
             <View style={panelStyles.section}>
               <SectionHeader
@@ -974,7 +1043,6 @@ export const DayToDayAnalysisScreen: React.FC = () => {
                       </View>
 
                       <View style={styles.categoryRight}>
-                        {/* Requisito: “TODOS” no muestra 100% */}
                         {!isAllRow ? (
                           <>
                             <Text style={[styles.categoryPercent, isSelected && styles.categoryPercentSelected]}>
@@ -986,7 +1054,9 @@ export const DayToDayAnalysisScreen: React.FC = () => {
                           </>
                         ) : (
                           <>
-                            <Text style={[styles.categoryPercent, isSelected && styles.categoryPercentSelected]}>{' '}</Text>
+                            <Text style={[styles.categoryPercent, isSelected && styles.categoryPercentSelected]}>
+                              {' '}
+                            </Text>
                             <View style={styles.categoryBarBackground}>
                               <View style={[styles.categoryBarFill, { width: '100%' }]} />
                             </View>
@@ -996,15 +1066,11 @@ export const DayToDayAnalysisScreen: React.FC = () => {
                     </TouchableOpacity>
                   );
                 })}
-
-                {categoriasMesConTodos.length === 1 && (
-                  <Text style={analysisStyles.emptyText}>Aún no hay gastos cotidianos en este mes.</Text>
-                )}
               </View>
             </View>
           )}
 
-          {/* DETALLE CATEGORÍA + SUBGASTOS */}
+          {/* DETALLE CATEGORÍA */}
           {data && effectiveSelectedCategory && (
             <View style={panelStyles.section}>
               <SectionHeader
@@ -1012,13 +1078,14 @@ export const DayToDayAnalysisScreen: React.FC = () => {
                 onInfo={() =>
                   info.open(
                     'Detalle de categoría',
-                    'KPIs del contenedor seleccionado y variaciones vs mes anterior. Puedes aplicar subgasto.'
+                    'KPIs del contenedor seleccionado y variaciones. Puedes aplicar subgasto.'
                   )
                 }
               />
 
               <View style={panelStyles.card}>
-                {subtipoOptions.length > 0 && (
+                {/* Regla 1: si TODOS => no subgastos */}
+                {!isAllSelected && subtipoOptions.length > 0 && (
                   <View style={{ marginBottom: 12 }}>
                     <Text style={analysisStyles.filterLabel}>Subgasto</Text>
                     <View style={analysisStyles.filterRowWrap}>
@@ -1043,7 +1110,7 @@ export const DayToDayAnalysisScreen: React.FC = () => {
                       <View style={styles.kpiCell}>
                         <Text style={analysisStyles.kpiLabel}>Importe mes</Text>
                         <Text style={analysisStyles.kpiValue}>
-                          {effectiveSelectedCategory.key === ALL_CATEGORY_KEY
+                          {isAllSelected
                             ? fmtCurrency(month?.gastado_mes)
                             : fmtCurrency((effectiveSelectedCategory as any).importe)}
                         </Text>
@@ -1062,9 +1129,7 @@ export const DayToDayAnalysisScreen: React.FC = () => {
                       <View style={styles.kpiCell}>
                         <Text style={analysisStyles.kpiLabel}>Peso sobre total</Text>
                         <Text style={analysisStyles.kpiValue}>
-                          {effectiveSelectedCategory.key === ALL_CATEGORY_KEY
-                            ? '100.0%'
-                            : `${selectedCategoryKpis.peso_sobre_total_gasto.toFixed(1)}%`}
+                          {isAllSelected ? '100.0%' : `${selectedCategoryKpis.peso_sobre_total_gasto.toFixed(1)}%`}
                         </Text>
                       </View>
                     </View>
@@ -1100,6 +1165,62 @@ export const DayToDayAnalysisScreen: React.FC = () => {
                   </>
                 ) : (
                   <Text style={analysisStyles.emptyText}>No hay KPIs suficientes para esta categoría en este filtro.</Text>
+                )}
+              </View>
+            </View>
+          )}
+
+          {/* ✅ AQUÍ VA: entre Detalle categoría y Proveedores destacados */}
+          {data && effectiveSelectedCategory && (
+            <View style={panelStyles.section}>
+              <SectionHeader
+                title="Tendencia últimos 7 días (gasto seleccionado)"
+                onInfo={() =>
+                  info.open(
+                    'Tendencia 7 días (gasto seleccionado)',
+                    'Evolución del gasto diario en los últimos 7 días para la categoría/subgasto seleccionado.'
+                  )
+                }
+              />
+
+              <View style={panelStyles.card}>
+                {selectedTrendLoading ? (
+                  <View style={styles.inlineLoaderRow}>
+                    <ActivityIndicator size="small" color={colors.primary} />
+                    <Text style={styles.inlineLoaderText}>Cargando tendencia...</Text>
+                  </View>
+                ) : selectedTrendError ? (
+                  <Text style={styles.inlineErrorText}>{selectedTrendError}</Text>
+                ) : selectedTrend7d.length === 0 ? (
+                  <Text style={analysisStyles.emptyText}>No hay datos de tendencia para este gasto.</Text>
+                ) : (
+                  <>
+                    <Text style={analysisStyles.cardSubtitle}>
+                      {selectedSubtipoId
+                        ? 'Subgasto seleccionado'
+                        : isAllSelected
+                        ? 'Todos los gastos seleccionados'
+                        : 'Categoría seleccionada'}
+                    </Text>
+
+                    <View style={styles.barChartContainer}>
+                      {selectedTrend7d.map((d, idx) => {
+                        const heightPct =
+                          maxImporte7dSelected > 0 ? (d.importe / maxImporte7dSelected) * 100 : 0;
+                        return (
+                          <View key={`${d.fecha ?? d.label}-${idx}`} style={styles.barItem}>
+                            <View style={styles.barWrapper}>
+                              <View style={[styles.bar, { height: `${heightPct}%` }]} />
+                            </View>
+                            <Text style={styles.barLabel}>{d.label}</Text>
+                            <Text style={styles.barValue}>
+                              {d.importe > 0 ? d.importe.toFixed(1) + '€' : '—'}
+                            </Text>
+                          </View>
+                        );
+                      })}
+                    </View>
+                  </>
                 )}
               </View>
             </View>
@@ -1166,96 +1287,63 @@ export const DayToDayAnalysisScreen: React.FC = () => {
             </View>
           )}
 
-          {/* En vista CATEGORIA paramos aquí */}
+          {/* Alertas e Insights solo en GENERAL */}
           {selectedView === 'GENERAL' && data && (
-            <>
-              <View style={panelStyles.section}>
-                <SectionHeader
-                  title="Tendencia últimos 7 días"
-                  onInfo={() =>
-                    info.open(
-                      'Tendencia últimos 7 días',
-                      'Evolución del gasto diario en los últimos 7 días. Las barras se escalan al máximo de la semana.'
-                    )
-                  }
-                />
+            <View style={[panelStyles.section, { marginBottom: 24 }]}>
+              <SectionHeader
+                title="Alertas e insights"
+                onInfo={() =>
+                  info.open(
+                    'Alertas e insights',
+                    'Mensajes automáticos generados por el sistema. Se priorizan insights estructurados del backend.'
+                  )
+                }
+              />
 
-                <View style={panelStyles.card}>
-                  <Text style={analysisStyles.cardSubtitle}>
-                    Gasto diario en gastos cotidianos (últimos 7 días).
-                  </Text>
-
-                  <View style={styles.barChartContainer}>
-                    {ultimos7Dias.map((d, idx) => {
-                      const heightPct = maxImporte7d > 0 ? (d.importe / maxImporte7d) * 100 : 0;
-                      return (
-                        <View key={`${d.fecha ?? d.label}-${idx}`} style={styles.barItem}>
-                          <View style={styles.barWrapper}>
-                            <View style={[styles.bar, { height: `${heightPct}%` }]} />
-                          </View>
-                          <Text style={styles.barLabel}>{d.label}</Text>
-                          <Text style={styles.barValue}>
-                            {d.importe > 0 ? d.importe.toFixed(1) + '€' : '—'}
-                          </Text>
-                        </View>
-                      );
-                    })}
-                  </View>
-                </View>
-              </View>
-
-              <View style={[panelStyles.section, { marginBottom: 24 }]}>
-                <SectionHeader
-                  title="Alertas e insights"
-                  onInfo={() =>
-                    info.open(
-                      'Alertas e insights',
-                      'Mensajes automáticos generados por el sistema para el filtro actual. Se priorizan insights estructurados del backend.'
-                    )
-                  }
-                />
-
-                <View style={panelStyles.card}>
-                  {/* Preferimos insights estructurados si existen */}
-                  {insights.length > 0 ? (
-                    insights.map((it) => (
-                      <View key={it.id} style={styles.insightRow}>
-                        <View style={styles.alertIconCircle}>
-                          <Ionicons
-                            name={insightIconName(it.severity)}
-                            size={16}
-                            color={it.severity === 'critical' ? colors.danger : it.severity === 'warning' ? colors.primary : colors.primary}
-                          />
-                        </View>
-                        <View style={{ flex: 1 }}>
-                          <Text style={styles.insightTitle}>{it.title}</Text>
-                          <Text style={styles.alertText}>{it.message}</Text>
-                        </View>
+              <View style={panelStyles.card}>
+                {insights.length > 0 ? (
+                  insights.map((it) => (
+                    <View key={it.id} style={styles.insightRow}>
+                      <View style={styles.alertIconCircle}>
+                        <Ionicons
+                          name={insightIconName(it.severity)}
+                          size={16}
+                          color={
+                            it.severity === 'critical'
+                              ? colors.danger
+                              : it.severity === 'warning'
+                              ? colors.primary
+                              : colors.primary
+                          }
+                        />
                       </View>
-                    ))
-                  ) : (
-                    <>
-                      {alertasStrings.map((texto, idx) => (
-                        <View key={idx} style={styles.alertRow}>
-                          <View style={styles.alertIconCircle}>
-                            <Ionicons name="alert-circle-outline" size={16} color={colors.primary} />
-                          </View>
-                          <Text style={styles.alertText}>{texto}</Text>
+                      <View style={{ flex: 1 }}>
+                        <Text style={styles.insightTitle}>{it.title}</Text>
+                        <Text style={styles.alertText}>{it.message}</Text>
+                      </View>
+                    </View>
+                  ))
+                ) : (
+                  <>
+                    {alertasStrings.map((texto, idx) => (
+                      <View key={idx} style={styles.alertRow}>
+                        <View style={styles.alertIconCircle}>
+                          <Ionicons name="alert-circle-outline" size={16} color={colors.primary} />
                         </View>
-                      ))}
+                        <Text style={styles.alertText}>{texto}</Text>
+                      </View>
+                    ))}
 
-                      {alertasStrings.length === 0 && (
-                        <Text style={analysisStyles.emptyText}>No hay alertas destacadas para este filtro.</Text>
-                      )}
-                    </>
-                  )}
-                </View>
+                    {alertasStrings.length === 0 && (
+                      <Text style={analysisStyles.emptyText}>No hay alertas destacadas para este filtro.</Text>
+                    )}
+                  </>
+                )}
               </View>
-            </>
+            </View>
           )}
         </ScrollView>
 
-        {/* Modal Info */}
         <InfoModal
           visible={info.visible}
           title={info.title}
@@ -1347,7 +1435,6 @@ const styles = StyleSheet.create({
     color: colors.textSecondary,
   },
 
-  // Mes en curso (plegable)
   monthHeaderRow: {
     flexDirection: 'row',
     alignItems: 'flex-start',
@@ -1455,7 +1542,6 @@ const styles = StyleSheet.create({
     color: colors.textSecondary,
   },
 
-  // Distribución por categoría
   categoryRow: {
     flexDirection: 'row',
     justifyContent: 'space-between',
@@ -1522,7 +1608,6 @@ const styles = StyleSheet.create({
     backgroundColor: colors.primary,
   },
 
-  // KPIs
   kpiGrid: {
     flexDirection: 'row',
     flexWrap: 'wrap',
@@ -1552,7 +1637,6 @@ const styles = StyleSheet.create({
     fontSize: 13,
     fontWeight: '700',
   },
-  // Mantengo tu naming original (aunque parezca invertido)
   varValueUp: {
     color: colors.danger,
   },
@@ -1560,7 +1644,6 @@ const styles = StyleSheet.create({
     color: colors.success,
   },
 
-  // Proveedores
   providerRow: {
     flexDirection: 'row',
     justifyContent: 'space-between',
@@ -1612,7 +1695,6 @@ const styles = StyleSheet.create({
     fontSize: 11,
   },
 
-  // Barras 7 días
   barChartContainer: {
     flexDirection: 'row',
     justifyContent: 'space-between',
@@ -1645,7 +1727,6 @@ const styles = StyleSheet.create({
     color: colors.textMuted,
   },
 
-  // Alertas / Insights
   alertRow: {
     flexDirection: 'row',
     alignItems: 'center',
