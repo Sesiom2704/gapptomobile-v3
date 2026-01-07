@@ -1,6 +1,6 @@
 # backend/app/schemas/day_to_day_analysis.py
 
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 from pydantic import BaseModel
 from typing_extensions import Literal  # para tipos 'UP' | 'DOWN' | 'FLAT'
 
@@ -102,6 +102,26 @@ class EvolutionKpis(BaseModel):
     min_mes_importe: Optional[float] = None
 
 
+# -------------------------------------------------------------------
+# ✅ NUEVO (Opción B): insights estructurados (no rompe a clientes)
+# -------------------------------------------------------------------
+
+class InsightItem(BaseModel):
+    """
+    Insight/alerta estructurado.
+
+    Motivo:
+    - No dependes de "strings sueltas" para ordenar, deduplicar o dar severidad.
+    - Permite UI más rica (iconos/colores) sin inventar reglas en frontend.
+    - Mantiene compatibilidad: seguimos devolviendo alertas: List[str].
+    """
+    id: str
+    title: str
+    message: str
+    severity: Literal["info", "warning", "critical"] = "info"
+    meta: Optional[Dict[str, Any]] = None
+
+
 class DayToDayAnalysisResponse(BaseModel):
     today: TodaySummary
     week: WeekSummary
@@ -110,7 +130,12 @@ class DayToDayAnalysisResponse(BaseModel):
     category_kpis: Dict[str, CategoryKpi]
     proveedores_por_categoria: Dict[str, List[ProviderItem]]
     ultimos_7_dias: List[Last7DayItem]
+
+    # Compatibilidad con clientes existentes
     alertas: List[str]
+
+    # ✅ NUEVO (no rompe): insights estructurados
+    insights: List[InsightItem] = []
 
     # -------------------------------------------------------------------
     # NUEVO (no rompe a clientes existentes):

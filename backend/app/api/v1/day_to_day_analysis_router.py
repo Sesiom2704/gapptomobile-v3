@@ -25,10 +25,12 @@ from backend.app.schemas.day_to_day_analysis import (
     CategoryKpi,
     ProviderItem,
     Last7DayItem,
-    # NUEVO
+    # series / evolución
     DailySeriesItem,
     MonthlySeriesItem,
     EvolutionKpis,
+    # ✅ NUEVO: insights estructurados
+    InsightItem,
 )
 
 router = APIRouter(
@@ -470,13 +472,155 @@ def _compute_evolution_kpis(serie_mensual: List[MonthlySeriesItem]) -> Evolution
         media_3m=float(round(m3, 2)),
         media_6m=float(round(m6, 2)),
         media_12m=float(round(m12, 2)),
-        tendencia=trend,  # Literal en schema
+        tendencia=trend,
         tendencia_detalle=detail,
         max_mes_label=(labels[max_idx] if max_idx is not None else None),
         max_mes_importe=(float(round(values[max_idx], 2)) if max_idx is not None else None),
         min_mes_label=(labels[min_idx] if min_idx is not None else None),
         min_mes_importe=(float(round(values[min_idx], 2)) if min_idx is not None else None),
     )
+
+
+# ---------------------------------------------------------------------------
+# ✅ NUEVO: generador de insights estructurados (Opción B)
+# ---------------------------------------------------------------------------
+
+def _build_insights(
+    *,
+    presupuesto_mes: float,
+    gastado_mes: float,
+    categorias_mes: List[CategoryMonth],
+    kpis_evolucion: EvolutionKpis,
+    week_total: float,
+    week_limit: float,
+    week_projection: float,
+) -> List[InsightItem]:
+    """
+    Genera insights estructurados.
+
+    Nota:
+    - Mantendremos también "alertas" (strings) por compatibilidad.
+    - Esto permite que el cliente pinte UI rica con severidad.
+    """
+    insights: List[InsightItem] = []
+
+    # Presupuesto mensual (si existe)
+    pct_mes_usado = (gastado_mes / presupuesto_mes) * 100.0 if presupuesto_mes > 0 else 0.0
+    if presupuesto_mes > 0:
+        severity: Literal["info", "warning", "critical"] = "info"
+        if pct_mes_usado >= 95:
+            severity = "critical"
+        elif pct_mes_usado >= 75:
+            severity = "warning"
+
+        insights.append(
+            InsightItem(
+                id="BUDGET_MONTH_USAGE",
+                title="Presupuesto mensual",
+                message=f"Has consumido el {pct_mes_usado:.1f}% del presupuesto mensual estimado de gastos cotidianos.",
+                severity=severity,
+                meta={
+                    "pct": round(pct_mes_usado, 1),
+                    "budget": round(presupuesto_mes, 2),
+                    "spent": round(gastado_mes, 2),
+                },
+            )
+        )
+
+    # Concentración por categoría
+    for cat in categorias_mes:
+        if cat.porcentaje >= 40:
+            severity: Literal["info", "warning", "critical"] = "info"
+            if cat.porcentaje >= 60:
+                severity = "critical"
+            elif cat.porcentaje >= 50:
+                severity = "warning"
+
+            insights.append(
+                InsightItem(
+                    id=f"CATEGORY_CONCENTRATION_{cat.key}",
+                    title="Concentración por categoría",
+                    message=f"{cat.label} concentra el {cat.porcentaje:.1f}% de tu gasto mensual.",
+                    severity=severity,
+                    meta={
+                        "category_key": cat.key,
+                        "pct": round(cat.porcentaje, 1),
+                        "amount": round(cat.importe, 2),
+                    },
+                )
+            )
+
+    # Evolución vs mes anterior
+    if kpis_evolucion.variacion_mes_abs > 0:
+        insights.append(
+            InsightItem(
+                id="MONTH_VS_PREV_UP",
+                title="Evolución mensual",
+                message=f"Este mes vas +{kpis_evolucion.variacion_mes_abs:.2f} € vs el mes anterior.",
+                severity="warning",
+                meta={
+                    "delta_abs": round(kpis_evolucion.variacion_mes_abs, 2),
+                    "delta_pct": round(kpis_evolucion.variacion_mes_pct, 2),
+                },
+            )
+        )
+    elif kpis_evolucion.variacion_mes_abs < 0:
+        insights.append(
+            InsightItem(
+                id="MONTH_VS_PREV_DOWN",
+                title="Evolución mensual",
+                message=f"Este mes vas {kpis_evolucion.variacion_mes_abs:.2f} € vs el mes anterior.",
+                severity="info",
+                meta={
+                    "delta_abs": round(kpis_evolucion.variacion_mes_abs, 2),
+                    "delta_pct": round(kpis_evolucion.variacion_mes_pct, 2),
+                },
+            )
+        )
+
+    # Semana: proyección vs límite (si hay)
+    if week_limit > 0:
+        if week_projection > week_limit * 1.15:
+            insights.append(
+                InsightItem(
+                    id="WEEK_PROJECTION_OVER_LIMIT_STRONG",
+                    title="Ritmo semanal",
+                    message="La proyección de fin de semana supera claramente el límite semanal.",
+                    severity="critical",
+                    meta={
+                        "week_total": round(week_total, 2),
+                        "week_limit": round(week_limit, 2),
+                        "week_projection": round(week_projection, 2),
+                    },
+                )
+            )
+        elif week_projection > week_limit:
+            insights.append(
+                InsightItem(
+                    id="WEEK_PROJECTION_OVER_LIMIT",
+                    title="Ritmo semanal",
+                    message="La proyección de fin de semana supera el límite semanal.",
+                    severity="warning",
+                    meta={
+                        "week_total": round(week_total, 2),
+                        "week_limit": round(week_limit, 2),
+                        "week_projection": round(week_projection, 2),
+                    },
+                )
+            )
+
+    # Si no hay ninguno, dejamos al menos uno informativo (evita UI vacía)
+    if not insights:
+        insights.append(
+            InsightItem(
+                id="NO_INSIGHTS",
+                title="Sin alertas destacadas",
+                message="No se han detectado patrones destacados este mes en tus gastos cotidianos.",
+                severity="info",
+            )
+        )
+
+    return insights
 
 
 # ---------------------------------------------------------------------------
@@ -500,6 +644,9 @@ def get_day_to_day_analysis(
     - serie_diaria_mes: puntos diarios del mes (relleno con 0)
     - serie_mensual: evolución últimos N meses (relleno con 0)
     - kpis_evolucion: KPIs para interpretar la evolución
+
+    ✅ NUEVO (Opción B):
+    - insights: lista estructurada con severidad + meta (manteniendo alertas: List[str]).
     """
     base_date = parse_base_date(fecha)
 
@@ -608,6 +755,7 @@ def get_day_to_day_analysis(
     prev_month_total_row = prev_month_query.one()
     gastado_mes_anterior = _f(prev_month_total_row.total, 0.0)
 
+    # Presupuesto estimado (tu lógica actual)
     if gastado_mes_anterior > 0:
         presupuesto_mes = gastado_mes_anterior * 1.1
     elif gastado_mes > 0:
@@ -648,7 +796,7 @@ def get_day_to_day_analysis(
 
         prev_data = cat_prev.get(key, {"total": 0.0, "tickets": 0.0})
         total_prev = float(prev_data["total"])
-        tickets_prev = float(prev_data["tickets"])  # puede ser float en dict agregación
+        tickets_prev = float(prev_data["tickets"])
 
         var_importe_pct = ((total_cat - total_prev) / total_prev) * 100.0 if total_prev > 0 else (100.0 if total_cat > 0 else 0.0)
         var_tickets_pct = ((tickets_cat - tickets_prev) / tickets_prev) * 100.0 if tickets_prev > 0 else (100.0 if tickets_cat > 0 else 0.0)
@@ -687,14 +835,14 @@ def get_day_to_day_analysis(
     ultimos_7_dias = _aggregate_last_7_days(db, base_date, pago, categoria, tipo_id, user_id)
 
     # -----------------------------------------------------------------------
-    # NUEVO: series para gráficas + KPIs evolución
+    # Series + KPIs evolución
     # -----------------------------------------------------------------------
     serie_diaria_mes = _daily_series_for_month(db, month_start, month_next, pago, categoria, tipo_id, user_id)
     serie_mensual = _monthly_series_last_n(db, base_date, months_back, pago, categoria, tipo_id, user_id)
     kpis_evolucion = _compute_evolution_kpis(serie_mensual)
 
     # -----------------------------------------------------------------------
-    # Alertas
+    # Alertas (compatibilidad)
     # -----------------------------------------------------------------------
     alertas: List[str] = []
 
@@ -715,6 +863,19 @@ def get_day_to_day_analysis(
         alertas.append("No hay alertas destacadas este mes en tus gastos cotidianos.")
 
     # -----------------------------------------------------------------------
+    # ✅ Insights estructurados (Opción B)
+    # -----------------------------------------------------------------------
+    insights = _build_insights(
+        presupuesto_mes=presupuesto_mes,
+        gastado_mes=gastado_mes,
+        categorias_mes=categorias_mes,
+        kpis_evolucion=kpis_evolucion,
+        week_total=total_semana,
+        week_limit=limite_semana,
+        week_projection=proyeccion_fin_semana,
+    )
+
+    # -----------------------------------------------------------------------
     # Respuesta
     # -----------------------------------------------------------------------
     return DayToDayAnalysisResponse(
@@ -726,6 +887,7 @@ def get_day_to_day_analysis(
         proveedores_por_categoria=proveedores_por_categoria,
         ultimos_7_dias=ultimos_7_dias,
         alertas=alertas,
+        insights=insights,
 
         # nuevos campos
         serie_diaria_mes=serie_diaria_mes,

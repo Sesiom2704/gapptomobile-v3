@@ -56,6 +56,19 @@ export interface Last7DayItem {
 }
 
 /**
+ * ✅ NUEVO (backend): insight estructurado (Opción B)
+ */
+export type InsightSeverity = 'info' | 'warning' | 'critical';
+
+export interface InsightItem {
+  id: string;
+  title: string;
+  message: string;
+  severity: InsightSeverity;
+  meta?: Record<string, any> | null;
+}
+
+/**
  * ✅ NUEVO (backend): serie diaria del mes (para gráfica mensual)
  */
 export interface DailySeriesItem {
@@ -104,6 +117,12 @@ export interface DayToDayAnalysisResponse {
   proveedores_por_categoria: Record<string, ProviderItem[]>;
   ultimos_7_dias: Last7DayItem[];
   alertas: string[];
+
+  /**
+   * ✅ NUEVO (Opción B): insights estructurados
+   * OJO: opcional para no romper si backend no está desplegado.
+   */
+  insights?: InsightItem[];
 
   /**
    * ✅ NUEVO: para análisis mensual con gráficas (backend ya lo devuelve)
