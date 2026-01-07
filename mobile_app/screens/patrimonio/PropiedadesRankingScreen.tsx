@@ -94,7 +94,7 @@ async function fetchKpis(patrimonioId: string): Promise<Kpis | null> {
       {
         params: {
           year,
-          annualize: true,
+          annualize: false,
           basis: 'total',
         },
       }

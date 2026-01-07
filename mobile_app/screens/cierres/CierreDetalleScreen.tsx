@@ -100,10 +100,7 @@ const CierreDetalleScreen: React.FC = () => {
     const gastos = safeNumber(cierreFromList.gastos_reales_total);
     const resEsp = safeNumber(cierreFromList.resultado_esperado);
     const resReal = safeNumber(cierreFromList.resultado_real);
-    const desv =
-      Number.isFinite(Number(cierreFromList.desv_resultado))
-        ? safeNumber(cierreFromList.desv_resultado)
-        : resReal - resEsp;
+    const desv = resReal - resEsp;
 
     return { ingresos, gastos, resEsp, resReal, desv };
   }, [cierreFromList]);
@@ -259,8 +256,7 @@ const CierreDetalleScreen: React.FC = () => {
                   : (real - esperado);
 
                 const tituloBase = (d.tipo_detalle || 'Detalle').toUpperCase();
-                const seg = d.segmento_id ? ` · ${d.segmento_id}` : '';
-                const titulo = `${tituloBase}${seg}`;
+                const titulo = `${tituloBase}`;
 
                 return (
                   <View key={d.id} style={panelStyles.menuCard}>

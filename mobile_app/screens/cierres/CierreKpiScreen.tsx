@@ -9,12 +9,19 @@
 //      - Tooltip al pulsar un punto (mes + importe).
 //   3) Comparativa mensual (barras tappable): Ingresos vs Gastos por mes.
 //      - Tooltip al pulsar una barra (mes + importe).
-//   4) Por segmentos (LineChart): Real por segmento (Cotidianos / Viviendas / Gestionables).
+//   4) Por segmentos (LineChart): Real por segmento (Cotidianos / Viviendas / Gestionables / Ahorro).
 //      - Tooltip al pulsar un punto (mes + importe + segmento).
 //
 // Importante:
 // - BarChart de chart-kit no ofrece tap fiable/typed en cada barra.
 //   -> usamos barras nativas (Views) para interacción robusta.
+// - react-native-chart-kit puede no exponer datasetIndex de forma fiable.
+//   -> añadimos un fallback para inferir el segmento.
+// -----------------------------------------------------------------------------
+// Ahorro:
+// - Se incorpora como 4º dataset en "Por segmentos".
+// - Se intenta localizar por tipo_detalle (o alias) incluyendo: "AHORRO" y "AHO-12345".
+// - Se muestra como valor positivo (plus) en tooltip (puedes cambiarlo si tu backend lo define distinto).
 // -----------------------------------------------------------------------------
 
 import React, { useCallback, useMemo, useState } from 'react';
@@ -63,10 +70,12 @@ type TrendTooltip = TooltipBase & {
   metric: TrendMetric;
 };
 
+type SegmentLabel = 'Cotidianos' | 'Viviendas' | 'Gestionables' | 'Ahorro';
+
 type SegTooltip = TooltipBase & {
   x: number;
   y: number;
-  segmentLabel: 'Cotidianos' | 'Viviendas' | 'Gestionables';
+  segmentLabel: SegmentLabel;
 };
 
 type BarSelected = {
@@ -91,16 +100,35 @@ function periodLabel(c: { anio: number; mes: number }) {
 function groupDetallesByCierre(detalles: CierreMensualDetalle[]) {
   const map = new Map<string, CierreMensualDetalle[]>();
   for (const d of detalles) {
-    const key = String(d.cierre_id);
+    const key = String((d as any).cierre_id);
     if (!map.has(key)) map.set(key, []);
     map.get(key)!.push(d);
   }
   return map;
 }
 
+/**
+ * Obtiene una clave comparable (en mayúsculas) del detalle para identificar el segmento/tipo.
+ * Es tolerante a variaciones de backend: tipo_detalle, tipo, codigo, segmento, etc.
+ */
+function detalleKey(d: any) {
+  return String(d?.tipo_detalle ?? d?.tipo ?? d?.codigo ?? d?.segmento ?? '').toUpperCase();
+}
+
 function findDetalle(detalles: CierreMensualDetalle[] | undefined, tipo: string) {
   if (!detalles) return undefined;
-  return detalles.find((x) => String(x.tipo_detalle || '').toUpperCase() === tipo.toUpperCase());
+  const t = String(tipo).toUpperCase();
+  return detalles.find((x: any) => detalleKey(x) === t);
+}
+
+/**
+ * Busca un detalle por múltiples posibles etiquetas (alias).
+ * Útil cuando un segmento viene como "AHORRO" o como un código tipo "AHO-12345".
+ */
+function findDetalleAny(detalles: CierreMensualDetalle[] | undefined, tipos: string[]) {
+  if (!detalles) return undefined;
+  const ups = tipos.map((t) => String(t).toUpperCase());
+  return detalles.find((x: any) => ups.includes(detalleKey(x)));
 }
 
 function metricTitle(m: TrendMetric) {
@@ -254,9 +282,7 @@ function TappableBarsComparativa(props: {
           </View>
         </View>
 
-        <Text style={[panelStyles.cardSubtitle, { marginTop: 8 }]}>
-          Tip: toca una barra para ver el importe exacto.
-        </Text>
+        <Text style={[panelStyles.cardSubtitle, { marginTop: 8 }]}>Tip: toca una barra para ver el importe exacto.</Text>
       </View>
     </ScrollView>
   );
@@ -314,7 +340,7 @@ const CierreKpiScreen: React.FC = () => {
   const cierresAsc = useMemo(() => {
     const cierres = resp?.cierres ?? [];
     const copy = [...cierres];
-    copy.sort((a, b) => (a.anio - b.anio) || (a.mes - b.mes));
+    copy.sort((a, b) => a.anio - b.anio || a.mes - b.mes);
     return copy;
   }, [resp]);
 
@@ -330,26 +356,28 @@ const CierreKpiScreen: React.FC = () => {
     let desv = 0;
 
     for (const c of cierres) {
-      ingresos += safeNum(c.ingresos_reales);
-      gastos += safeNum(c.gastos_reales_total);
-      resultado += safeNum(c.resultado_real);
-      desv += safeNum(c.desv_resultado);
+      ingresos += safeNum((c as any).ingresos_reales);
+      gastos += safeNum((c as any).gastos_reales_total);
+      resultado += safeNum((c as any).resultado_real);
+      desv += safeNum((c as any).desv_resultado);
     }
 
     const resultadoMedio = n ? resultado / n : 0;
     const desvMedia = n ? desv / n : 0;
 
-    const trendResultado =
-      n >= 2 ? safeNum(cierres[n - 1].resultado_real) - safeNum(cierres[0].resultado_real) : 0;
+    const trendResultado = n >= 2 ? safeNum((cierres[n - 1] as any).resultado_real) - safeNum((cierres[0] as any).resultado_real) : 0;
 
     return { n, ingresos, gastos, resultado, desv, resultadoMedio, desvMedia, trendResultado };
   }, [cierresAsc]);
 
   const labels = useMemo(() => cierresAsc.map(periodLabel), [cierresAsc]);
 
-  const serieResultado = useMemo(() => cierresAsc.map((c) => safeNum(c.resultado_real)), [cierresAsc]);
-  const serieIngresos = useMemo(() => cierresAsc.map((c) => safeNum(c.ingresos_reales)), [cierresAsc]);
-  const serieGastosAbs = useMemo(() => cierresAsc.map((c) => Math.abs(safeNum(c.gastos_reales_total))), [cierresAsc]);
+  const serieResultado = useMemo(() => cierresAsc.map((c) => safeNum((c as any).resultado_real)), [cierresAsc]);
+  const serieIngresos = useMemo(() => cierresAsc.map((c) => safeNum((c as any).ingresos_reales)), [cierresAsc]);
+  const serieGastosAbs = useMemo(
+    () => cierresAsc.map((c) => Math.abs(safeNum((c as any).gastos_reales_total))),
+    [cierresAsc]
+  );
 
   const serieTendencia = useMemo(() => {
     if (trendMetric === 'ingresos') return serieIngresos;
@@ -357,23 +385,35 @@ const CierreKpiScreen: React.FC = () => {
     return serieResultado;
   }, [trendMetric, serieIngresos, serieGastosAbs, serieResultado]);
 
+  /**
+   * Series por segmentos:
+   * - Se usa ABS para gasto real por segmento (como antes).
+   * - Para Ahorro se usa ABS por estabilidad visual (evita línea invertida si viniera negativo).
+   *   En tooltip lo mostramos como plus.
+   */
   const segSeries = useMemo(() => {
     const cot: number[] = [];
     const viv: number[] = [];
     const ges: number[] = [];
+    const aho: number[] = [];
 
     for (const c of cierresAsc) {
-      const dets = detallesByCierreId.get(String(c.id));
+      const dets = detallesByCierreId.get(String((c as any).id));
+
       const dCot = findDetalle(dets, 'COTIDIANOS');
       const dViv = findDetalle(dets, 'VIVIENDAS');
       const dGes = findDetalle(dets, 'GESTIONABLES');
 
-      cot.push(Math.abs(safeNum(dCot?.real)));
-      viv.push(Math.abs(safeNum(dViv?.real)));
-      ges.push(Math.abs(safeNum(dGes?.real)));
+      // Ahorro: puede venir como "AHORRO" o como código "AHO-12345"
+      const dAho = findDetalleAny(dets, ['AHORRO', 'AHO-12345']);
+
+      cot.push(Math.abs(safeNum((dCot as any)?.real)));
+      viv.push(Math.abs(safeNum((dViv as any)?.real)));
+      ges.push(Math.abs(safeNum((dGes as any)?.real)));
+      aho.push(Math.abs(safeNum((dAho as any)?.real)));
     }
 
-    return { cot, viv, ges };
+    return { cot, viv, ges, aho };
   }, [cierresAsc, detallesByCierreId]);
 
   const subtitle = useMemo(() => {
@@ -389,6 +429,17 @@ const CierreKpiScreen: React.FC = () => {
     setTrendMetric(m);
     setTrendTip((t) => ({ ...t, visible: false }));
   };
+
+  /**
+   * Mapea un índice de dataset (si chart-kit lo provee) a etiqueta de segmento.
+   * 0: Cotidianos, 1: Viviendas, 2: Gestionables, 3: Ahorro
+   */
+  function segmentLabelFromDatasetIndex(idx: number): SegmentLabel {
+    if (idx === 1) return 'Viviendas';
+    if (idx === 2) return 'Gestionables';
+    if (idx === 3) return 'Ahorro';
+    return 'Cotidianos';
+  }
 
   return (
     <>
@@ -557,7 +608,6 @@ const CierreKpiScreen: React.FC = () => {
                         }}
                       />
 
-
                       {trendTip.visible && (
                         <View style={[styles.tooltip, { left: trendTip.x, top: trendTip.y }]}>
                           <Text style={styles.tooltipLabel}>{trendTip.label}</Text>
@@ -568,9 +618,7 @@ const CierreKpiScreen: React.FC = () => {
                   </ScrollView>
                 </View>
 
-                <Text style={[panelStyles.cardSubtitle, { marginTop: 10 }]}>
-                  Tip: toca un punto para ver el importe exacto.
-                </Text>
+                <Text style={[panelStyles.cardSubtitle, { marginTop: 10 }]}>Tip: toca un punto para ver el importe exacto.</Text>
               </View>
             </View>
           )}
@@ -586,7 +634,12 @@ const CierreKpiScreen: React.FC = () => {
                   Dos barras por mes. Toca una barra para ver la cifra.
                 </Text>
 
-                <TappableBarsComparativa labels={labels} ingresos={serieIngresos} gastosAbs={serieGastosAbs} maxWidth={chartWidth} />
+                <TappableBarsComparativa
+                  labels={labels}
+                  ingresos={serieIngresos}
+                  gastosAbs={serieGastosAbs}
+                  maxWidth={chartWidth}
+                />
               </View>
             </View>
           )}
@@ -623,6 +676,12 @@ const CierreKpiScreen: React.FC = () => {
                             color: (opacity = 1) => `rgba(245, 158, 11, ${opacity})`,
                             strokeWidth: 3,
                           },
+                          // 4º dataset: Ahorro
+                          {
+                            data: segSeries.aho,
+                            color: (opacity = 1) => `rgba(139, 92, 246, ${opacity})`,
+                            strokeWidth: 3,
+                          },
                         ],
                       }}
                       width={chartWidth}
@@ -639,10 +698,21 @@ const CierreKpiScreen: React.FC = () => {
                         const lab = labels[idx] ?? '';
                         const val = Number(dp?.value ?? 0);
 
-                        const datasetIndex = Number(dp?.datasetIndex ?? 0);
-                        let seg: SegTooltip['segmentLabel'] = 'Cotidianos';
-                        if (datasetIndex === 1) seg = 'Viviendas';
-                        if (datasetIndex === 2) seg = 'Gestionables';
+                        // Chart-kit: datasetIndex puede no existir según versión.
+                        // 1) intentamos datasetIndex
+                        const datasetIndexRaw = dp?.datasetIndex;
+                        let datasetIndex = Number.isFinite(Number(datasetIndexRaw)) ? Number(datasetIndexRaw) : 0;
+
+                        // 2) fallback: inferimos por identidad de data array (si la lib lo preserva)
+                        if (!Number.isFinite(Number(datasetIndexRaw)) && dp?.dataset?.data) {
+                          const arr = dp.dataset.data;
+                          if (arr === segSeries.viv) datasetIndex = 1;
+                          else if (arr === segSeries.ges) datasetIndex = 2;
+                          else if (arr === segSeries.aho) datasetIndex = 3;
+                          else datasetIndex = 0;
+                        }
+
+                        const seg = segmentLabelFromDatasetIndex(datasetIndex);
 
                         const tipX = Math.max(8, Math.min(chartWidth - 175, Number(dp?.x ?? 0) - 78));
                         const tipY = Math.max(8, Number(dp?.y ?? 0) - 56);
@@ -658,18 +728,24 @@ const CierreKpiScreen: React.FC = () => {
                       }}
                     />
 
-
                     {segTip.visible && (
                       <View style={[styles.tooltip, { left: segTip.x, top: segTip.y, width: 165 }]}>
                         <Text style={styles.tooltipLabel}>
                           {segTip.segmentLabel} · {segTip.label}
                         </Text>
-                        <Text style={styles.tooltipValue}>{formatBarValue(segTip.value, 'gastos')}</Text>
+
+                        {/* Ahorro: se muestra como positivo (plus). Resto: como gasto (minus) */}
+                        <Text style={styles.tooltipValue}>
+                          {segTip.segmentLabel === 'Ahorro'
+                            ? EuroformatEuro(segTip.value, 'plus')
+                            : formatBarValue(segTip.value, 'gastos')}
+                        </Text>
                       </View>
                     )}
                   </View>
                 </ScrollView>
 
+                {/* Leyenda */}
                 <View style={styles.legendRow}>
                   <View style={styles.legendChip}>
                     <View style={[styles.legendDot, { backgroundColor: colors.primary }]} />
@@ -683,11 +759,11 @@ const CierreKpiScreen: React.FC = () => {
                     <View style={[styles.legendDot, { backgroundColor: colors.warning }]} />
                     <Text style={styles.legendText}>Gestionables</Text>
                   </View>
+                  <View style={styles.legendChip}>
+                    <View style={[styles.legendDot, { backgroundColor: 'rgba(139, 92, 246, 1)' }]} />
+                    <Text style={styles.legendText}>Ahorro</Text>
+                  </View>
                 </View>
-
-                <Text style={[panelStyles.cardSubtitle, { marginTop: 10 }]}>
-                  Si más adelante separas “Ahorro” como columna propia, aquí añadimos un 4º dataset.
-                </Text>
               </View>
             </View>
           )}

@@ -172,7 +172,9 @@ const CierreListScreen: React.FC = () => {
               const resultadoReal = Number(c.resultado_real || 0);
               const resultadoEsp = Number(c.resultado_esperado || 0);
 
-              const desv = Number(c.desv_resultado ?? (resultadoReal - resultadoEsp));
+              // La desviación correcta es REAL - ESPERADO (no usar c.desv_resultado por posibles signos invertidos)
+              const desv = resultadoReal - resultadoEsp;
+
               const desvColor = getDeviationColor(desv);
 
               return (

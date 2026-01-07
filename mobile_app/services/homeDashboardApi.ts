@@ -193,7 +193,7 @@ async function fetchPatrimonioSummaryForHome(year: number): Promise<{
 
       const kpisPromise = api
         .get<PatrimonioKpisOut>(`/api/v1/analytics/patrimonios/${pid}/kpis`, {
-          params: { year, annualize: true, basis: 'total' },
+          params: { year, annualize: false, basis: 'total' },
         })
         .then((x) => x.data)
         .catch(() => null);

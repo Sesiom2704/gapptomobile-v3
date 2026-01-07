@@ -196,7 +196,7 @@ export default function PropiedadDetalleScreen({ route, navigation }: Props) {
     try {
       const r4 = await api.get<Kpis>(
         `/api/v1/analytics/patrimonios/${encodeURIComponent(patrimonioId)}/kpis`,
-        { params: { year, basis: 'total', annualize: true } }
+        { params: { year, basis: 'total', annualize: false } }
       );
       setKpi(r4.data);
     } catch {
