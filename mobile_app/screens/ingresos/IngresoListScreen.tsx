@@ -30,6 +30,16 @@
  *   - searchText (búsqueda)
  *   - periodicidad distinta de 'todos'
  *   - tipo distinto de 'todos'
+ *
+ * NUEVO (requisito "OMITIR ingreso"):
+ * - En el ActionSheet:
+ *     * Si ingreso.cobrado=false y omitido_este_mes=false => acción "Omitir este mes"
+ *     * Si omitido_este_mes=true => acción "Deshacer omisión"
+ * - En filtros:
+ *     * Añadimos filtro "Omisión": Todos / Omitidos / No omitidos
+ *     * En "Pendientes" el backend debería excluir omitidos; por UX, el filtro se muestra deshabilitado.
+ * - Visual:
+ *     * Si está omitido, añadimos etiqueta ligera en category/date para evidenciarlo sin tocar ExpenseCard.
  */
 
 import React, { useEffect, useState, useMemo, useCallback } from 'react';
@@ -57,7 +67,13 @@ import { ActionSheet, ActionSheetAction } from '../../components/modals/ActionSh
 import { listStyles as styles } from '../../components/list/listStyles';
 
 import { api } from '../../services/api';
-import { TipoIngreso, fetchTiposIngreso } from '../../services/ingresosApi';
+import {
+  TipoIngreso,
+  fetchTiposIngreso,
+  // ✅ NUEVO: omisión mensual
+  omitirIngresoEsteMes,
+  deshacerOmisionIngresoEsteMes,
+} from '../../services/ingresosApi';
 import { PERIODICIDAD_OPTIONS, type PeriodicidadFiltro } from '../../constants/general';
 import { EuroformatEuro } from '../../utils/format';
 
@@ -92,6 +108,9 @@ type Ingreso = {
   ingresos_cobrados?: number | null;
   segmento_id?: string | null;
   segmento_nombre?: string | null;
+
+  // ✅ NUEVO: omisión mensual (igual patrón que gastos)
+  omitido_este_mes?: boolean | null;
 };
 
 type Filtro = 'pendientes' | 'todos';
@@ -106,10 +125,10 @@ type EstadoFiltro = 'todos' | 'activos' | 'inactivos';
 type PagadoFiltro = 'todos' | 'pagado' | 'no_pagado';
 type KpiFiltro = 'todos' | 'kpi_si' | 'kpi_no';
 
-function getNombreTipoIngreso(
-  ing: Ingreso,
-  catalogoTipos: TipoIngreso[]
-): string {
+// ✅ NUEVO: filtro omisión
+type FiltroOmitido = 'todos' | 'omitidos' | 'no_omitidos';
+
+function getNombreTipoIngreso(ing: Ingreso, catalogoTipos: TipoIngreso[]): string {
   // 1) Si el backend ya trae el nombre, lo usamos
   const directo = (ing.tipo_nombre ?? '').trim();
   if (directo) return directo;
@@ -127,7 +146,6 @@ function getNombreTipoIngreso(
 
   return 'Ingreso';
 }
-
 
 function formatRangoCobroLabel(ing: Ingreso): string {
   const rc = (ing.rango_cobro || '').trim();
@@ -168,12 +186,17 @@ export const IngresoListScreen: React.FC<Props> = ({ navigation }) => {
   const [filtroPagado, setFiltroPagado] = useState<PagadoFiltro>('todos');
   const [filtroKpi, setFiltroKpi] = useState<KpiFiltro>('todos');
 
+  // ✅ NUEVO: filtro omisión
+  const [filtroOmitido, setFiltroOmitido] = useState<FiltroOmitido>('todos');
+
   // Bloques plegables
   const [showPeriodicidadFilter, setShowPeriodicidadFilter] = useState(false);
   const [showTipoFilter, setShowTipoFilter] = useState(false);
   const [showEstadoFilter, setShowEstadoFilter] = useState(false);
   const [showPagadoFilter, setShowPagadoFilter] = useState(false);
   const [showKpiFilter, setShowKpiFilter] = useState(false);
+  // ✅ NUEVO
+  const [showOmitidoFilter, setShowOmitidoFilter] = useState(false);
 
   const handleAddIngreso = () => {
     navigation.navigate('NuevoIngreso');
@@ -269,10 +292,16 @@ export const IngresoListScreen: React.FC<Props> = ({ navigation }) => {
       setFiltroEstado('activos');
       setFiltroPagado('no_pagado');
       setFiltroKpi('kpi_si');
+
+      // ✅ NUEVO: en pendientes no tiene sentido filtrar omitidos (backend debería excluirlos)
+      setFiltroOmitido('no_omitidos');
     } else {
       setFiltroEstado('todos');
       setFiltroPagado('todos');
       setFiltroKpi('todos');
+
+      // ✅ NUEVO
+      setFiltroOmitido('todos');
     }
   }, [isPendientes]);
 
@@ -288,6 +317,7 @@ export const IngresoListScreen: React.FC<Props> = ({ navigation }) => {
         setFiltroEstado('todos');
         setFiltroPagado('todos');
         setFiltroKpi('todos');
+        setFiltroOmitido('todos');
       };
     }, [fetchIngresosPendientesCount])
   );
@@ -324,6 +354,57 @@ export const IngresoListScreen: React.FC<Props> = ({ navigation }) => {
     );
   };
 
+  // ============================
+  // ✅ NUEVO: Omisión (ingresos) con confirmación
+  // ============================
+  const handleOmitirIngreso = async (ingreso: Ingreso) => {
+    try {
+      await omitirIngresoEsteMes(ingreso.id);
+      await cargarIngresos();
+      await Promise.all([reloadGastosPendientes(), fetchIngresosPendientesCount()]);
+    } catch (err) {
+      console.error('[IngresoList] Error al omitir ingreso', err);
+      Alert.alert('Error', 'No se ha podido omitir el ingreso.');
+    }
+  };
+
+  const confirmarOmitirIngreso = (ingreso: Ingreso) => {
+    Alert.alert(
+      'Omitir este mes',
+      `¿Quieres omitir el ingreso "${ingreso.concepto || ingreso.id}" este mes?\n\nNo se marcará como cobrado ni alterará el histórico. Simplemente dejará de aparecer en pendientes.`,
+      [
+        { text: 'Cancelar', style: 'cancel' },
+        { text: 'Omitir', style: 'default', onPress: () => void handleOmitirIngreso(ingreso) },
+      ]
+    );
+  };
+
+  const handleDeshacerOmisionIngreso = async (ingreso: Ingreso) => {
+    try {
+      await deshacerOmisionIngresoEsteMes(ingreso.id);
+      await cargarIngresos();
+      await Promise.all([reloadGastosPendientes(), fetchIngresosPendientesCount()]);
+    } catch (err) {
+      console.error('[IngresoList] Error al deshacer omisión', err);
+      Alert.alert('Error', 'No se ha podido deshacer la omisión.');
+    }
+  };
+
+  const confirmarDeshacerOmisionIngreso = (ingreso: Ingreso) => {
+    Alert.alert(
+      'Deshacer omisión',
+      `¿Quieres volver a incluir "${ingreso.concepto || ingreso.id}" en pendientes este mes?`,
+      [
+        { text: 'Cancelar', style: 'cancel' },
+        {
+          text: 'Deshacer omisión',
+          style: 'default',
+          onPress: () => void handleDeshacerOmisionIngreso(ingreso),
+        },
+      ]
+    );
+  };
+
   const handleEliminar = async (ingreso: Ingreso) => {
     Alert.alert('Eliminar ingreso', `¿Eliminar el ingreso "${ingreso.concepto || ingreso.id}"?`, [
       { text: 'Cancelar', style: 'cancel' },
@@ -356,12 +437,13 @@ export const IngresoListScreen: React.FC<Props> = ({ navigation }) => {
 
     const acciones: ActionSheetAction[] = [];
 
-    const verde = '#16a34a';
-    const rojo = '#b91c1c';
-    const amarillo = '#eab308';
-    const gris = '#4b5563';
-    const azul = '#2563eb';
+    const verde = colors.actionSuccess ?? '#16a34a';
+    const rojo = colors.actionDanger ?? '#b91c1c';
+    const amarillo = colors.actionWarning ?? '#eab308';
+    const gris = colors.actionNeutral ?? '#4b5563';
+    const azul = colors.actionInfo ?? '#2563eb';
 
+    // ✅ COBRAR
     if (!ingreso.cobrado) {
       acciones.push({
         label: 'Marcar como cobrado',
@@ -375,6 +457,31 @@ export const IngresoListScreen: React.FC<Props> = ({ navigation }) => {
         iconName: 'checkmark-circle-outline',
         color: verde,
       });
+    }
+
+    // ✅ NUEVO: OMITIR / DESHACER OMISIÓN (solo si NO está cobrado)
+    if (!ingreso.cobrado) {
+      if (ingreso.omitido_este_mes === true) {
+        acciones.push({
+          label: 'Deshacer omisión',
+          onPress: () => {
+            setSheetVisible(false);
+            confirmarDeshacerOmisionIngreso(ingreso);
+          },
+          iconName: 'arrow-undo-outline',
+          color: azul,
+        });
+      } else {
+        acciones.push({
+          label: 'Omitir este mes',
+          onPress: () => {
+            setSheetVisible(false);
+            confirmarOmitirIngreso(ingreso);
+          },
+          iconName: 'ban-outline',
+          color: azul,
+        });
+      }
     }
 
     acciones.push({
@@ -450,6 +557,19 @@ export const IngresoListScreen: React.FC<Props> = ({ navigation }) => {
     return stats;
   }, [ingresos]);
 
+  // ✅ NUEVO: stats omisión (para deshabilitar pills)
+  const statsOmitido = useMemo(() => {
+    let omitidos = 0;
+    let no_omitidos = 0;
+
+    ingresos.forEach((ing) => {
+      if (ing.omitido_este_mes === true) omitidos += 1;
+      else no_omitidos += 1;
+    });
+
+    return { omitidos, no_omitidos, todos: ingresos.length };
+  }, [ingresos]);
+
   type TipoDisponible = {
     id: string;
     nombre: string;
@@ -494,7 +614,6 @@ export const IngresoListScreen: React.FC<Props> = ({ navigation }) => {
           getNombreTipoIngreso(ing, catalogoTipos).toLowerCase().includes(term) ||
           (ing.segmento_nombre ?? '').toLowerCase().includes(term);
 
-
         if (!hayCoincidencia) return false;
       }
 
@@ -516,15 +635,33 @@ export const IngresoListScreen: React.FC<Props> = ({ navigation }) => {
       if (filtroKpi === 'kpi_si' && !ing.kpi) return false;
       if (filtroKpi === 'kpi_no' && ing.kpi) return false;
 
+      // ✅ NUEVO: filtro de omisión
+      if (filtroOmitido !== 'todos') {
+        const isOmitido = ing.omitido_este_mes === true;
+        if (filtroOmitido === 'omitidos' && !isOmitido) return false;
+        if (filtroOmitido === 'no_omitidos' && isOmitido) return false;
+      }
+
       return true;
     });
-  }, [ingresos, searchText, filtroPeriodicidad, filtroTipo, filtroEstado, filtroPagado, filtroKpi, catalogoTipos]);
+  }, [
+    ingresos,
+    searchText,
+    filtroPeriodicidad,
+    filtroTipo,
+    filtroEstado,
+    filtroPagado,
+    filtroKpi,
+    filtroOmitido,
+    catalogoTipos,
+  ]);
 
   // =========================================================
   // ✅ VACÍO INTELIGENTE (helpers únicos - sin duplicados)
   // =========================================================
 
   // "Filtros activos reales" para Pendientes (excluye estado/pagado/kpi porque están forzados)
+  // Nota: filtroOmitido NO cuenta aquí porque en Pendientes no aplica (backend excluye omitidos).
   const isDefaultPendientesIngresosFilters = useMemo(() => {
     const hasSearch = searchText.trim().length > 0;
     const hasPeriodicidad = filtroPeriodicidad !== 'todos';
@@ -577,7 +714,6 @@ export const IngresoListScreen: React.FC<Props> = ({ navigation }) => {
     []
   );
 
-
   // =========================================================
   // Buscador avanzado
   // =========================================================
@@ -589,6 +725,11 @@ export const IngresoListScreen: React.FC<Props> = ({ navigation }) => {
       if (p === 'todos') return ingresos.length > 0;
       return (periodicidadStats[p] ?? 0) > 0;
     };
+
+    // ✅ NUEVO: stats omisión para deshabilitar pills sin datos
+    const hasOmitidosData = statsOmitido.omitidos > 0;
+    const hasNoOmitidosData = statsOmitido.no_omitidos > 0;
+    const hasAnyOmitidoData = statsOmitido.todos > 0;
 
     return (
       <View style={styles.searchPanel}>
@@ -722,6 +863,67 @@ export const IngresoListScreen: React.FC<Props> = ({ navigation }) => {
                   </View>
                 );
               })}
+            </View>
+          )}
+        </View>
+
+        {/* ✅ NUEVO: OMISIÓN (PLEGABLE) */}
+        <View style={{ marginTop: 16 }}>
+          <View
+            style={{
+              flexDirection: 'row',
+              alignItems: 'center',
+              justifyContent: 'space-between',
+            }}
+          >
+            <Text style={styles.searchLabel}>Omisión</Text>
+            <TouchableOpacity
+              onPress={() => setShowOmitidoFilter((prev) => !prev)}
+              style={{ flexDirection: 'row', alignItems: 'center' }}
+            >
+              <Ionicons
+                name={showOmitidoFilter ? 'remove-circle-outline' : 'add-circle-outline'}
+                size={16}
+                color={colors.textSecondary}
+                style={{ marginRight: 4 }}
+              />
+              <Text style={{ color: colors.textSecondary, fontSize: 12 }}>
+                {showOmitidoFilter ? 'Ocultar' : 'Mostrar'}
+              </Text>
+            </TouchableOpacity>
+          </View>
+
+          {showOmitidoFilter && (
+            <View style={styles.pillsRow}>
+              <View style={styles.pillWrapper}>
+                <FilterPill
+                  label="Todos"
+                  selected={filtroOmitido === 'todos'}
+                  disabled={isPendientes || !hasAnyOmitidoData}
+                  onPress={() => setFiltroOmitido('todos')}
+                  style={styles.filterPill}
+                />
+              </View>
+
+              <View style={styles.pillWrapper}>
+                <FilterPill
+                  label="Omitidos"
+                  selected={filtroOmitido === 'omitidos'}
+                  disabled={isPendientes || !hasOmitidosData}
+                  onPress={() => setFiltroOmitido('omitidos')}
+                  style={styles.filterPill}
+                />
+              </View>
+
+              <View style={styles.pillWrapper}>
+                <FilterPill
+                  label="No omitidos"
+                  selected={filtroOmitido === 'no_omitidos'}
+                  disabled={isPendientes || !hasNoOmitidosData}
+                  onPress={() => setFiltroOmitido('no_omitidos')}
+                  style={styles.filterPill}
+                />
+              </View>
             </View>
           )}
         </View>
@@ -1004,14 +1206,20 @@ export const IngresoListScreen: React.FC<Props> = ({ navigation }) => {
       >
         {ingresosFiltrados.map((ing) => {
           const titulo = ing.concepto || 'SIN CONCEPTO';
-          const category = getNombreTipoIngreso(ing, catalogoTipos);
+
+          // ✅ NUEVO: etiqueta visual de omisión sin tocar ExpenseCard
+          const categoryBase = getNombreTipoIngreso(ing, catalogoTipos);
+          const category = ing.omitido_este_mes ? `${categoryBase} · OMITIDO` : categoryBase;
+
+          const baseDate = formatRangoCobroLabel(ing);
+          const dateLabel = ing.omitido_este_mes ? `${baseDate} · Omitido este mes` : baseDate;
 
           return (
             <ExpenseCard
               key={ing.id}
               title={titulo}
               category={category}
-              dateLabel={formatRangoCobroLabel(ing)}
+              dateLabel={dateLabel}
               amountLabel={EuroformatEuro(ing.importe ?? 0, 'plus')}
               segmentoId="INGRESO"
               inactive={ing.activo === false}

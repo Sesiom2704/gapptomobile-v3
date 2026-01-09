@@ -17,6 +17,15 @@ IMPORTANTE:
 Notas recientes (2026-01):
 - Se incluye soporte consistente de `comentarios` en create/update y serializaciones
   (vacíos -> None, no upper-case).
+
+Notas (2026-01) - NUEVO:
+- Se integra estado de OMISIÓN mensual para recurrentes / gestionables:
+  * omitido_este_mes (bool): excluye el gasto de "pendientes" sin marcarlo pagado.
+  * omitido_on (datetime): última fecha/hora en que se omitió.
+  * omitido_count (int): contador histórico (se incrementa en reinicio mensual; el reinicio está en otro endpoint).
+- Se añaden endpoints:
+  * PUT /{gasto_id}/omitir
+  * PUT /{gasto_id}/deshacer-omision
 """
 
 from __future__ import annotations
@@ -129,6 +138,7 @@ _UPPER_ID_FIELDS = {
     # referencia_gasto NO se uppercasea (ids en minúsculas)
 }
 
+
 def _upperize_payload(d: Dict[str, Any]) -> None:
     """
     Recorre el dict y pasa a MAYÚSCULAS los campos definidos en
@@ -193,6 +203,37 @@ def _add_months(d: date | None, n: int) -> date | None:
     m = (d.month - 1 + n) % 12 + 1
     last_day = monthrange(y, m)[1]
     return date(y, m, min(d.day, last_day))
+
+
+# ============================================================
+# Helpers: Omisión mensual (NUEVO)
+# ============================================================
+
+def _can_omit_gasto(g: models.Gasto) -> None:
+    """
+    Reglas de negocio mínimas para permitir omitir:
+    - No tiene sentido omitir si ya está pagado.
+    - No modificamos liquidez en omitir.
+    - Para COT (contenedor), permitimos omitir si NO está pagado (caso típico: consumido < esperado).
+    """
+    if bool(getattr(g, "pagado", False)) is True:
+        raise HTTPException(
+            status_code=409,
+            detail="No se puede omitir un gasto que ya está pagado.",
+        )
+
+
+def _set_omision(g: models.Gasto, *, omitido: bool) -> None:
+    """
+    Aplica el estado omitido_este_mes de forma consistente.
+    - Al omitir: marca omitido_este_mes=True y fija omitido_on=now.
+    - Al deshacer: marca omitido_este_mes=False (no tocamos omitido_on para conservar histórico).
+    """
+    if omitido:
+        g.omitido_este_mes = True
+        g.omitido_on = func.now()
+    else:
+        g.omitido_este_mes = False
 
 
 # ============================================================
@@ -263,6 +304,11 @@ def _serialize_gasto_ponderado(
         "referencia_gasto": getattr(g, "referencia_gasto", None),
         "inactivatedon": getattr(g, "inactivatedon", None),
         "comentarios": getattr(g, "comentarios", None),
+
+        # NUEVO: Omisión (si existe en schema, Pydantic lo recogerá igual; aquí lo exponemos por claridad)
+        "omitido_este_mes": getattr(g, "omitido_este_mes", False),
+        "omitido_on": getattr(g, "omitido_on", None),
+        "omitido_count": getattr(g, "omitido_count", 0),
     }
 
 
@@ -689,6 +735,9 @@ def list_pendientes(
     """
     Lista los gastos pendientes (pagado = False y activo = True)
     SOLO del usuario autenticado.
+
+    NUEVO:
+    - Excluye los omitidos del mes (omitido_este_mes = False).
     """
     q = (
         db.query(models.Gasto)
@@ -696,6 +745,8 @@ def list_pendientes(
             models.Gasto.user_id == current_user.id,
             models.Gasto.pagado == False,
             models.Gasto.activo == True,
+            # NUEVO:
+            models.Gasto.omitido_este_mes == False,
         )
         .order_by(models.Gasto.fecha.asc())
     )
@@ -876,8 +927,6 @@ def list_gastos_extra(
         base = float(g.importe or 0.0)
         ponderado = round(base * factor, 2)
 
-        # OJO: si estás en Pydantic v1, model_validate no existe.
-        # Asumimos Pydantic v2 (ya estás viendo el warning de v2).
         d = GastoSchema.model_validate(g).model_dump()
         d["importe"] = ponderado
         d["importe_cuota"] = ponderado
@@ -923,10 +972,14 @@ def create_gasto(
     - Ajusta liquidez si aplica.
     - Aplica lógica de pago relacionado (financiaciones/aportaciones).
     - Fuerza user_id = current_user.id (ignorando cualquier user_id del payload).
+
+    NUEVO:
+    - Inicializa campos de omisión a valores seguros si vienen None:
+      omitido_este_mes=False, omitido_count=0.
+    - No se permite crear directamente con omitido_este_mes=True (lo controla el endpoint /omitir).
     """
     payload = to_payload(gasto_in)
 
-    # Normalización: vacíos a None (incluye comentarios para consistencia)
     _str_empty_to_none(payload, [
         "tienda",
         "proveedor_id",
@@ -942,11 +995,17 @@ def create_gasto(
         "comentarios",
     ])
 
-    # Normalización: mayúsculas para campos definidos (NO comentarios)
     _upperize_payload(payload)
 
     # Nunca confiamos en user_id que venga del cliente
     payload.pop("user_id", None)
+
+    # NUEVO: blindaje omisión en create
+    payload.pop("omitido_on", None)
+    payload.pop("omitido_count", None)
+    # Si el cliente intenta crear omitido_este_mes=True, lo neutralizamos.
+    if bool(payload.get("omitido_este_mes", False)) is True:
+        payload["omitido_este_mes"] = False
 
     payload["id"] = generate_gasto_id(db)
     now_expr = func.now()
@@ -997,11 +1056,13 @@ def create_gasto(
     db_obj = models.Gasto(
         **payload,
         user_id=current_user.id,  # dueño del gasto
+        # NUEVO: defaults si el modelo no tiene server_default (defensivo)
+        omitido_este_mes=False,
+        omitido_count=getattr(models.Gasto, "omitido_count", 0) and 0,  # fuerza 0
     )
     db.add(db_obj)
 
     # Ajuste liquidez en CREATE:
-    # Regla: si es PAGO UNICO, restamos ya; si viene pagado=True, también restamos.
     if per_str == "PAGO UNICO" or bool(payload.get("pagado")) is True:
         adjust_liquidez(
             db,
@@ -1009,7 +1070,6 @@ def create_gasto(
             -safe_float(payload.get("importe")),
         )
 
-    # Pagos relacionados (aporta/unidades a financiación)
     _apply_pago_relacionado_create(db, payload)
 
     db.commit()
@@ -1034,6 +1094,10 @@ def update_gasto(
     - Liquidez (deltas según cambios de pagado/periodicidad/cuenta/importe).
     - Pagos relacionados (aportaciones a financiación).
     - Sincronización con plan de préstamo (PrestamoCuota).
+
+    NUEVO:
+    - Los campos de omisión NO se actualizan vía PUT general:
+      se controlan por endpoints específicos /omitir y /deshacer-omision.
     """
     db_obj = (
         db.query(models.Gasto)
@@ -1043,10 +1107,8 @@ def update_gasto(
     if not db_obj:
         raise HTTPException(status_code=404, detail="Gasto no encontrado o no autorizado")
 
-    # Sólo campos presentes
     incoming = gasto_in.model_dump(exclude_unset=True)
 
-    # Normalización de strings vacíos (incluye comentarios)
     _str_empty_to_none(incoming, [
         "tienda",
         "proveedor_id",
@@ -1062,13 +1124,16 @@ def update_gasto(
         "comentarios",
     ])
 
-    # Uppercase para los campos previstos (NO comentarios)
     _upperize_payload(incoming)
 
-    # Nunca permitimos cambiar user_id desde fuera
     incoming.pop("user_id", None)
 
-    # --- Snapshot PRE (para deltas de liquidez y sync préstamo) ---
+    # NUEVO: blindaje omisión en PUT general
+    incoming.pop("omitido_este_mes", None)
+    incoming.pop("omitido_on", None)
+    incoming.pop("omitido_count", None)
+
+    # --- Snapshot PRE ---
     old_pagado = bool(getattr(db_obj, "pagado", False))
     old_per = (getattr(db_obj, "periodicidad", "") or "").upper().strip()
     old_cta = getattr(db_obj, "cuenta_id", None)
@@ -1077,10 +1142,8 @@ def update_gasto(
     prestamo_id = getattr(db_obj, "prestamo_id", None)
     old_seg = (getattr(db_obj, "segmento_id", None) or "").upper().strip()
 
-    # Pagos relacionados (aporta/unidades a financiación) – antes de tocar campos
     _apply_pago_relacionado_update(db, db_obj, incoming)
 
-    # Transición activo <-> inactivo (marca inactivatedon)
     if "activo" in incoming:
         prev = bool(getattr(db_obj, "activo", True))
         newv = bool(incoming["activo"])
@@ -1089,7 +1152,6 @@ def update_gasto(
         elif not prev and newv:
             db_obj.inactivatedon = None
 
-    # Determinar periodicidad/importe destino
     per_str = (incoming.get("periodicidad", db_obj.periodicidad) or "").upper().strip()
     importe = safe_float(
         incoming.get(
@@ -1098,7 +1160,6 @@ def update_gasto(
         )
     )
 
-    # Blindaje: si llega cuotas=0 en edición, y NO es PAGO UNICO, y ya había >0, ignora
     if "cuotas" in incoming:
         try:
             if (
@@ -1110,13 +1171,11 @@ def update_gasto(
         except Exception:
             pass
 
-    # Cuotas finales
     cuotas_raw = incoming.get("cuotas", db_obj.cuotas)
     cuotas_final = int(cuotas_raw) if cuotas_raw is not None else int(db_obj.cuotas or 1)
     if cuotas_final <= 0:
         cuotas_final = 1
 
-    # Clasificación
     is_pu = (per_str == "PAGO UNICO")
     is_financiacion = (not is_pu) and (cuotas_final > 1)
     is_recurrente = (
@@ -1125,11 +1184,9 @@ def update_gasto(
         and (per_str in ("MENSUAL", "TRIMESTRAL", "SEMESTRAL", "ANUAL"))
     )
 
-    # Cuotas pagadas entrada
     cp_raw = incoming.get("cuotas_pagadas", db_obj.cuotas_pagadas)
     cp_val = int(cp_raw) if cp_raw is not None else int(db_obj.cuotas_pagadas or 0)
 
-    # Recalcula agregados del gasto en función de la clasificación
     if is_recurrente:
         cuotas_final = 1
         cuotas_pagadas = max(0, cp_val)
@@ -1144,7 +1201,6 @@ def update_gasto(
         total_calc = round(cuotas_final * importe, 2)
         importe_pendiente = round(cuotas_restantes * importe, 2)
     else:
-        # PAGO ÚNICO u otros casos 1:N sin ser recurrente
         cuotas_pagadas = max(0, min(cp_val, cuotas_final))
         cuotas_restantes = max(cuotas_final - cuotas_pagadas, 0)
         importe_cuota = round(importe, 2)
@@ -1158,11 +1214,10 @@ def update_gasto(
     incoming["total"] = total_calc
     incoming["importe_pendiente"] = importe_pendiente
 
-    # Persiste cambios en el objeto
     for field, value in incoming.items():
         setattr(db_obj, field, value)
 
-    # --- Snapshot POST (para deltas de liquidez) ---
+    # --- Snapshot POST ---
     new_pagado = bool(getattr(db_obj, "pagado", False))
     new_per = (getattr(db_obj, "periodicidad", "") or "").upper().strip()
     new_cta = getattr(db_obj, "cuenta_id", None)
@@ -1173,33 +1228,26 @@ def update_gasto(
     )
     new_seg = (getattr(db_obj, "segmento_id", None) or "").upper().strip()
 
-    # Blindaje COT: si era o pasa a ser contenedor cotidiano, no tocar liquidez aquí.
     is_cot_before = (old_seg == SEG_COT)
     is_cot_after = (new_seg == SEG_COT)
     skip_liquidez_for_cot = is_cot_before or is_cot_after
 
-    # Liquidez en UPDATE:
-    # Consideramos "efectivo" si es PAGO UNICO o si está pagado=True.
     efectivo_antes = (old_per == "PAGO UNICO") or (old_pagado is True)
     efectivo_desp = (new_per == "PAGO UNICO") or (new_pagado is True)
 
     if not skip_liquidez_for_cot:
         if efectivo_antes and efectivo_desp:
-            # Revertimos efecto anterior y aplicamos el nuevo (para cambios de importe / cuenta)
             if old_cta:
                 adjust_liquidez(db, old_cta, +old_importe)
             if new_cta:
                 adjust_liquidez(db, new_cta, -new_importe)
         elif efectivo_antes and not efectivo_desp:
-            # Deja de ser efectivo → devolvemos lo restado antes
             if old_cta:
                 adjust_liquidez(db, old_cta, +old_importe)
         elif not efectivo_antes and efectivo_desp:
-            # Pasa a ser efectivo → aplicamos ahora
             if new_cta:
                 adjust_liquidez(db, new_cta, -new_importe)
 
-    # --- Sincronización con plan de préstamo si aplica ---
     if prestamo_id:
         _sync_prestamo_cuotas_by_gasto(db, db_obj, prev_cp)
 
@@ -1207,6 +1255,79 @@ def update_gasto(
     db.commit()
     db.refresh(db_obj)
     return db_obj
+
+
+# ============================================================
+# OMITIR / DESHACER OMISIÓN (NUEVO)
+# ============================================================
+
+@router.put("/{gasto_id}/omitir", response_model=GastoSchema)
+def omitir_gasto_mes(
+    gasto_id: str,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(require_user),
+):
+    """
+    Marca un gasto como OMITIDO ESTE MES.
+
+    Efecto:
+    - omitido_este_mes = True
+    - omitido_on = now
+    - NO toca pagado
+    - NO toca liquidez
+    - NO toca ultimo_pago_on
+
+    El gasto dejará de aparecer en /pendientes.
+    """
+    g = (
+        db.query(models.Gasto)
+        .filter(models.Gasto.id == gasto_id, models.Gasto.user_id == current_user.id)
+        .first()
+    )
+    if not g:
+        raise HTTPException(status_code=404, detail="Gasto no encontrado o no autorizado")
+
+    _can_omit_gasto(g)
+
+    # Idempotencia: si ya está omitido, no hacemos nada destructivo.
+    if bool(getattr(g, "omitido_este_mes", False)) is False:
+        _set_omision(g, omitido=True)
+        g.modifiedon = func.now()
+        db.commit()
+        db.refresh(g)
+    return g
+
+
+@router.put("/{gasto_id}/deshacer-omision", response_model=GastoSchema)
+def deshacer_omision_gasto_mes(
+    gasto_id: str,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(require_user),
+):
+    """
+    Deshace la omisión del mes:
+
+    Efecto:
+    - omitido_este_mes = False
+    - No toca omitido_on (histórico)
+    - No toca pagado/liquidez
+
+    El gasto volverá a aparecer en /pendientes si pagado=False y activo=True.
+    """
+    g = (
+        db.query(models.Gasto)
+        .filter(models.Gasto.id == gasto_id, models.Gasto.user_id == current_user.id)
+        .first()
+    )
+    if not g:
+        raise HTTPException(status_code=404, detail="Gasto no encontrado o no autorizado")
+
+    if bool(getattr(g, "omitido_este_mes", False)) is True:
+        _set_omision(g, omitido=False)
+        g.modifiedon = func.now()
+        db.commit()
+        db.refresh(g)
+    return g
 
 
 # ============================================================
@@ -1227,6 +1348,9 @@ def pagar_gasto(
     - Estado activo/kpi según reglas de periodicidad.
     - Plan de préstamo si aplica.
     Sólo actúa sobre gastos del usuario autenticado.
+
+    NUEVO:
+    - Si estaba omitido_este_mes=True, se deshace la omisión (porque se paga).
     """
     g = (
         db.query(models.Gasto)
@@ -1240,7 +1364,10 @@ def pagar_gasto(
     seg = (g.segmento_id or "").upper().strip()
     is_cot = (seg == SEG_COT)
 
-    # Liquidez: solo si ajustar_liquidez=True Y NO es contenedor COTIDIANO
+    # NUEVO: pagar deshace omisión del mes
+    if bool(getattr(g, "omitido_este_mes", False)) is True:
+        g.omitido_este_mes = False
+
     if ajustar_liquidez and not is_cot:
         if per != "PAGO UNICO":
             per_unit = safe_float(g.importe if g.importe is not None else g.importe_cuota)
@@ -1293,12 +1420,10 @@ def pagar_gasto(
             g.kpi = False
             g.inactivatedon = func.now()
 
-    # === SINCRONIZACIÓN PRÉSTAMO ===
     if getattr(g, "prestamo_id", None):
         _mark_next_unpaid_installment_as_paid(db, g.prestamo_id, g.id)
         _recompute_pendientes_prestamo(db, g.prestamo_id)
 
-    # Blindaje COT
     if seg == SEG_COT:
         g.activo = True
         if per == "MENSUAL":
@@ -1354,7 +1479,6 @@ def delete_gasto(
     if not g:
         raise HTTPException(status_code=404, detail="Gasto no encontrado o no autorizado")
 
-    # Hijos que referencian a este gasto
     hijos = (
         db.query(models.Gasto)
         .filter(models.Gasto.referencia_gasto == gasto_id, models.Gasto.user_id == current_user.id)
@@ -1375,10 +1499,8 @@ def delete_gasto(
             h.modifiedon = func.now()
         db.flush()
 
-    # Reversión pagos relacionados
     _apply_pago_relacionado_delete(db, g)
 
-    # --- Lógica de liquidez al borrar ---
     per = (g.periodicidad or "").upper().strip()
     seg = (g.segmento_id or "").upper().strip()
     is_cot = (seg == SEG_COT)
@@ -1397,11 +1519,9 @@ def delete_gasto(
             except Exception:
                 same_month = False
 
-        # Sólo revertimos liquidez si el gasto está en el mes actual (evita reescrituras históricas)
         if same_month:
             adjust_liquidez(db, g.cuenta_id, +importe_efectivo)
 
-    # Cascada de préstamo si aplica
     if cascade_prestamo and getattr(g, "prestamo_id", None):
         pid = g.prestamo_id
         db.query(models.PrestamoCuota).filter(models.PrestamoCuota.prestamo_id == pid).delete(synchronize_session=False)

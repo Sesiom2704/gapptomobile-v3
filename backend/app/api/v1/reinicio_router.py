@@ -184,8 +184,11 @@ def _reiniciar_mes_eligibility_core(db: Session, user_id: int) -> Dict[str, int 
     """
     Regla actual:
     - No se puede reiniciar si hay gastos/ingresos KPI pendientes.
+
+    NUEVO:
+    - Un gasto omitido_este_mes=True NO bloquea (se considera “no pendiente” para eligibility).
     """
-    gastos_pend = (
+    q_gastos = (
         db.query(func.count())
         .select_from(models.Gasto)
         .filter(
@@ -194,8 +197,14 @@ def _reiniciar_mes_eligibility_core(db: Session, user_id: int) -> Dict[str, int 
             models.Gasto.kpi == True,
             models.Gasto.pagado == False,
         )
-        .scalar()
     )
+
+    # NUEVO (defensivo): sólo si existe la columna en el modelo
+    if hasattr(models.Gasto, "omitido_este_mes"):
+        q_gastos = q_gastos.filter(models.Gasto.omitido_este_mes == False)
+
+    gastos_pend = q_gastos.scalar()
+
     ingresos_pend = (
         db.query(func.count())
         .select_from(models.Ingreso)
@@ -214,7 +223,6 @@ def _reiniciar_mes_eligibility_core(db: Session, user_id: int) -> Dict[str, int 
         "ingresos_pendientes": int(ingresos_pend or 0),
         "can_reiniciar": bool(can),
     }
-
 
 # =============================================================================
 # Core - reinicio (manteniendo tu lógica)
@@ -252,6 +260,18 @@ def _reiniciar_estados_core(db: Session, user_id: int, aplicar_promedios: bool =
         changed = False
         per = _periodicidad_norm_py(g.periodicidad)
         seg = (g.segmento_id or "").upper().strip()
+
+        # =========================
+        # NUEVO: cierre de omisiones del mes anterior
+        # - Si omitido_este_mes=True => omitido_count += 1 y omitido_este_mes=False
+        # - No tocamos omitido_on (histórico)
+        # =========================
+        if hasattr(g, "omitido_este_mes") and bool(getattr(g, "omitido_este_mes", False)) is True:
+            # incrementa contador si existe
+            if hasattr(g, "omitido_count"):
+                g.omitido_count = int(getattr(g, "omitido_count", 0) or 0) + 1
+            g.omitido_este_mes = False
+            changed = True
 
         if per == "MENSUAL":
             if g.pagado is not False:
@@ -301,6 +321,7 @@ def _reiniciar_estados_core(db: Session, user_id: int, aplicar_promedios: bool =
 
         if changed:
             g.modifiedon = func.now()
+
 
     # --- Ingresos ---
     ingresos = (

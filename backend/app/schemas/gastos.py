@@ -8,9 +8,13 @@ Este módulo está extraído de tu antiguo `schemas.py` de v2, manteniendo:
 - Los mismos tipos.
 - La misma forma de serializar dinero (Money -> float en JSON).
 
-Solo se ha cambiado:
-- La ruta de import del tipo Money (backend.app.db.custom_types).
-- La organización (ahora separado en este fichero en lugar de un schemas.py gigante).
+Cambios v3 (omitidos):
+- Se añaden campos de lectura:
+    * omitido_este_mes
+    * ultimo_omitido_on
+    * omitido_count
+- Se permite update parcial de omitido_este_mes (para la opción "Omitir mes"/"Deshacer omisión").
+  Nota: idealmente esto lo expones por endpoint/acción dedicada, pero no rompe nada dejarlo en Update.
 """
 
 from __future__ import annotations
@@ -103,6 +107,13 @@ class GastoUpdate(BaseModel):
 
     Todos los campos son opcionales; solo se actualiza lo que venga informado.
     Los campos monetarios siguen usando Money (Decimal por debajo).
+
+    v3 (omitidos):
+    - omitido_este_mes se permite para soportar la opción:
+        * Omitir mes  -> omitido_este_mes = True
+        * Deshacer    -> omitido_este_mes = False
+      La lógica de ultimo_omitido_on y omitido_count se recomienda gestionarla
+      en backend (router/service), no desde el cliente.
     """
     fecha: Optional[str] = None
     periodicidad: Optional[str] = None
@@ -125,6 +136,11 @@ class GastoUpdate(BaseModel):
     inactivatedon: Optional[datetime] = None
     comentarios: Optional[str] = None
 
+    # -----------------------
+    # v3: omitidos
+    # -----------------------
+    omitido_este_mes: Optional[bool] = None
+
     @field_serializer("importe", "total", when_used="json")
     def _ser_money_upd(cls, v: Decimal | None):
         """
@@ -142,6 +158,12 @@ class GastoRead(BaseModel):
     - importe / importe_cuota / total / importe_pendiente son float.
     - Incluye campos de tracking: createon, modifiedon, inactivatedon.
     - Incluye rama (texto) resuelta a nivel de modelo/BD.
+
+    v3 (omitidos):
+    - Se exponen:
+        * omitido_este_mes
+        * ultimo_omitido_on
+        * omitido_count
     """
     id: str
     fecha: Optional[date] = None
@@ -172,6 +194,13 @@ class GastoRead(BaseModel):
     activo: Optional[bool] = None
     pagado: Optional[bool] = None
     kpi: Optional[bool] = None
+
+    # -----------------------
+    # v3: omitidos
+    # -----------------------
+    omitido_este_mes: Optional[bool] = None
+    ultimo_omitido_on: Optional[datetime] = None
+    omitido_count: Optional[int] = None
 
     referencia_gasto: Optional[str] = None
     referencia_vivienda_id: Optional[str] = None

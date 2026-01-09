@@ -1,40 +1,92 @@
-from datetime import datetime, date
+# backend/app/api/v1/balance_router.py
+"""
+API v1 - BALANCE (visión caja / movimientos reales)
+
+Este router expone endpoints orientados a "caja" (liquidez), es decir:
+- Movimientos reales del mes: gastos pagados e ingresos cobrados.
+- Balance por cuentas del mes: entradas/salidas reales por cuenta y KPI de liquidez.
+
+Principios:
+- Solo se consideran movimientos que impactan banco/caja:
+    - Gasto: pagado=True y ultimo_pago_on dentro del mes.
+    - Ingreso: cobrado=True y ultimo_ingreso_on dentro del mes.
+    - Cotidianos: líneas en gastos_cotidianos pagado=True dentro del mes.
+- Estados operativos "omitido_este_mes" (gestionables) o "cerrado_este_mes" (presupuestos COT)
+  NO se reflejan aquí por diseño, ya que no representan movimiento bancario.
+
+Rangos de fecha:
+- Filtros half-open: [start, end)
+  fecha >= start AND fecha < end
+"""
+
+from __future__ import annotations
+
+from datetime import date
 from decimal import Decimal
-from typing import List
+from typing import List, Optional, Tuple
 
 from fastapi import APIRouter, Depends
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
-from backend.app.db.session import get_db
+from backend.app.api.v1.auth_router import require_user
 from backend.app.db import models
+from backend.app.db.session import get_db
 from backend.app.schemas.balance import (
-    MovimientosMesResponse,
-    MovimientoItem,
     BalanceMesResponse,
+    MovimientoItem,
+    MovimientosMesResponse,
     SaldoCuentaItem,
 )
-from backend.app.api.v1.auth_router import require_user
 
-router = APIRouter(
-    prefix="/balance",
-    tags=["balance"],
-)
+router = APIRouter(prefix="/balance", tags=["balance"])
 
 
-def _get_month_range(year: int | None, month: int | None) -> tuple[date, date]:
-    """Devuelve (start, end) para el mes completo [start, end)."""
+def _get_month_range(year: Optional[int], month: Optional[int]) -> Tuple[date, date]:
+    """Devuelve (start, end) para el mes completo en rango half-open [start, end)."""
     today = date.today()
-    year = year or today.year
-    month = month or today.month
+    y = year or today.year
+    m = month or today.month
 
-    start = date(year, month, 1)
-    if month == 12:
-        end = date(year + 1, 1, 1)
+    start = date(y, m, 1)
+    if m == 12:
+        end = date(y + 1, 1, 1)
     else:
-        end = date(year, month + 1, 1)
-
+        end = date(y, m + 1, 1)
     return start, end
+
+
+def _to_decimal(x) -> Decimal:
+    """Conversión defensiva para importes -> Decimal."""
+    if x is None:
+        return Decimal("0.00")
+    try:
+        return Decimal(str(x))
+    except Exception:
+        return Decimal("0.00")
+
+
+def _gasto_importe_real(g: models.Gasto) -> Decimal:
+    """
+    Importe real de un gasto gestionable pagado.
+    Por consistencia con el resto de tu backend:
+    - preferimos importe_cuota (cuota/pago mensual)
+    - fallback a importe (por compatibilidad)
+    """
+    ic = getattr(g, "importe_cuota", None)
+    if ic is not None:
+        return _to_decimal(ic)
+    return _to_decimal(getattr(g, "importe", None))
+
+
+def _normalize_fecha(dt):
+    """Normaliza fecha para ordenación (evita tz-aware vs naive)."""
+    try:
+        if getattr(dt, "tzinfo", None) is not None:
+            return dt.replace(tzinfo=None)
+    except Exception:
+        pass
+    return dt
 
 
 # -------------------------------------------------------------------
@@ -42,21 +94,21 @@ def _get_month_range(year: int | None, month: int | None) -> tuple[date, date]:
 # -------------------------------------------------------------------
 @router.get("/mes", response_model=MovimientosMesResponse)
 def get_movimientos_mes(
-    year: int | None = None,
-    month: int | None = None,
+    year: Optional[int] = None,
+    month: Optional[int] = None,
     db: Session = Depends(get_db),
     current_user=Depends(require_user),
 ):
     """
-    Devuelve todos los movimientos (gastos pagados e ingresos cobrados)
+    Devuelve todos los movimientos reales (gastos pagados e ingresos cobrados)
     del mes indicado (o del mes actual si no se indica).
     """
     start, end = _get_month_range(year, month)
 
     movimientos: list[MovimientoItem] = []
 
-    # 1) GASTOS GESTIONABLES pagados en el mes
-    gastos_gestionables = (
+    # 1) GASTOS (pagados en el mes)
+    gastos_pagados = (
         db.query(models.Gasto)
         .filter(
             models.Gasto.user_id == current_user.id,
@@ -67,7 +119,7 @@ def get_movimientos_mes(
         .all()
     )
 
-    for g in gastos_gestionables:
+    for g in gastos_pagados:
         cuenta_nombre = None
         try:
             if getattr(g, "cuenta", None) is not None:
@@ -81,21 +133,21 @@ def get_movimientos_mes(
             MovimientoItem(
                 id=g.id,
                 fecha=g.ultimo_pago_on,
-                cuenta_id=g.cuenta_id,
-                cuenta_nombre=cuenta_nombre or g.cuenta_id,
-                descripcion=g.nombre,
+                cuenta_id=getattr(g, "cuenta_id", None),
+                cuenta_nombre=cuenta_nombre or getattr(g, "cuenta_id", None),
+                descripcion=getattr(g, "nombre", None) or "GASTO",
                 tipo="GASTO_GESTIONABLE",
                 es_ingreso=False,
-                importe=Decimal(str(g.importe)),
+                importe=_gasto_importe_real(g),
             )
         )
 
-    # 2) GASTOS COTIDIANOS pagados en el mes
+    # 2) GASTOS COTIDIANOS (líneas reales pagadas en el mes)
     gastos_cotidianos = (
         db.query(models.GastoCotidiano)
         .filter(
             models.GastoCotidiano.user_id == current_user.id,
-            models.GastoCotidiano.pagado == True,  # noqa: E712
+            models.GastoCotidiano.pagado.is_(True),
             models.GastoCotidiano.fecha >= start,
             models.GastoCotidiano.fecha < end,
         )
@@ -121,7 +173,7 @@ def get_movimientos_mes(
         except Exception:
             pass
 
-        if not proveedor_nombre and hasattr(gc, "proveedor_id") and gc.proveedor_id:
+        if not proveedor_nombre and hasattr(gc, "proveedor_id") and getattr(gc, "proveedor_id", None):
             try:
                 prov = (
                     db.query(models.Proveedor)
@@ -145,12 +197,12 @@ def get_movimientos_mes(
                 descripcion=proveedor_nombre,
                 tipo="GASTO_COTIDIANO",
                 es_ingreso=False,
-                importe=Decimal(str(gc.importe)),
+                importe=_to_decimal(getattr(gc, "importe", None)),
             )
         )
 
-    # 3) INGRESOS cobrados en el mes
-    ingresos = (
+    # 3) INGRESOS (cobrados en el mes)
+    ingresos_cobrados = (
         db.query(models.Ingreso)
         .filter(
             models.Ingreso.user_id == current_user.id,
@@ -161,7 +213,7 @@ def get_movimientos_mes(
         .all()
     )
 
-    for i in ingresos:
+    for i in ingresos_cobrados:
         cuenta_nombre = None
         try:
             if getattr(i, "cuenta", None) is not None:
@@ -175,32 +227,20 @@ def get_movimientos_mes(
             MovimientoItem(
                 id=i.id,
                 fecha=i.ultimo_ingreso_on,
-                cuenta_id=i.cuenta_id,
-                cuenta_nombre=cuenta_nombre or i.cuenta_id,
-                descripcion=i.concepto,
+                cuenta_id=getattr(i, "cuenta_id", None),
+                cuenta_nombre=cuenta_nombre or getattr(i, "cuenta_id", None),
+                descripcion=getattr(i, "concepto", None) or "INGRESO",
                 tipo="INGRESO",
                 es_ingreso=True,
-                importe=Decimal(str(i.importe)),
+                importe=_to_decimal(getattr(i, "importe", None)),
             )
         )
 
     # Ordenar de más reciente a más antiguo
-    def _normalize_fecha(dt):
-        try:
-            if getattr(dt, "tzinfo", None) is not None:
-                return dt.replace(tzinfo=None)
-        except Exception:
-            pass
-        return dt
-
     movimientos.sort(key=lambda m: _normalize_fecha(m.fecha), reverse=True)
 
-    total_ingresos = sum(
-        (m.importe for m in movimientos if m.es_ingreso), Decimal("0.00")
-    )
-    total_gastos = sum(
-        (m.importe for m in movimientos if not m.es_ingreso), Decimal("0.00")
-    )
+    total_ingresos = sum((m.importe for m in movimientos if m.es_ingreso), Decimal("0.00"))
+    total_gastos = sum((m.importe for m in movimientos if not m.es_ingreso), Decimal("0.00"))
     balance = total_ingresos - total_gastos
 
     year_final = year or (movimientos[0].fecha.year if movimientos else start.year)
@@ -221,8 +261,8 @@ def get_movimientos_mes(
 # -------------------------------------------------------------------
 @router.get("/mes-cuentas", response_model=BalanceMesResponse)
 def get_balance_cuentas_mes(
-    year: int | None = None,
-    month: int | None = None,
+    year: Optional[int] = None,
+    month: Optional[int] = None,
     db: Session = Depends(get_db),
     current_user=Depends(require_user),
 ):
@@ -230,18 +270,19 @@ def get_balance_cuentas_mes(
     Balance por cuentas para un mes (visión de caja):
 
     - Solo cuentas activas del usuario.
-    - Inicio  = cuentas_bancarias.liquidez_inicial
-    - Entradas = ingresos.importe cobrados en el mes (ultimo_ingreso_on dentro del mes)
-    - Salidas = gastos gestionables (no segmento COTIDIANO) pagados en el mes
-                + gastos cotidianos (tabla gastos_cotidianos) pagados en el mes
-    - Fin = saldo actual real de la cuenta (cuentas_bancarias.liquidez)
+    - Inicio     = cuentas_bancarias.liquidez_inicial
+    - Entradas   = ingresos cobrados en el mes (ultimo_ingreso_on en rango)
+    - Salidas    = gastos pagados en el mes (gastos + gastos_cotidianos)
+    - Fin        = saldo actual real (cuentas_bancarias.liquidez)
 
-    Además, se calculan pendientes por cuenta (ingresos, gestionables, cotidianos)
-    para las tarjetas de liquidez y pendientes.
+    Adicional:
+    - Pendientes por cuenta (ingresos, gestionables, cotidianos) para tarjetas de pendientes.
+      Nota: aquí se mantiene la definición anterior (activo+kpi+no pagado/cobrado).
+      La lógica omitido_este_mes se incorpora en routers de gastos/ingresos y en reinicio,
+      no en caja.
     """
     start, end = _get_month_range(year, month)
 
-    # 1) Cuentas activas del usuario
     cuentas: List[models.CuentaBancaria] = (
         db.query(models.CuentaBancaria)
         .filter(
@@ -261,6 +302,7 @@ def get_balance_cuentas_mes(
             liquidez_prevista_total=0.0,
             ingresos_pendientes_total=0.0,
             gastos_pendientes_total=0.0,
+            ahorro_mes_total=0.0,
         )
 
     cuenta_ids = [c.id for c in cuentas]
@@ -281,47 +323,31 @@ def get_balance_cuentas_mes(
         .group_by(models.Ingreso.cuenta_id)
         .all()
     )
-    entradas_por_cuenta = {
-        row.cuenta_id: float(row.total_entradas or 0.0) for row in ingresos_q
-    }
+    entradas_por_cuenta = {row.cuenta_id: float(row.total_entradas or 0.0) for row in ingresos_q}
 
-    # 3) SALIDAS DEL MES - GASTOS GESTIONABLES (NO COTIDIANOS) - tabla gastos
-    gastos_gestionables_mes_q = (
+    # 3) SALIDAS DEL MES - GASTOS (pagados)
+    gastos_mes_q = (
         db.query(
             models.Gasto.cuenta_id.label("cuenta_id"),
             func.coalesce(func.sum(models.Gasto.importe_cuota), 0.0).label("total_salidas"),
         )
-        .join(models.TipoGasto, models.TipoGasto.id == models.Gasto.tipo_id)
-        .join(
-            models.TipoSegmentoGasto,
-            models.TipoSegmentoGasto.id == models.TipoGasto.segmento_id,
-        )
         .filter(
             models.Gasto.user_id == current_user.id,
-            models.Gasto.activo.is_(True),
-            models.Gasto.kpi.is_(True),
             models.Gasto.pagado.is_(True),
             models.Gasto.cuenta_id.in_(cuenta_ids),
             models.Gasto.ultimo_pago_on >= start,
             models.Gasto.ultimo_pago_on < end,
-            # Excluimos segmento COTIDIANO
-            models.TipoSegmentoGasto.nombre != "COTIDIANO",
         )
         .group_by(models.Gasto.cuenta_id)
         .all()
     )
-    salidas_gestionables_mes_por_cuenta = {
-        row.cuenta_id: float(row.total_salidas or 0.0)
-        for row in gastos_gestionables_mes_q
-    }
+    salidas_gastos_por_cuenta = {row.cuenta_id: float(row.total_salidas or 0.0) for row in gastos_mes_q}
 
-    # 4) SALIDAS DEL MES - GASTOS COTIDIANOS (tabla gastos_cotidianos)
+    # 4) SALIDAS DEL MES - GASTOS COTIDIANOS (pagados)
     gastos_cotidianos_mes_q = (
         db.query(
             models.GastoCotidiano.cuenta_id.label("cuenta_id"),
-            func.coalesce(func.sum(models.GastoCotidiano.importe), 0.0).label(
-                "total_salidas"
-            ),
+            func.coalesce(func.sum(models.GastoCotidiano.importe), 0.0).label("total_salidas"),
         )
         .filter(
             models.GastoCotidiano.user_id == current_user.id,
@@ -333,21 +359,14 @@ def get_balance_cuentas_mes(
         .group_by(models.GastoCotidiano.cuenta_id)
         .all()
     )
-    salidas_cotidianos_mes_por_cuenta = {
-        row.cuenta_id: float(row.total_salidas or 0.0)
-        for row in gastos_cotidianos_mes_q
-    }
+    salidas_cotidianos_por_cuenta = {row.cuenta_id: float(row.total_salidas or 0.0) for row in gastos_cotidianos_mes_q}
 
     # SALIDAS TOTALES DEL MES POR CUENTA
     salidas_mes_por_cuenta: dict[str, float] = {}
     for cid in cuenta_ids:
-        sal_gest = salidas_gestionables_mes_por_cuenta.get(cid, 0.0)
-        sal_cot = salidas_cotidianos_mes_por_cuenta.get(cid, 0.0)
-        salidas_mes_por_cuenta[cid] = sal_gest + sal_cot
+        salidas_mes_por_cuenta[cid] = salidas_gastos_por_cuenta.get(cid, 0.0) + salidas_cotidianos_por_cuenta.get(cid, 0.0)
 
     # 5) PENDIENTES POR CUENTA (ingresos, gestionables, cotidianos)
-
-    # Ingresos pendientes
     ingresos_pendientes_q = (
         db.query(
             models.Ingreso.cuenta_id,
@@ -363,20 +382,12 @@ def get_balance_cuentas_mes(
         .group_by(models.Ingreso.cuenta_id)
         .all()
     )
-    ingresos_pendientes_por_cuenta = {
-        row.cuenta_id: float(row.importe or 0.0) for row in ingresos_pendientes_q
-    }
+    ingresos_pendientes_por_cuenta = {row.cuenta_id: float(row.importe or 0.0) for row in ingresos_pendientes_q}
 
-    # Gestionables pendientes (NO COTIDIANOS) -> tabla gastos
-    gastos_gestionables_pendientes_q = (
+    gastos_pendientes_q = (
         db.query(
             models.Gasto.cuenta_id,
             func.coalesce(func.sum(models.Gasto.importe_cuota), 0.0).label("importe"),
-        )
-        .join(models.TipoGasto, models.TipoGasto.id == models.Gasto.tipo_id)
-        .join(
-            models.TipoSegmentoGasto,
-            models.TipoSegmentoGasto.id == models.TipoGasto.segmento_id,
         )
         .filter(
             models.Gasto.user_id == current_user.id,
@@ -384,101 +395,54 @@ def get_balance_cuentas_mes(
             models.Gasto.kpi.is_(True),
             models.Gasto.pagado.is_(False),
             models.Gasto.cuenta_id.in_(cuenta_ids),
-            models.TipoSegmentoGasto.nombre != "COTIDIANO",
         )
         .group_by(models.Gasto.cuenta_id)
         .all()
     )
-    gastos_gestionables_pendientes_por_cuenta = {
-        row.cuenta_id: float(row.importe or 0.0)
-        for row in gastos_gestionables_pendientes_q
-    }
-
-    # Cotidianos pendientes -> tabla gastos (segmento COTIDIANO)
-    gastos_cotidianos_pendientes_q = (
-        db.query(
-            models.Gasto.cuenta_id,
-            func.coalesce(func.sum(models.Gasto.importe_cuota), 0.0).label("importe"),
-        )
-        .join(models.TipoGasto, models.TipoGasto.id == models.Gasto.tipo_id)
-        .join(
-            models.TipoSegmentoGasto,
-            models.TipoSegmentoGasto.id == models.TipoGasto.segmento_id,
-        )
-        .filter(
-            models.Gasto.user_id == current_user.id,
-            models.Gasto.activo.is_(True),
-            models.Gasto.kpi.is_(True),
-            models.Gasto.pagado.is_(False),
-            models.Gasto.cuenta_id.in_(cuenta_ids),
-            models.TipoSegmentoGasto.nombre == "COTIDIANO",
-        )
-        .group_by(models.Gasto.cuenta_id)
-        .all()
-    )
-    gastos_cotidianos_pendientes_por_cuenta = {
-        row.cuenta_id: float(row.importe or 0.0)
-        for row in gastos_cotidianos_pendientes_q
-    }
+    gastos_pendientes_por_cuenta = {row.cuenta_id: float(row.importe or 0.0) for row in gastos_pendientes_q}
 
     # 6) Construcción de objetos SaldoCuentaItem
     saldos_cuentas: list[SaldoCuentaItem] = []
 
     for c in cuentas:
-        # Inicio: liquidez_inicial (tal y como definiste para el mes)
-        inicio = float(c.liquidez_inicial or 0.0)
-
-        # Salidas del mes (ya agregadas)
-        salidas_totales = salidas_mes_por_cuenta.get(c.id, 0.0)
-
-        # Entradas del mes
+        inicio = float(getattr(c, "liquidez_inicial", 0.0) or 0.0)
         entradas = entradas_por_cuenta.get(c.id, 0.0)
+        salidas_totales = salidas_mes_por_cuenta.get(c.id, 0.0)
+        saldo_actual = float(getattr(c, "liquidez", 0.0) or 0.0)
 
-        # Saldo REAL actual de la cuenta (lo que ves en la app y lo que actualizan los movimientos entre cuentas)
-        saldo_actual = float(c.liquidez or 0.0)
-
-        gastos_gest_pend = gastos_gestionables_pendientes_por_cuenta.get(c.id, 0.0)
-        gastos_cot_pend = gastos_cotidianos_pendientes_por_cuenta.get(c.id, 0.0)
+        # Pendientes por cuenta (mantenemos esquema actual)
         ingresos_pend = ingresos_pendientes_por_cuenta.get(c.id, 0.0)
+        gastos_pend = gastos_pendientes_por_cuenta.get(c.id, 0.0)
 
+        # Si tu schema separa gestionables vs cotidianos pendientes, conserva tus campos:
+        # - Aquí seguimos con los campos existentes en tu snippet (gestionables y cotidianos).
+        #   Si tu SaldoCuentaItem exige ambos, rellena con 0 el que no tengas calculado.
         saldos_cuentas.append(
             SaldoCuentaItem(
                 cuenta_id=c.id,
-                anagrama=c.anagrama or "",
+                anagrama=getattr(c, "anagrama", "") or "",
                 inicio=round(inicio, 2),
                 salidas=round(salidas_totales, 2),
                 entradas=round(entradas, 2),
-                # Fin = saldo real actual
                 fin=round(saldo_actual, 2),
-                gastos_gestionables_pendientes=round(gastos_gest_pend, 2),
-                gastos_cotidianos_pendientes=round(gastos_cot_pend, 2),
+                gastos_gestionables_pendientes=round(gastos_pend, 2),
+                gastos_cotidianos_pendientes=0.0,
                 ingresos_pendientes=round(ingresos_pend, 2),
             )
         )
 
-    # 7) KPIs globales
-    # Liquidez actual real: suma de cuentas_bancarias.liquidez de todas las cuentas activas del usuario
-    liquidez_actual_total = sum(float(c.liquidez or 0.0) for c in cuentas)
-
-    # Inicio de mes: suma de liquidez_inicial
+    liquidez_actual_total = sum(float(getattr(c, "liquidez", 0.0) or 0.0) for c in cuentas)
     liquidez_inicio_mes_total = sum(s.inicio for s in saldos_cuentas)
 
     ingresos_pendientes_total = sum(s.ingresos_pendientes for s in saldos_cuentas)
     gastos_pendientes_total = sum(
-        s.gastos_gestionables_pendientes + s.gastos_cotidianos_pendientes
-        for s in saldos_cuentas
+        (s.gastos_gestionables_pendientes + s.gastos_cotidianos_pendientes) for s in saldos_cuentas
     )
-    liquidez_prevista_total = (
-        liquidez_actual_total - gastos_pendientes_total + ingresos_pendientes_total
-    )
+    liquidez_prevista_total = liquidez_actual_total - gastos_pendientes_total + ingresos_pendientes_total
 
-    # 👉 8) KPI de ahorro del mes
-    # Suma de gastos.importe donde segmento_id = "AHO-12345",
-    # pagado = true y ultimo_pago_on dentro del mes.
+    # KPI de ahorro del mes (segmento AHO) -> solo pagos reales
     ahorro_mes_q = (
-        db.query(
-            func.coalesce(func.sum(models.Gasto.importe), 0.0).label("total_ahorro")
-        )
+        db.query(func.coalesce(func.sum(models.Gasto.importe), 0.0).label("total_ahorro"))
         .filter(
             models.Gasto.user_id == current_user.id,
             models.Gasto.pagado.is_(True),
@@ -488,19 +452,16 @@ def get_balance_cuentas_mes(
         )
         .first()
     )
-
-    ahorro_mes_total = (
-        float(ahorro_mes_q.total_ahorro or 0.0) if ahorro_mes_q else 0.0
-    )
+    ahorro_mes_total = float(getattr(ahorro_mes_q, "total_ahorro", 0.0) or 0.0) if ahorro_mes_q else 0.0
 
     return BalanceMesResponse(
         year=start.year,
         month=start.month,
         saldos_cuentas=saldos_cuentas,
-        liquidez_actual_total=liquidez_actual_total,
-        liquidez_inicio_mes_total=liquidez_inicio_mes_total,
-        liquidez_prevista_total=liquidez_prevista_total,
-        ingresos_pendientes_total=ingresos_pendientes_total,
-        gastos_pendientes_total=gastos_pendientes_total,
-        ahorro_mes_total=ahorro_mes_total,
+        liquidez_actual_total=float(round(liquidez_actual_total, 2)),
+        liquidez_inicio_mes_total=float(round(liquidez_inicio_mes_total, 2)),
+        liquidez_prevista_total=float(round(liquidez_prevista_total, 2)),
+        ingresos_pendientes_total=float(round(ingresos_pendientes_total, 2)),
+        gastos_pendientes_total=float(round(gastos_pendientes_total, 2)),
+        ahorro_mes_total=float(round(ahorro_mes_total, 2)),
     )

@@ -18,11 +18,28 @@ import {
 // Endpoints backend
 // ========================
 const ENDPOINT_INGRESOS_PENDIENTES = '/api/v1/ingresos/pendientes';
-const ENDPOINT_INGRESOS_ACTIVOS    = '/api/v1/ingresos/activos';
-const ENDPOINT_INGRESOS_INACTIVOS  = '/api/v1/ingresos/inactivos';
-const ENDPOINT_INGRESOS_EXTRA      = '/api/v1/ingresos/extra';
-const ENDPOINT_INGRESOS_BASE       = '/api/v1/ingresos';
-const ENDPOINT_INGRESOS_RESUMEN    = '/api/v1/ingresos/resumen_totales';
+const ENDPOINT_INGRESOS_ACTIVOS = '/api/v1/ingresos/activos';
+const ENDPOINT_INGRESOS_INACTIVOS = '/api/v1/ingresos/inactivos';
+const ENDPOINT_INGRESOS_EXTRA = '/api/v1/ingresos/extra';
+const ENDPOINT_INGRESOS_BASE = '/api/v1/ingresos';
+const ENDPOINT_INGRESOS_RESUMEN = '/api/v1/ingresos/resumen_totales';
+
+/**
+ * ========================
+ * ✅ NUEVO: Omisión mensual (Ingresos)
+ * ========================
+ *
+ * Ajusta estas rutas a tu backend real.
+ *
+ * Recomendación (consistente con patrón REST de "acción"):
+ *  - PUT /api/v1/ingresos/:id/omitir
+ *  - PUT /api/v1/ingresos/:id/deshacer_omision
+ *
+ * Si tu backend usa POST en lugar de PUT, cambia el método en las funciones.
+ */
+const endpointOmitirIngreso = (id: string) => `${ENDPOINT_INGRESOS_BASE}/${id}/omitir`;
+const endpointDeshacerOmisionIngreso = (id: string) =>
+  `${ENDPOINT_INGRESOS_BASE}/${id}/deshacer_omision`;
 
 // ========================
 // Tipos de dominio
@@ -34,7 +51,7 @@ export interface Ingreso {
   rango_cobro: string | null;
   periodicidad: string | null;
   tipo_id: string | null;
-  tipo_nombre?: string | null;   // 👈 AÑADIDO
+  tipo_nombre?: string | null; // 👈 AÑADIDO
   referencia_vivienda_id?: string | null;
   concepto: string | null;
   importe: number;
@@ -45,28 +62,35 @@ export interface Ingreso {
   createon?: string | null;
   modifiedon?: string | null;
   inactivatedon?: string | null;
-  ultimo_ingreso_on ?: string | null;
+  ultimo_ingreso_on?: string | null;
   cuenta_id?: string | null;
-  cuenta_nombre?: string | null; // si la tienes en el backend
+  cuenta_nombre?: string | null;
+
+  /**
+   * ✅ NUEVO: omisión mensual (igual idea que gastos)
+   * - true  => omitido este mes (no debería aparecer en pendientes, según backend)
+   * - false => normal
+   */
+  omitido_este_mes?: boolean | null;
 }
 
 export interface IngresoCreatePayload {
-  fecha_inicio: string;              // "2025-12-01"
-  rango_cobro: string;               // "1-3", "10-15", etc.
-  periodicidad: string;              // "MENSUAL", "PAGO UNICO", ...
+  fecha_inicio: string; // "2025-12-01"
+  rango_cobro: string; // "1-3", "10-15", etc.
+  periodicidad: string; // "MENSUAL", "PAGO UNICO", ...
   tipo_id: string;
   referencia_vivienda_id?: string | null;
   concepto: string;
   importe: string | number;
   cuenta_id?: string | null;
-  id?: string;                       // opcional, normalmente lo genera el backend
+  id?: string; // opcional, normalmente lo genera el backend
 
-  // NUEVO: estado opcional (para duplicado)
+  // estado opcional (para duplicado)
   activo?: boolean;
   cobrado?: boolean;
   kpi?: boolean;
 
-  // NUEVO: timestamps opcionales
+  // timestamps opcionales
   createon?: string;
   modifiedon?: string;
   inactivatedon?: string;
@@ -85,12 +109,30 @@ export interface IngresoUpdatePayload {
   activo?: boolean;
   cobrado?: boolean;
   kpi?: boolean;
+
+  /**
+   * Opcional: si algún día quisieras permitir setear omisión desde el form.
+   * Hoy NO lo usamos, pero es inocuo.
+   */
+  omitido_este_mes?: boolean;
 }
 
 // Resumen de KPI ingresos (objetivo vs cobrados)
 export interface ResumenIngresos {
   objetivo: number;
   cobrados: number;
+}
+
+// ========================
+// Helpers internos (defensivos)
+// ========================
+
+function logAxiosError(prefix: string, err: unknown) {
+  if (axios.isAxiosError(err)) {
+    console.error(prefix, err.response?.data || err.message);
+  } else {
+    console.error(prefix, err);
+  }
 }
 
 // ========================
@@ -104,11 +146,7 @@ export async function fetchIngresosPendientes(): Promise<Ingreso[]> {
     const resp = await api.get<Ingreso[]>(url);
     return resp.data ?? [];
   } catch (err) {
-    if (axios.isAxiosError(err)) {
-      console.error('[ingresosApi] Error cargando pendientes', err.message);
-    } else {
-      console.error('[ingresosApi] Error cargando pendientes', err);
-    }
+    logAxiosError('[ingresosApi] Error cargando pendientes', err);
     throw err;
   }
 }
@@ -124,11 +162,7 @@ export async function fetchIngresosActivos(): Promise<Ingreso[]> {
     const resp = await api.get<Ingreso[]>(url);
     return resp.data ?? [];
   } catch (err) {
-    if (axios.isAxiosError(err)) {
-      console.error('[ingresosApi] Error cargando activos', err.message);
-    } else {
-      console.error('[ingresosApi] Error cargando activos', err);
-    }
+    logAxiosError('[ingresosApi] Error cargando activos', err);
     throw err;
   }
 }
@@ -140,11 +174,7 @@ export async function fetchIngresosInactivos(): Promise<Ingreso[]> {
     const resp = await api.get<Ingreso[]>(url);
     return resp.data ?? [];
   } catch (err) {
-    if (axios.isAxiosError(err)) {
-      console.error('[ingresosApi] Error cargando inactivos', err.message);
-    } else {
-      console.error('[ingresosApi] Error cargando inactivos', err);
-    }
+    logAxiosError('[ingresosApi] Error cargando inactivos', err);
     throw err;
   }
 }
@@ -154,9 +184,7 @@ export async function fetchIngresosInactivos(): Promise<Ingreso[]> {
  */
 export type FiltroIngresos = 'pendientes' | 'activos' | 'inactivos';
 
-export async function fetchIngresosPorFiltro(
-  filtro: FiltroIngresos,
-): Promise<Ingreso[]> {
+export async function fetchIngresosPorFiltro(filtro: FiltroIngresos): Promise<Ingreso[]> {
   switch (filtro) {
     case 'pendientes':
       return fetchIngresosPendientes();
@@ -174,14 +202,12 @@ export async function fetchIngresosPorFiltro(
 // ========================
 
 export interface FiltroIngresosExtra {
-  month?: number;   // 1..12
-  year?: number;    // 4 dígitos
-  q?: string;       // búsqueda por concepto
+  month?: number; // 1..12
+  year?: number; // 4 dígitos
+  q?: string; // búsqueda por concepto
 }
 
-export async function fetchIngresosExtra(
-  filtro: FiltroIngresosExtra = {},
-): Promise<Ingreso[]> {
+export async function fetchIngresosExtra(filtro: FiltroIngresosExtra = {}): Promise<Ingreso[]> {
   const params: Record<string, string | number> = {};
   if (filtro.month != null) params.month = filtro.month;
   if (filtro.year != null) params.year = filtro.year;
@@ -192,11 +218,7 @@ export async function fetchIngresosExtra(
     const resp = await api.get<Ingreso[]>(ENDPOINT_INGRESOS_EXTRA, { params });
     return resp.data ?? [];
   } catch (err) {
-    if (axios.isAxiosError(err)) {
-      console.error('[ingresosApi] Error cargando ingresos extra', err.message);
-    } else {
-      console.error('[ingresosApi] Error cargando ingresos extra', err);
-    }
+    logAxiosError('[ingresosApi] Error cargando ingresos extra', err);
     throw err;
   }
 }
@@ -212,25 +234,16 @@ export async function fetchIngresoById(id: string): Promise<Ingreso> {
     const resp = await api.get<Ingreso>(url);
     return resp.data;
   } catch (err) {
-    if (axios.isAxiosError(err)) {
-      console.error('[ingresosApi] Error cargando ingreso', err.message);
-    } else {
-      console.error('[ingresosApi] Error cargando ingreso', err);
-    }
+    logAxiosError('[ingresosApi] Error cargando ingreso', err);
     throw err;
   }
 }
 
-export async function createIngreso(
-  payload: IngresoCreatePayload,
-): Promise<Ingreso> {
+export async function createIngreso(payload: IngresoCreatePayload): Promise<Ingreso> {
   const url = ENDPOINT_INGRESOS_BASE;
   console.log('[ingresosApi] POST crear ingreso ->', url, payload);
   try {
-    const rawImporte =
-      typeof payload.importe === 'number'
-        ? String(payload.importe)
-        : payload.importe;
+    const rawImporte = typeof payload.importe === 'number' ? String(payload.importe) : payload.importe;
 
     const body = {
       ...payload,
@@ -240,40 +253,27 @@ export async function createIngreso(
     const resp = await api.post<Ingreso>(url, body);
     return resp.data;
   } catch (err) {
-    if (axios.isAxiosError(err)) {
-      console.error('[ingresosApi] Error creando ingreso', err.response?.data || err.message);
-    } else {
-      console.error('[ingresosApi] Error creando ingreso', err);
-    }
+    logAxiosError('[ingresosApi] Error creando ingreso', err);
     throw err;
   }
 }
 
-export async function updateIngreso(
-  id: string,
-  payload: IngresoUpdatePayload,
-): Promise<Ingreso> {
+export async function updateIngreso(id: string, payload: IngresoUpdatePayload): Promise<Ingreso> {
   const url = `${ENDPOINT_INGRESOS_BASE}/${id}`;
   console.log('[ingresosApi] PATCH actualizar ingreso ->', url, payload);
   try {
     const body: any = { ...payload };
+
     if (payload.importe !== undefined) {
       const rawImporte =
-        typeof payload.importe === 'number'
-          ? String(payload.importe)
-          : payload.importe;
-
+        typeof payload.importe === 'number' ? String(payload.importe) : payload.importe;
       body.importe = parseImporte(rawImporte);
     }
 
     const resp = await api.patch<Ingreso>(url, body);
     return resp.data;
   } catch (err) {
-    if (axios.isAxiosError(err)) {
-      console.error('[ingresosApi] Error actualizando ingreso', err.response?.data || err.message);
-    } else {
-      console.error('[ingresosApi] Error actualizando ingreso', err);
-    }
+    logAxiosError('[ingresosApi] Error actualizando ingreso', err);
     throw err;
   }
 }
@@ -287,11 +287,7 @@ export async function eliminarIngreso(id: string): Promise<void> {
   try {
     await api.delete(url);
   } catch (err) {
-    if (axios.isAxiosError(err)) {
-      console.error('[ingresosApi] Error eliminando ingreso', err.response?.data || err.message);
-    } else {
-      console.error('[ingresosApi] Error eliminando ingreso', err);
-    }
+    logAxiosError('[ingresosApi] Error eliminando ingreso', err);
     throw err;
   }
 }
@@ -307,11 +303,44 @@ export async function marcarIngresoComoCobrado(id: string): Promise<Ingreso> {
     const resp = await api.put<Ingreso>(url);
     return resp.data;
   } catch (err) {
-    if (axios.isAxiosError(err)) {
-      console.error('[ingresosApi] Error marcando como cobrado', err.response?.data || err.message);
-    } else {
-      console.error('[ingresosApi] Error marcando como cobrado', err);
-    }
+    logAxiosError('[ingresosApi] Error marcando como cobrado', err);
+    throw err;
+  }
+}
+
+/**
+ * ========================
+ * ✅ NUEVO: Omisión mensual
+ * ========================
+ *
+ * Nota UX:
+ * - Omitir NO es "cobrar", ni es "desactivar".
+ * - Es una exclusión mensual (idealmente backend la aplica al listar pendientes).
+ */
+export async function omitirIngresoEsteMes(id: string): Promise<Ingreso> {
+  const url = endpointOmitirIngreso(id);
+  console.log('[ingresosApi] PUT omitir ingreso este mes ->', url);
+
+  try {
+    // Si tu backend usa POST en vez de PUT, cambia a: api.post<Ingreso>(url)
+    const resp = await api.put<Ingreso>(url);
+    return resp.data;
+  } catch (err) {
+    logAxiosError('[ingresosApi] Error omitiendo ingreso este mes', err);
+    throw err;
+  }
+}
+
+export async function deshacerOmisionIngresoEsteMes(id: string): Promise<Ingreso> {
+  const url = endpointDeshacerOmisionIngreso(id);
+  console.log('[ingresosApi] PUT deshacer omisión ingreso este mes ->', url);
+
+  try {
+    // Si tu backend usa POST en vez de PUT, cambia a: api.post<Ingreso>(url)
+    const resp = await api.put<Ingreso>(url);
+    return resp.data;
+  } catch (err) {
+    logAxiosError('[ingresosApi] Error deshaciendo omisión ingreso este mes', err);
     throw err;
   }
 }
@@ -327,11 +356,7 @@ export async function fetchResumenIngresos(): Promise<ResumenIngresos> {
     const resp = await api.get<ResumenIngresos>(url);
     return resp.data;
   } catch (err) {
-    if (axios.isAxiosError(err)) {
-      console.error('[ingresosApi] Error cargando resumen ingresos', err.response?.data || err.message);
-    } else {
-      console.error('[ingresosApi] Error cargando resumen ingresos', err);
-    }
+    logAxiosError('[ingresosApi] Error cargando resumen ingresos', err);
     throw err;
   }
 }

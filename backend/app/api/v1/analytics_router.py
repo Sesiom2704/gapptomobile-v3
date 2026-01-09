@@ -22,9 +22,12 @@ Criterios:
     - max -> max(valor_compra, valor_referencia, total_inversion)
 - “annualize”: si year es el actual, extrapola a 12 meses usando meses_contados.
 
-Notas de robustez:
-- Manejo defensivo de nulls.
-- Numeric/Decimal -> float para JSON.
+Notas v3:
+- Normalización de periodicidad tolerante a:
+    - PAGO_UNICO / PAGO UNICO
+    - mayúsculas/minúsculas
+  (se aplica reemplazando '_' por ' ' y uppercasing).
+- Manejo defensivo de nulls y Numeric/Decimal -> float para JSON.
 """
 
 from __future__ import annotations
@@ -36,17 +39,16 @@ from decimal import Decimal
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
-from backend.app.db.session import get_db
-from backend.app.db import models
 from backend.app.api.v1.auth_router import require_user
+from backend.app.db import models
+from backend.app.db.session import get_db
 
-# ✅ Schemas separados (DTOs de respuesta)
 from backend.app.schemas.analytics import (
-    ResumenOut,
     BreakdownOut,
     BreakdownRowOut,
     KpisOut,
     PatrimonioSummaryOut,
+    ResumenOut,
 )
 
 router = APIRouter(prefix="/analytics", tags=["analytics"])
@@ -57,9 +59,7 @@ router = APIRouter(prefix="/analytics", tags=["analytics"])
 # =========================================================
 
 def _f(x: object, default: float = 0.0) -> float:
-    """
-    Convierte Numeric/Decimal/None/str a float de forma defensiva.
-    """
+    """Convierte Numeric/Decimal/None/str a float de forma defensiva."""
     if x is None:
         return default
     if isinstance(x, (int, float)):
@@ -67,7 +67,7 @@ def _f(x: object, default: float = 0.0) -> float:
     if isinstance(x, Decimal):
         return float(x)
     try:
-        return float(x)  # str u otros
+        return float(x)
     except Exception:
         return default
 
@@ -89,7 +89,7 @@ def _months_inclusive_between(start: date, end: date) -> int:
     Meses inclusivos por calendario entre start y end.
     Ej:
       2025-01-01 a 2025-01-31 -> 1
-      2025-01-15 a 2025-03-01 -> 3 (enero, febrero, marzo)
+      2025-01-15 a 2025-03-01 -> 3
     """
     if start > end:
         return 0
@@ -101,11 +101,7 @@ def _year_window(year: int) -> Tuple[date, date]:
 
 
 def _meses_contados_para_year(year: int) -> int:
-    """
-    Para YTD/annualize:
-    - Si year == año actual -> mes actual (1..12)
-    - Si no -> 12
-    """
+    """Para YTD/annualize."""
     today = date.today()
     return today.month if today.year == year else 12
 
@@ -115,7 +111,8 @@ def _meses_contados_para_year(year: int) -> int:
 # =========================================================
 
 def _norm_periodicidad(p: Optional[str]) -> str:
-    return (p or "").strip().upper()
+    # ✅ v3: tolera PAGO_UNICO
+    return (p or "").strip().upper().replace("_", " ")
 
 
 def _step_months_from_periodicidad(p: str) -> Optional[int]:
@@ -127,7 +124,7 @@ def _step_months_from_periodicidad(p: str) -> Optional[int]:
       CUATRIMESTRAL -> 4
       SEMESTRAL -> 6
       ANUAL -> 12
-      PAGO ÚNICO -> None (especial)
+      PAGO UNICO -> None (especial)
     """
     pu = _norm_periodicidad(p)
 
@@ -148,14 +145,13 @@ def _step_months_from_periodicidad(p: str) -> Optional[int]:
     if "ANUAL" in pu or "AÑO" in pu:
         return 12
 
-    # fallback: si no sabemos, asumimos mensual
     return 1
 
 
 def _occurrences_in_range(start: date, end: date, periodicidad: str) -> int:
     """
-    Calcula ocurrencias entre start-end, recortadas por año, según periodicidad.
-    - PAGO ÚNICO -> 1 si cae dentro del rango.
+    Ocurrencias entre start-end según periodicidad.
+    - PAGO UNICO -> 1
     - Mensual -> meses inclusivos
     - Trimestral/sem... -> ceil(meses_inclusivos / step)
     """
@@ -164,11 +160,9 @@ def _occurrences_in_range(start: date, end: date, periodicidad: str) -> int:
     if meses <= 0:
         return 0
 
-    # Pago único: 1 si existe en rango
     if step is None:
         return 1
 
-    # ceil(meses / step)
     return (meses + step - 1) // step
 
 
@@ -246,7 +240,7 @@ def _calc_ocurrencias_gasto_en_year(g: models.Gasto, year: int) -> int:
     """
     - Si activo: ocurrencias desde fecha hasta 31/12 (recortado al año).
     - Si inactivo: hasta inactivatedon si cae dentro del año.
-    - Para gastos puntuales (PAGO ÚNICO), 1 si cae dentro del año.
+    - PAGO UNICO: 1 si cae dentro del año.
     """
     jan1, dec31 = _year_window(year)
     start_any = _gasto_start(g)
@@ -297,9 +291,7 @@ def _get_compra(db: Session, patrimonio_id: str) -> Optional[models.PatrimonioCo
 
 
 def _valor_base_from_compra(compra: Optional[models.PatrimonioCompra], basis: str) -> float:
-    """
-    basis: total | compra | referencia | max
-    """
+    """basis: total | compra | referencia | max"""
     if compra is None:
         return 0.0
 
@@ -315,12 +307,12 @@ def _valor_base_from_compra(compra: Optional[models.PatrimonioCompra], basis: st
         return vr
     if b == "max":
         return max(vc, vr, ti)
-    # total: si hay total_inversion, usarlo; si no, max(vc, vr)
+
     return ti if ti > 0 else max(vc, vr)
 
 
 # =========================================================
-# ENDPOINTS EXISTENTES
+# ENDPOINTS
 # =========================================================
 
 @router.get("/patrimonios/{patrimonio_id}/ingresos_breakdown", response_model=BreakdownOut)
@@ -373,11 +365,9 @@ def ingresos_breakdown(
                         meses = 0
                     else:
                         end_r = inact if (inact and inact <= dec31) else dec31
-                occ = _occurrences_in_range(start_r, end_r, per_u)
-                meses = occ
+                meses = _occurrences_in_range(start_r, end_r, per_u)
 
         total = float(cuota) * float(meses)
-
         tipo = (getattr(ing, "concepto", None) or "Ingreso").strip() if getattr(ing, "concepto", None) else "Ingreso"
 
         out_rows.append(
@@ -436,7 +426,6 @@ def gastos_breakdown(
         occ = _calc_ocurrencias_gasto_en_year(g, year)
 
         total = float(cuota) * float(occ)
-
         tipo = (getattr(g, "nombre", None) or getattr(g, "rama", None) or "Gasto").strip()
 
         out_rows.append(
@@ -573,10 +562,6 @@ def kpis_patrimonio(
     )
 
 
-# =========================================================
-# NUEVO ENDPOINT: /patrimonio/summary (agregado para Home)
-# =========================================================
-
 @router.get("/patrimonio/summary", response_model=PatrimonioSummaryOut)
 def patrimonio_summary(
     year: int = Query(..., description="Año de cálculo (ej. 2025)."),
@@ -585,21 +570,7 @@ def patrimonio_summary(
 ):
     """
     Agregado multi-propiedad para el HomeDashboard.
-
-    Devuelve:
-    - propiedades_count: nº de patrimonios activos del usuario
-    - valor_mercado_total: suma de PatrimonioCompra.valor_mercado (si no existe, 0)
-    - noi_total: suma de RendimientoPatrimonio.ingreso_neto para ese year
-    - rentabilidad_bruta_media_pct: media simple de RendimientoPatrimonio.yield_bruto_pct (nullable)
-    - equity_total: valor_mercado_total - total_inversion_total
-
-    Notas:
-    - Se filtra por user_id (multi-tenant).
-    - Se consideran solo patrimonios activos.
-    - Si falta compra o rendimiento en alguna propiedad, se asume 0 para agregados.
     """
-
-    # 1) Patrimonios activos del usuario
     patrimonios = (
         db.query(models.Patrimonio)
         .filter(
@@ -622,7 +593,6 @@ def patrimonio_summary(
 
     ids = [p.id for p in patrimonios]
 
-    # 2) Compras (valor mercado / total inversión)
     compras = (
         db.query(models.PatrimonioCompra)
         .filter(models.PatrimonioCompra.patrimonio_id.in_(ids))
@@ -632,15 +602,10 @@ def patrimonio_summary(
     valor_mercado_total = 0.0
     total_inversion_total = 0.0
 
-    # Index por patrimonio_id para rapidez (por si lo necesitas luego)
-    compra_by_id: Dict[str, models.PatrimonioCompra] = {}
     for c in compras:
-        compra_by_id[str(c.patrimonio_id)] = c
-
         valor_mercado_total += _f(getattr(c, "valor_mercado", 0.0), 0.0)
         total_inversion_total += _f(getattr(c, "total_inversion", 0.0), 0.0)
 
-    # 3) Rendimientos del año (NOI y yield bruto)
     rends = (
         db.query(models.RendimientoPatrimonio)
         .filter(
@@ -660,14 +625,10 @@ def patrimonio_summary(
         y = getattr(r, "yield_bruto_pct", None)
         if y is not None:
             yv = _f(y, 0.0)
-            # Si está a 0 por defecto pero realmente no aplica, igualmente cuenta.
-            # Si prefieres ignorar ceros, cambia la condición.
             yield_sum += yv
             yield_count += 1
 
     rentab_media = (yield_sum / yield_count) if yield_count > 0 else None
-
-    # 4) Equity agregado (definición simple)
     equity_total = valor_mercado_total - total_inversion_total
 
     return PatrimonioSummaryOut(

@@ -415,6 +415,14 @@ class Ingreso(Base):
     inactivatedon     = Column(DateTime, nullable=True)
     ultimo_ingreso_on = Column(DateTime, nullable=True)
 
+    # -----------------------
+    # Omitidos (nuevo estado v3)
+    # -----------------------
+    omitido_este_mes  = Column(Boolean, nullable=False, server_default=sa.text("false"), index=True)
+    ultimo_omitido_on = Column(DateTime(timezone=True), nullable=True)
+    omitido_count     = Column(Integer, nullable=False, server_default=sa.text("0"))
+
+
     tipo_rel     = relationship("TipoIngreso", back_populates="ingresos")
     cuenta       = relationship("CuentaBancaria", back_populates="ingresos", lazy="joined")
     vivienda_rel = relationship("Patrimonio", back_populates="ingresos")
@@ -458,6 +466,13 @@ class Gasto(Base):
     inactivatedon          = Column(DateTime, nullable=True)
     ultimo_pago_on         = Column(DateTime, nullable=True)
     comentarios            = Column(Text, nullable=True)
+
+    # -----------------------
+    # Omitidos (nuevo estado v3)
+    # -----------------------
+    omitido_este_mes  = Column(Boolean, nullable=False, server_default=text("false"), index=True)
+    ultimo_omitido_on = Column(DateTime(timezone=True), nullable=True)
+    omitido_count     = Column(Integer, nullable=False, server_default=text("0"))
 
     proveedor_rel  = relationship("Proveedor", back_populates="gastos")
     tipo_rel       = relationship("TipoGasto", back_populates="gastos")

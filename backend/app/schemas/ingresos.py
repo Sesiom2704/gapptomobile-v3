@@ -15,6 +15,13 @@ Notas:
 - FIX IMPORTANTE:
     * En DB, user_id es INTEGER.
     * En el schema de salida antes estaba como str -> provocaba ResponseValidationError al listar.
+
+Cambios v3 (omitidos):
+- Se añaden campos de lectura:
+    * omitido_este_mes
+    * ultimo_omitido_on
+    * omitido_count
+- Se permite update parcial de omitido_este_mes (para "Omitir mes"/"Deshacer omisión").
 """
 
 from __future__ import annotations
@@ -87,6 +94,13 @@ class IngresoUpdateSchema(BaseModel):
     Schema para MODIFICAR un ingreso.
 
     Todos los campos son opcionales, para permitir updates parciales.
+
+    v3 (omitidos):
+    - omitido_este_mes se permite para soportar:
+        * Omitir mes  -> omitido_este_mes = True
+        * Deshacer    -> omitido_este_mes = False
+      La lógica de ultimo_omitido_on y omitido_count se recomienda gestionarla
+      en backend (router/service), no desde el cliente.
     """
     fecha_inicio: Optional[str] = None
     rango_cobro: Optional[str] = None
@@ -102,6 +116,11 @@ class IngresoUpdateSchema(BaseModel):
     kpi: Optional[bool] = None
     ingresos_cobrados: Optional[int] = None
     inactivatedon: Optional[datetime] = None
+
+    # -----------------------
+    # v3: omitidos
+    # -----------------------
+    omitido_este_mes: Optional[bool] = None
 
     @field_serializer("importe", when_used="json")
     def _ser_money_upd(cls, v: Decimal | None):
@@ -120,6 +139,12 @@ class IngresoSchema(BaseModel):
     - Incluye campos de tracking: createon, modifiedon, inactivatedon, ultimo_ingreso_on.
     - Incluye cuenta_id aunque venga por relación.
     - FIX: user_id debe ser int porque en DB es INTEGER.
+
+    v3 (omitidos):
+    - Se exponen:
+        * omitido_este_mes
+        * ultimo_omitido_on
+        * omitido_count
     """
     id: str
     fecha_inicio: Optional[date] = None
@@ -135,6 +160,13 @@ class IngresoSchema(BaseModel):
     kpi: Optional[bool] = False
     ingresos_cobrados: Optional[int] = 0
 
+    # -----------------------
+    # v3: omitidos
+    # -----------------------
+    omitido_este_mes: Optional[bool] = None
+    ultimo_omitido_on: Optional[datetime] = None
+    omitido_count: Optional[int] = None
+
     createon: Optional[datetime] = None
     modifiedon: Optional[datetime] = None
     inactivatedon: Optional[datetime] = None
@@ -143,11 +175,7 @@ class IngresoSchema(BaseModel):
     cuenta_id: Optional[str] = None
 
     # ✅ FIX AQUÍ:
-    # Antes: Optional[str] -> rompía al listar porque el router devuelve int.
     user_id: Optional[int] = None
-
-    # Si quisieras compatibilidad extra (por si en algún sitio devuelves "2" como string):
-    # user_id: Optional[Union[int, str]] = None
 
     user_nombre: Optional[str] = None
 

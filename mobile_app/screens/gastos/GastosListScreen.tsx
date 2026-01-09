@@ -24,6 +24,18 @@
  *   4) Si la lista está vacía porque el usuario está filtrando/buscando:
  *      - Mantener el texto legacy "No hay gastos que coincidan con el filtro."
  *
+ * NUEVO (requisito "OMITIR gasto"):
+ * - En el ActionSheet de gastos gestionables:
+ *     * Si gasto.pagado=false y omitido_este_mes=false => acción "Omitir este mes"
+ *     * Si omitido_este_mes=true => acción "Deshacer omisión"
+ * - En filtros (gestionables):
+ *     * Añadimos filtro "Omisión": Todos / Omitidos / No omitidos
+ *     * En "Pendientes" (gestionables) el backend ya excluye omitidos,
+ *       por lo que el filtro se muestra deshabilitado (para evitar confusión).
+ * - Visual:
+ *     * Si un gasto está omitido, añadimos etiqueta en category/date para hacerlo evidente
+ *       sin tocar el componente ExpenseCard.
+ *
  * NOTAS IMPORTANTES DE UX:
  * - "No hay filtros activos" en Pendientes significa:
  *   - NO hay búsqueda
@@ -81,6 +93,9 @@ import {
   TipoGasto,
   Proveedor,
   fetchProveedores,
+  // ✅ NUEVO: omisión mensual (gestionables)
+  omitirGastoEsteMes,
+  deshacerOmisionGastoEsteMes,
 } from '../../services/gastosApi';
 
 import {
@@ -115,6 +130,9 @@ type KpiFiltro = 'todos' | 'si' | 'no';
 type FiltroPagado = 'todos' | 'pagado' | 'no_pagado';
 type FiltroSegmento = 'todos' | string;
 type FiltroTipoGasto = 'todos' | string;
+// ✅ NUEVO: filtro de omisión (gestionables)
+type FiltroOmitido = 'todos' | 'omitidos' | 'no_omitidos';
+
 // filtro de quién paga en cotidianos
 type FiltroQuienPaga = 'todos' | 'yo' | 'otro';
 
@@ -259,6 +277,9 @@ export const GastosListScreen: React.FC<{ navigation: any; route: any }> = ({
   const [filtroPeriodicidad, setFiltroPeriodicidad] =
     useState<PeriodicidadFiltro>('todos');
 
+  // ✅ NUEVO: filtro de omisión (gestionables)
+  const [filtroOmitido, setFiltroOmitido] = useState<FiltroOmitido>('todos');
+
   // Mostrar/ocultar bloques de filtros (GESTIONABLES)
   const [showPeriodicidadFilter, setShowPeriodicidadFilter] = useState(false);
   const [showSegmentoFilter, setShowSegmentoFilter] = useState(false);
@@ -266,6 +287,8 @@ export const GastosListScreen: React.FC<{ navigation: any; route: any }> = ({
   const [showEstadoFilter, setShowEstadoFilter] = useState(false);
   const [showActivoFilter, setShowActivoFilter] = useState(false);
   const [showKpiFilter, setShowKpiFilter] = useState(false);
+  // ✅ NUEVO
+  const [showOmitidoFilter, setShowOmitidoFilter] = useState(false);
 
   const [tiposGasto, setTiposGasto] = useState<TipoGasto[]>([]);
   const [proveedores, setProveedores] = useState<Proveedor[]>([]);
@@ -524,7 +547,10 @@ export const GastosListScreen: React.FC<{ navigation: any; route: any }> = ({
   };
 
   const getCategoriaTextoGestionable = (gasto: Gasto): string => {
-    return getSegmentoNombre(gasto);
+    // ✅ NUEVO: etiqueta visual de omisión sin tocar el card
+    const base = getSegmentoNombre(gasto);
+    if (gasto.omitido_este_mes) return `${base} · OMITIDO`;
+    return base;
   };
 
   // ======= Fijar filtros cuando estamos en "Pendientes" =======
@@ -533,10 +559,17 @@ export const GastosListScreen: React.FC<{ navigation: any; route: any }> = ({
       setFiltroActivo('activo');
       setFiltroPagado('no_pagado');
       setFiltroKpi('si');
+
+      // ✅ NUEVO: en pendientes no tiene sentido filtrar omitidos (backend los excluye),
+      // así que dejamos en "no_omitidos" por coherencia.
+      setFiltroOmitido('no_omitidos');
     } else if (filtro === 'todos') {
       setFiltroActivo('todos');
       setFiltroPagado('todos');
       setFiltroKpi('todos');
+
+      // ✅ NUEVO
+      setFiltroOmitido('todos');
     }
   }, [filtro]);
 
@@ -596,6 +629,13 @@ export const GastosListScreen: React.FC<{ navigation: any; route: any }> = ({
         if (filtroKpi === 'no' && isKpi) return false;
       }
 
+      // ✅ NUEVO: filtro de omisión (solo relevante en "Todos")
+      if (filtroOmitido !== 'todos') {
+        const isOmitido = g.omitido_este_mes === true;
+        if (filtroOmitido === 'omitidos' && !isOmitido) return false;
+        if (filtroOmitido === 'no_omitidos' && isOmitido) return false;
+      }
+
       return true;
     });
   }, [
@@ -607,6 +647,7 @@ export const GastosListScreen: React.FC<{ navigation: any; route: any }> = ({
     filtroPagado,
     filtroKpi,
     filtroPeriodicidad,
+    filtroOmitido,
   ]);
 
   /**
@@ -658,7 +699,6 @@ export const GastosListScreen: React.FC<{ navigation: any; route: any }> = ({
     // 3) Otros (activos, etc.): mantener como venía (sin tocar)
     return base;
   }, [gastosFiltrados, filtro]);
-
 
   // ======= Filtros LOCALES para cotidianos =======
   const aplicarFiltrosCotidianos = useMemo(() => {
@@ -746,6 +786,17 @@ export const GastosListScreen: React.FC<{ navigation: any; route: any }> = ({
     return { si, no, todos: gastos.length };
   }, [gastos]);
 
+  // ✅ NUEVO: stats de omisión (para deshabilitar pills)
+  const statsOmitido = useMemo(() => {
+    let omitidos = 0;
+    let no_omitidos = 0;
+    gastos.forEach((g) => {
+      if (g.omitido_este_mes === true) omitidos += 1;
+      else no_omitidos += 1;
+    });
+    return { omitidos, no_omitidos, todos: gastos.length };
+  }, [gastos]);
+
   // TIPOS DISPONIBLES (gestionables), filtrados por segmento + deshabilitados sin datos
   const tiposDisponiblesGestionables = useMemo(() => {
     const counts: Record<string, number> = {};
@@ -819,9 +870,9 @@ export const GastosListScreen: React.FC<{ navigation: any; route: any }> = ({
 
   const handleMarcarComoPagadoCotidiano = async (gasto: GastoCotidiano) => {
     try {
+      // Nota: este endpoint es para gestionables; se mantiene tu comportamiento actual.
       await marcarGastoComoPagado(gasto.id);
       await cargarGastosCotidianos();
-      // ✅ NUEVO: tras cambios, refrescamos pending counts
       await Promise.all([reloadPendientes(), fetchIngresosPendientesCount()]);
     } catch (err) {
       console.error('Error al marcar gasto cotidiano como pagado', err);
@@ -838,6 +889,62 @@ export const GastosListScreen: React.FC<{ navigation: any; route: any }> = ({
         onPress: () => void handleMarcarComoPagadoCotidiano(gasto),
       },
     ]);
+  };
+
+  // ============================
+  // ✅ NUEVO: Omisión (gestionables) con confirmación
+  // ============================
+
+  const handleOmitirGestionable = async (gasto: Gasto) => {
+    try {
+      await omitirGastoEsteMes(gasto.id);
+      await reload();
+      await Promise.all([reloadPendientes(), fetchIngresosPendientesCount()]);
+    } catch (err) {
+      console.error('Error al omitir gasto', err);
+      Alert.alert('Error', 'No se ha podido omitir el gasto.');
+    }
+  };
+
+  const confirmarOmitirGestionable = (gasto: Gasto) => {
+    Alert.alert(
+      'Omitir este mes',
+      `¿Quieres omitir el gasto "${gasto.nombre}" este mes?\n\nNo se marcará como pagado ni se modificará la liquidez. Simplemente dejará de aparecer en pendientes.`,
+      [
+        { text: 'Cancelar', style: 'cancel' },
+        {
+          text: 'Omitir',
+          style: 'default',
+          onPress: () => void handleOmitirGestionable(gasto),
+        },
+      ]
+    );
+  };
+
+  const handleDeshacerOmisionGestionable = async (gasto: Gasto) => {
+    try {
+      await deshacerOmisionGastoEsteMes(gasto.id);
+      await reload();
+      await Promise.all([reloadPendientes(), fetchIngresosPendientesCount()]);
+    } catch (err) {
+      console.error('Error al deshacer omisión', err);
+      Alert.alert('Error', 'No se ha podido deshacer la omisión.');
+    }
+  };
+
+  const confirmarDeshacerOmisionGestionable = (gasto: Gasto) => {
+    Alert.alert(
+      'Deshacer omisión',
+      `¿Quieres volver a incluir "${gasto.nombre}" en pendientes este mes?`,
+      [
+        { text: 'Cancelar', style: 'cancel' },
+        {
+          text: 'Deshacer omisión',
+          style: 'default',
+          onPress: () => void handleDeshacerOmisionGestionable(gasto),
+        },
+      ]
+    );
   };
 
   // ======= ActionSheet helpers =======
@@ -863,6 +970,7 @@ export const GastosListScreen: React.FC<{ navigation: any; route: any }> = ({
     const gris = colors.actionNeutral;
     const azul = colors.actionInfo;
 
+    // ✅ PAGAR
     if (!gasto.pagado) {
       acciones.push({
         label: 'Marcar como pagado',
@@ -873,6 +981,33 @@ export const GastosListScreen: React.FC<{ navigation: any; route: any }> = ({
         iconName: 'checkmark-circle-outline',
         color: verde,
       });
+    }
+
+    // ✅ NUEVO: OMITIR / DESHACER OMISIÓN (solo gestionables)
+    // - Si pagado=true no permitimos omitir (backend devolverá 409, pero evitamos en UI).
+    // - Si omitido_este_mes=true mostramos "Deshacer omisión"
+    if (!gasto.pagado) {
+      if (gasto.omitido_este_mes === true) {
+        acciones.push({
+          label: 'Deshacer omisión',
+          onPress: () => {
+            setSheetVisible(false);
+            confirmarDeshacerOmisionGestionable(gasto);
+          },
+          iconName: 'arrow-undo-outline',
+          color: azul,
+        });
+      } else {
+        acciones.push({
+          label: 'Omitir este mes',
+          onPress: () => {
+            setSheetVisible(false);
+            confirmarOmitirGestionable(gasto);
+          },
+          iconName: 'ban-outline',
+          color: azul,
+        });
+      }
     }
 
     acciones.push({
@@ -918,7 +1053,6 @@ export const GastosListScreen: React.FC<{ navigation: any; route: any }> = ({
                 await eliminarGasto(gasto.id);
                 setSheetVisible(false);
                 await reload();
-                // ✅ NUEVO: tras cambios, refrescamos pending counts
                 await Promise.all([reloadPendientes(), fetchIngresosPendientesCount()]);
               } catch (err) {
                 console.error('Error al eliminar gasto', err);
@@ -977,7 +1111,6 @@ export const GastosListScreen: React.FC<{ navigation: any; route: any }> = ({
                 await eliminarGastoCotidiano(gasto.id);
                 setSheetVisible(false);
                 await cargarGastosCotidianos();
-                // ✅ NUEVO: tras cambios, refrescamos pending counts
                 await Promise.all([reloadPendientes(), fetchIngresosPendientesCount()]);
               } catch (err) {
                 console.error('Error al eliminar gasto cotidiano', err);
@@ -1018,6 +1151,11 @@ export const GastosListScreen: React.FC<{ navigation: any; route: any }> = ({
     const hasKpiSiData = statsKpi.si > 0;
     const hasKpiNoData = statsKpi.no > 0;
     const hasAnyKpiData = statsKpi.todos > 0;
+
+    // ✅ NUEVO: stats omisión
+    const hasOmitidosData = statsOmitido.omitidos > 0;
+    const hasNoOmitidosData = statsOmitido.no_omitidos > 0;
+    const hasAnyOmitidoData = statsOmitido.todos > 0;
 
     return (
       <View style={styles.searchPanel}>
@@ -1260,6 +1398,67 @@ export const GastosListScreen: React.FC<{ navigation: any; route: any }> = ({
                 selected={filtroPagado === 'no_pagado'}
                 disabled={disableByPendientes || !hasNoPagadoData}
                 onPress={() => setFiltroPagado('no_pagado')}
+                style={styles.filterPill}
+              />
+            </View>
+          </View>
+        )}
+
+        {/* ✅ NUEVO: OMISIÓN (PLEGABLE) */}
+        <View
+          style={{
+            flexDirection: 'row',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+            marginTop: 12,
+          }}
+        >
+          <Text style={styles.searchLabel}>Omisión</Text>
+          <TouchableOpacity
+            onPress={() => setShowOmitidoFilter((prev) => !prev)}
+            style={{ flexDirection: 'row', alignItems: 'center' }}
+          >
+            <Ionicons
+              name={showOmitidoFilter ? 'remove-circle-outline' : 'add-circle-outline'}
+              size={16}
+              color={colors.textSecondary}
+              style={{ marginRight: 4 }}
+            />
+            <Text style={{ color: colors.textSecondary, fontSize: 12 }}>
+              {showOmitidoFilter ? 'Ocultar' : 'Mostrar'}
+            </Text>
+          </TouchableOpacity>
+        </View>
+
+        {showOmitidoFilter && (
+          <View style={styles.pillsRow}>
+            <View style={styles.pillWrapper}>
+              <FilterPill
+                label="Todos"
+                selected={filtroOmitido === 'todos'}
+                disabled={disableByPendientes || !hasAnyOmitidoData}
+                onPress={() => setFiltroOmitido('todos')}
+                style={styles.filterPill}
+              />
+            </View>
+
+            <View style={styles.pillWrapper}>
+              <FilterPill
+                label="Omitidos"
+                selected={filtroOmitido === 'omitidos'}
+                // En "Pendientes" no aplica: backend excluye omitidos
+                disabled={disableByPendientes || !hasOmitidosData}
+                onPress={() => setFiltroOmitido('omitidos')}
+                style={styles.filterPill}
+              />
+            </View>
+
+            <View style={styles.pillWrapper}>
+              <FilterPill
+                label="No omitidos"
+                selected={filtroOmitido === 'no_omitidos'}
+                disabled={disableByPendientes || !hasNoOmitidosData}
+                onPress={() => setFiltroOmitido('no_omitidos')}
                 style={styles.filterPill}
               />
             </View>
@@ -1636,6 +1835,9 @@ export const GastosListScreen: React.FC<{ navigation: any; route: any }> = ({
    * En "Pendientes" hay filtros fijados automáticamente (activo/no_pagado/kpi).
    * Para el "estado vacío inteligente" NO queremos considerar esos como filtros activos.
    * Solo cuentan como filtros activos: búsqueda, segmento, tipo y periodicidad.
+   *
+   * Nota:
+   * - El filtro de omisión no cuenta aquí porque en "Pendientes" no aplica (backend ya excluye omitidos).
    */
   const isDefaultPendientesGestionablesFilters = useMemo(() => {
     const hasSearch = searchText.trim().length > 0;
@@ -1695,7 +1897,6 @@ export const GastosListScreen: React.FC<{ navigation: any; route: any }> = ({
     },
     []
   );
-
 
   // ======= Contenido principal (lista) =======
   const renderContenido = () => {
@@ -1857,21 +2058,28 @@ export const GastosListScreen: React.FC<{ navigation: any; route: any }> = ({
         showsVerticalScrollIndicator={false}
         refreshControl={<RefreshControl refreshing={refreshing} onRefresh={handleRefresh} />}
       >
-        {lista.map((gasto) => (
-          <ExpenseCard
-            key={gasto.id}
-            title={gasto.nombre}
-            category={getCategoriaTextoGestionable(gasto)}
-            dateLabel={formatFechaRangoGestionable(gasto)}
-            amountLabel={formatImporteNegativo(gasto.importe)}
-            segmentoId={gasto.segmento_id}
-            inactive={gasto.activo === false}
-            onOptionsPress={() => abrirMenuGestionable(gasto)}
-            onPress={() => navigation.navigate('GastoGestionableForm', { gasto, readOnly: true })}
-            actionIconName={gasto.pagado ? 'checkmark-done-outline' : 'cash-outline'}
-            onActionPress={gasto.pagado ? undefined : () => confirmarMarcarPagadoGestionable(gasto)}
-          />
-        ))}
+        {lista.map((gasto) => {
+          // ✅ NUEVO: etiqueta ligera en fecha si omitido (sin tocar ExpenseCard)
+          const dateLabel = gasto.omitido_este_mes
+            ? `${formatFechaRangoGestionable(gasto)} · Omitido este mes`
+            : formatFechaRangoGestionable(gasto);
+
+          return (
+            <ExpenseCard
+              key={gasto.id}
+              title={gasto.nombre}
+              category={getCategoriaTextoGestionable(gasto)}
+              dateLabel={dateLabel}
+              amountLabel={formatImporteNegativo(gasto.importe)}
+              segmentoId={gasto.segmento_id}
+              inactive={gasto.activo === false}
+              onOptionsPress={() => abrirMenuGestionable(gasto)}
+              onPress={() => navigation.navigate('GastoGestionableForm', { gasto, readOnly: true })}
+              actionIconName={gasto.pagado ? 'checkmark-done-outline' : 'cash-outline'}
+              onActionPress={gasto.pagado ? undefined : () => confirmarMarcarPagadoGestionable(gasto)}
+            />
+          );
+        })}
       </ScrollView>
     );
   };
