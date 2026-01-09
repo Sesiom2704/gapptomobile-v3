@@ -5,15 +5,27 @@
 // OBJETIVO (actualizado):
 // - Reutiliza GET /api/v1/analytics/day-to-day (getDayToDayAnalysis)
 // - Muestra KPIs extra + gráficas (7 días, diaria del mes, evolución mensual)
-// - Usa InfoButton/InfoModal en KPIs y secciones para explicar significado
+// - Selector de MES (flechas) para consultar meses anteriores (por defecto mes actual)
+// - “Ranking por contenedores” arriba: Top 3 + desplegable + TODOS (por defecto)
+// - Al seleccionar contenedor: filtra por ese contenedor y muestra subcategorías como botones
+// - Elimina filtros de “Contenedores” y “Subgasto” del panel de filtros (pasan al ranking)
+// - Todas las gráficas muestran tooltip al tocar punto/barra
 //
-// IMPORTANTE:
-// - Mantiene funcionalidades existentes.
-// - Los campos nuevos (serie_diaria_mes, serie_mensual, kpis_evolucion) son opcionales.
-//   Si backend aún no está desplegado, la pantalla no falla: simplemente no pinta esas secciones.
+// AJUSTES (según tu feedback final):
+// 1) Flechas mes: solo iconos (sin “mes anterior/siguiente”)
+// 2) Filtros: todos los labels en MAYÚSCULAS
+// 3) Subcategorías: MAYÚSCULAS, una sola fila (horizontal), botones tamaño igual,
+//    y “TODOS” en vez de “Todos los tipos”
+// 4) Tooltip:
+//    - Se auto-oculta (timeout) y se oculta al empezar a hacer scroll.
+//    - En barras: fallback por coordenadas (no dependemos de onDataPointClick typings/eventos).
+//
+// FIX TIPADO TS (react-native-chart-kit):
+// - BarChartProps no expone onDataPointClick en los typings; TypeScript falla.
+// - Se usa alias BarChartAny: any (y además se implementa fallback de touch por coordenadas).
 // -----------------------------------------------------------------------------
 
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   View,
   Text,
@@ -22,6 +34,8 @@ import {
   TouchableOpacity,
   ActivityIndicator,
   Dimensions,
+  Pressable,
+  GestureResponderEvent,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { LineChart, BarChart } from 'react-native-chart-kit';
@@ -64,33 +78,34 @@ type SubtipoOption = {
 
 // Contenedores principales (categorías de análisis)
 const CATEGORY_OPTIONS = [
-  { key: 'SUPERMERCADOS', label: 'Supermercados' },
-  { key: 'SUMINISTROS', label: 'Suministros' },
-  { key: 'VEHICULOS', label: 'Vehículos' },
-  { key: 'ROPA', label: 'Ropa' },
-  { key: 'RESTURACION', label: 'Restauración' }, // (ojo: en backend tu comentario pone RESTURACION; mantenemos tal cual)
-  { key: 'OCIO', label: 'Ocio' },
+  { key: 'SUPERMERCADOS', label: 'SUPERMERCADOS' },
+  { key: 'SUMINISTROS', label: 'SUMINISTROS' },
+  { key: 'VEHICULOS', label: 'VEHÍCULOS' },
+  { key: 'ROPA', label: 'ROPA' },
+  { key: 'RESTAURACION', label: 'RESTAURACIÓN' },
+  { key: 'OCIO', label: 'OCIO' },
 ] as const;
 
 type CategoryOption = (typeof CATEGORY_OPTIONS)[number];
 
-// Mapa de subgastos por categoría (reutilizado del screen de Analysis)
+// Mapa de subgastos por categoría
+// (ajuste: la opción null será "TODOS")
 const SUBTIPOS_POR_CATEGORIA: Record<string, SubtipoOption[]> = {
-  SUPERMERCADOS: [{ id: null, label: 'Todos los tipos' }],
-  SUMINISTROS: [{ id: null, label: 'Todos los tipos' }],
+  SUPERMERCADOS: [{ id: null, label: 'TODOS' }],
+  SUMINISTROS: [{ id: null, label: 'TODOS' }],
   VEHICULOS: [
-    { id: null, label: 'Todos los tipos' },
-    { id: 'TIP-GASOLINA-SW1ZQO', label: 'Combustible' },
-    { id: 'PEA-TIPOGASTO-7HDY89', label: 'Peajes' },
-    { id: 'MAV-TIPOGASTO-BVC356', label: 'Mantenimiento' },
+    { id: null, label: 'TODOS' },
+    { id: 'TIP-GASOLINA-SW1ZQO', label: 'COMBUSTIBLE' },
+    { id: 'PEA-TIPOGASTO-7HDY89', label: 'PEAJES' },
+    { id: 'MAV-TIPOGASTO-BVC356', label: 'MANTENIMIENTO' },
   ],
-  ROPA: [{ id: null, label: 'Todos los tipos' }],
-  RESTURACION: [{ id: null, label: 'Todos los tipos' }],
+  ROPA: [{ id: null, label: 'TODOS' }],
+  RESTAURACION: [{ id: null, label: 'TODOS' }],
   OCIO: [
-    { id: null, label: 'Todos los tipos' },
-    { id: 'TRA-TIPOGASTO-RB133Z', label: 'Transporte' },
-    { id: 'HOS-TIPOGASTO-357FDG', label: 'Hospedaje' },
-    { id: 'ACT-TIPOGASTO-2X9H1Q', label: 'Actividades' },
+    { id: null, label: 'TODOS' },
+    { id: 'TRA-TIPOGASTO-RB133Z', label: 'TRANSPORTE' },
+    { id: 'HOS-TIPOGASTO-357FDG', label: 'HOSPEDAJE' },
+    { id: 'ACT-TIPOGASTO-2X9H1Q', label: 'ACTIVIDADES' },
   ],
 };
 
@@ -122,30 +137,51 @@ function fmtPct(n: number | undefined | null) {
   return `${sign}${v.toFixed(1)}%`;
 }
 
-// Convierte últimos 7 días en arrays para charts (labels + values)
 function normalizeLast7(ultimos7: Last7DayItem[]) {
   const labels = ultimos7.map((x) => String(x.label ?? ''));
   const values = ultimos7.map((x) => safeNum(x.importe));
   return { labels, values };
 }
 
-// ✅ Serie diaria del mes: labels compactos (1..31)
 function normalizeDailyMonthSeries(items: DailySeriesItem[]) {
   const labels = items.map((x) => String(x.dia));
   const values = items.map((x) => safeNum(x.importe));
   return { labels, values };
 }
 
-// ✅ Serie mensual: labels "MM" (o "YYYY-MM" si prefieres)
 function normalizeMonthlySeries(items: MonthlySeriesItem[]) {
-  const labels = items.map((x) => {
-    // mostramos solo mes para no saturar: "01", "02", ...
-    const mm = String(x.month).padStart(2, '0');
-    return mm;
-  });
+  const labels = items.map((x) => String(x.month).padStart(2, '0'));
   const values = items.map((x) => safeNum(x.importe));
   const fullLabels = items.map((x) => x.label);
   return { labels, values, fullLabels };
+}
+
+// Meses (sin librerías externas)
+function startOfMonth(d: Date) {
+  return new Date(d.getFullYear(), d.getMonth(), 1);
+}
+function addMonths(d: Date, delta: number) {
+  return new Date(d.getFullYear(), d.getMonth() + delta, 1);
+}
+function toYYYYMM01(d: Date) {
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  return `${y}-${m}-01`;
+}
+function monthLabelEsUpper(d: Date) {
+  try {
+    // "enero de 2026" -> "ENERO DE 2026"
+    return new Intl.DateTimeFormat('es-ES', { month: 'long', year: 'numeric' }).format(d).toUpperCase();
+  } catch {
+    const y = d.getFullYear();
+    const m = String(d.getMonth() + 1).padStart(2, '0');
+    return `${m}/${y}`.toUpperCase();
+  }
+}
+function isFutureMonth(d: Date) {
+  const now = startOfMonth(new Date());
+  const md = startOfMonth(d);
+  return md.getTime() > now.getTime();
 }
 
 // --------------------
@@ -155,14 +191,15 @@ function normalizeMonthlySeries(items: MonthlySeriesItem[]) {
 type DayToDayKpisRouteParams = {
   fromHome?: boolean;
 
-  // Opcional: si vienes desde Analysis, puedes “arrastrar” el filtro ya seleccionado
   pago?: PagoFiltro;
   view?: 'GENERAL' | 'CATEGORIA';
   categoria?: string | null;
   tipoId?: string | null;
 
-  // ✅ opcional: ventana inicial para meses
   monthsBack?: number;
+
+  returnToTab?: string;
+  returnToScreen?: string;
 };
 
 // --------------------
@@ -172,8 +209,8 @@ const chartConfig: any = {
   backgroundGradientFrom: colors.surface,
   backgroundGradientTo: colors.surface,
   decimalPlaces: 0,
-  color: (opacity = 1) => `rgba(42, 158, 159, ${opacity})`, // primary
-  labelColor: (opacity = 1) => `rgba(107, 114, 128, ${opacity})`, // textSecondary
+  color: (opacity = 1) => `rgba(42, 158, 159, ${opacity})`,
+  labelColor: (opacity = 1) => `rgba(107, 114, 128, ${opacity})`,
   propsForDots: {
     r: '4',
     strokeWidth: '2',
@@ -181,7 +218,10 @@ const chartConfig: any = {
   },
 };
 
-type TrendTooltip = {
+// FIX TIPADO: BarChartProps no declara onDataPointClick en typings
+const BarChartAny: any = BarChart;
+
+type ChartTooltip = {
   visible: boolean;
   x: number;
   y: number;
@@ -197,24 +237,23 @@ export const DayToDayKpisScreen: React.FC = () => {
   const navigation = useNavigation<any>();
   const route = useRoute<any>();
 
-  // ✅ Info modal (global)
   const info = useInfoModal();
 
-  // Params (si vienes desde DayToDayAnalysis con preselección)
   const params = (route?.params ?? {}) as DayToDayKpisRouteParams;
   const fromHome = params.fromHome ?? false;
 
-  // Filtros (alineados con Analysis para consistencia)
+  // Filtros (panel)
   const [selectedView, setSelectedView] = useState<'GENERAL' | 'CATEGORIA'>(
     params.view ?? 'GENERAL'
   );
   const [filtrosAbiertos, setFiltrosAbiertos] = useState(false);
   const [pagoFiltro, setPagoFiltro] = useState<PagoFiltro>(params.pago ?? 'YO');
-
-  // ✅ Ventana para evolución mensual (months_back en backend)
   const [monthsBack, setMonthsBack] = useState<number>(params.monthsBack ?? 12);
 
-  // Categoría / subtipo
+  // Selector mes
+  const [selectedMonth, setSelectedMonth] = useState<Date>(() => startOfMonth(new Date()));
+
+  // Contenedor / Subtipo
   const [selectedCategoryKey, setSelectedCategoryKey] = useState<string | null>(
     params.categoria ?? null
   );
@@ -222,13 +261,16 @@ export const DayToDayKpisScreen: React.FC = () => {
     params.tipoId ?? null
   );
 
+  // Ranking desplegable
+  const [rankingExpanded, setRankingExpanded] = useState(false);
+
   // Data
   const [data, setData] = useState<DayToDayAnalysisResponse | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  // Tooltip chart
-  const [trendTip, setTrendTip] = useState<TrendTooltip>({
+  // Tooltip
+  const [chartTip, setChartTip] = useState<ChartTooltip>({
     visible: false,
     x: 0,
     y: 0,
@@ -236,19 +278,51 @@ export const DayToDayKpisScreen: React.FC = () => {
     value: 0,
   });
 
-  // Reset subtipo si cambia categoría
+  const tipTimerRef = useRef<any>(null);
+
+  const hideTooltip = useCallback(() => {
+    if (tipTimerRef.current) {
+      clearTimeout(tipTimerRef.current);
+      tipTimerRef.current = null;
+    }
+    setChartTip((t) => (t.visible ? { ...t, visible: false } : t));
+  }, []);
+
+  const showTooltip = useCallback(
+    (args: { value: number; x?: number; y?: number; label: string; width: number }) => {
+      const { value, x = 0, y = 0, label, width } = args;
+
+      // Toggle: si vuelves a tocar el mismo tooltip, se oculta.
+      setChartTip((prev) => {
+        const same = prev.visible && prev.label === label && Math.abs(prev.value - value) < 0.0001;
+        if (same) return { ...prev, visible: false };
+
+        const tipX = Math.max(8, Math.min(width - 160, Number(x) - 70));
+        const tipY = Math.max(8, Number(y) - 52);
+
+        return {
+          visible: true,
+          x: tipX,
+          y: tipY,
+          label,
+          value: Number.isFinite(value) ? value : 0,
+        };
+      });
+
+      // Auto-hide (evita “engancharse”)
+      if (tipTimerRef.current) clearTimeout(tipTimerRef.current);
+      tipTimerRef.current = setTimeout(() => {
+        setChartTip((t) => ({ ...t, visible: false }));
+        tipTimerRef.current = null;
+      }, 2500);
+    },
+    []
+  );
+
+  // Reset subtipo al cambiar contenedor
   useEffect(() => {
     setSelectedSubtipoId(null);
   }, [selectedCategoryKey]);
-
-  // Para dividir categorías en filas (3 columnas)
-  const categoryRows = useMemo<CategoryOption[][]>(() => {
-    const rows: CategoryOption[][] = [];
-    for (let i = 0; i < CATEGORY_OPTIONS.length; i += 3) {
-      rows.push(CATEGORY_OPTIONS.slice(i, i + 3) as unknown as CategoryOption[]);
-    }
-    return rows;
-  }, []);
 
   // --------------------
   // Carga de datos
@@ -257,14 +331,14 @@ export const DayToDayKpisScreen: React.FC = () => {
     try {
       setLoading(true);
       setError(null);
-      setTrendTip((t) => ({ ...t, visible: false }));
+      hideTooltip();
 
       const req: any = {
         pago: pagoFiltro,
-        monthsBack, // ✅ frontend -> backend via analyticsApi (monthsBack -> months_back)
+        monthsBack,
+        fecha: toYYYYMM01(selectedMonth),
       };
 
-      // En modo categoría: aplicamos (tipoId) o (categoria)
       if (selectedView === 'CATEGORIA') {
         if (selectedSubtipoId) req.tipoId = selectedSubtipoId;
         else if (selectedCategoryKey) req.categoria = selectedCategoryKey;
@@ -272,11 +346,6 @@ export const DayToDayKpisScreen: React.FC = () => {
 
       const resp = await getDayToDayAnalysis(req);
       setData(resp);
-
-      // Si no hay categoría seleccionada y hay categorías, fijamos la primera (consistente con Analysis)
-      if (!selectedCategoryKey && resp.categorias_mes?.length) {
-        setSelectedCategoryKey(resp.categorias_mes[0].key);
-      }
     } catch (e) {
       console.log('[DayToDayKpisScreen] Error cargando KPIs día a día', e);
       setError('No se han podido cargar los KPIs día a día.');
@@ -284,54 +353,99 @@ export const DayToDayKpisScreen: React.FC = () => {
     } finally {
       setLoading(false);
     }
-  }, [pagoFiltro, selectedView, selectedCategoryKey, selectedSubtipoId, monthsBack]);
+  }, [pagoFiltro, selectedView, selectedCategoryKey, selectedSubtipoId, monthsBack, selectedMonth, hideTooltip]);
 
   useEffect(() => {
     fetchData();
   }, [fetchData]);
 
   // --------------------
-  // Derivados de datos
+  // Derivados
   // --------------------
-  const today = data?.today;
   const week = data?.week;
-  const month = data?.month;
 
   const categoriasMes = data?.categorias_mes ?? [];
   const ultimos7Dias: Last7DayItem[] = data?.ultimos_7_dias ?? [];
   const categoryKpis = data?.category_kpis ?? {};
 
-  // ✅ Nuevos datos (si backend los trae)
-  const serieDiariaMes: DailySeriesItem[] = data?.serie_diaria_mes ?? [];
-  const serieMensual: MonthlySeriesItem[] = data?.serie_mensual ?? [];
+  const serieDiariaMes: DailySeriesItem[] = (data?.serie_diaria_mes ?? []) as any;
+  const serieMensual: MonthlySeriesItem[] = (data?.serie_mensual ?? []) as any;
   const kpisEvolucion: EvolutionKpis | null = (data?.kpis_evolucion ?? null) as any;
 
   const hasMonthlyCharts = Boolean(serieDiariaMes?.length || serieMensual?.length);
 
+  // Ranking completo: CATEGORY_OPTIONS + importes de backend (0 si no hay)
+  const fullCategoryRanking = useMemo(() => {
+    const byKey = new Map<string, { key: string; label: string; importe: number; porcentaje?: number }>();
+    categoriasMes.forEach((c) => {
+      byKey.set(c.key, {
+        key: c.key,
+        label: String(c.label ?? '').toUpperCase(),
+        importe: safeNum(c.importe),
+        porcentaje: safeNum((c as any).porcentaje),
+      });
+    });
+
+    const merged = CATEGORY_OPTIONS.map((opt) => {
+      const found = byKey.get(opt.key);
+      return {
+        key: opt.key,
+        // UI en MAYÚSCULAS
+        label: (found?.label ?? opt.label).toUpperCase(),
+        importe: found ? safeNum(found.importe) : 0,
+        porcentaje: found ? safeNum(found.porcentaje) : 0,
+      };
+    });
+
+    merged.sort((a, b) => {
+      const diff = safeNum(b.importe) - safeNum(a.importe);
+      if (Math.abs(diff) > 0.0001) return diff;
+      return String(a.label).localeCompare(String(b.label));
+    });
+
+    return merged;
+  }, [categoriasMes]);
+
+  const top3Categories = useMemo(() => fullCategoryRanking.slice(0, 3), [fullCategoryRanking]);
+
+  const maxRankImporte = useMemo(() => {
+    if (!fullCategoryRanking.length) return 1;
+    return Math.max(1, ...fullCategoryRanking.map((c) => safeNum(c.importe)));
+  }, [fullCategoryRanking]);
+
+  // Categoría efectiva (solo si hay selección real)
   const effectiveSelectedCategory = useMemo(() => {
-    if (!categoriasMes.length) return null;
-    const fromState =
-      selectedCategoryKey &&
-      categoriasMes.find((c) => c.key === selectedCategoryKey);
-    return fromState || categoriasMes[0];
-  }, [categoriasMes, selectedCategoryKey]);
+    if (!selectedCategoryKey) return null;
+    const inOptions = CATEGORY_OPTIONS.find((c) => c.key === selectedCategoryKey);
+    if (!inOptions) return null;
+
+    const backend = categoriasMes.find((c) => c.key === selectedCategoryKey);
+    const label = (backend?.label ?? inOptions.label ?? '').toString().toUpperCase();
+
+    return {
+      key: inOptions.key,
+      label,
+      importe: backend ? safeNum(backend.importe) : 0,
+      porcentaje: backend ? safeNum(backend.porcentaje) : 0,
+    };
+  }, [selectedCategoryKey, categoriasMes]);
 
   const subtipoOptions: SubtipoOption[] = useMemo(() => {
     if (!effectiveSelectedCategory) return [];
-    return SUBTIPOS_POR_CATEGORIA[effectiveSelectedCategory.key] ?? [];
+    const raw = SUBTIPOS_POR_CATEGORIA[effectiveSelectedCategory.key] ?? [];
+    // Garantía: MAYÚSCULAS
+    return raw.map((x) => ({ ...x, label: String(x.label ?? '').toUpperCase() }));
   }, [effectiveSelectedCategory]);
 
-  // KPIs extra basados en últimos 7 días
+  // KPIs 7 días
   const kpi7d = useMemo(() => {
     const vals = ultimos7Dias.map((d) => safeNum(d.importe));
     const n = vals.length;
     const sum = vals.reduce((a, b) => a + b, 0);
     const avg = n ? sum / n : 0;
 
-    // “Días sin gasto” (importe == 0)
     const zeroDays = vals.filter((x) => x <= 0).length;
 
-    // Máximo / mínimo
     let maxV = 0;
     let minV = n ? vals[0] : 0;
     let maxIdx = 0;
@@ -349,7 +463,6 @@ export const DayToDayKpisScreen: React.FC = () => {
       }
     }
 
-    // Volatilidad simple (desviación estándar)
     const variance =
       n > 1 ? vals.reduce((acc, v) => acc + Math.pow(v - avg, 2), 0) / n : 0;
     const std = Math.sqrt(Math.max(0, variance));
@@ -365,7 +478,7 @@ export const DayToDayKpisScreen: React.FC = () => {
     };
   }, [ultimos7Dias]);
 
-  // Concentración por categorías (mes): Top1 y Top3 sobre el gasto del mes
+  // Concentración
   const concentration = useMemo(() => {
     if (!categoriasMes.length) return { top1Pct: 0, top3Pct: 0, top1: null as any };
 
@@ -381,30 +494,17 @@ export const DayToDayKpisScreen: React.FC = () => {
     return { top1Pct, top3Pct, top1 };
   }, [categoriasMes]);
 
-  // Ranking categorías (mes)
-  const topCategorias = useMemo(() => {
-    const sorted = [...categoriasMes].sort((a, b) => safeNum(b.importe) - safeNum(a.importe));
-    return sorted.slice(0, 6);
-  }, [categoriasMes]);
-
-  const maxTopCat = useMemo(() => {
-    if (!topCategorias.length) return 1;
-    return Math.max(1, ...topCategorias.map((c) => safeNum(c.importe)));
-  }, [topCategorias]);
-
-  // Serie para chart: últimos 7
+  // Series charts
   const { labels: labels7, values: values7 } = useMemo(
     () => normalizeLast7(ultimos7Dias),
     [ultimos7Dias]
   );
 
-  // ✅ Serie para chart: diaria del mes
   const { labels: labelsMonthDays, values: valuesMonthDays } = useMemo(() => {
     if (!serieDiariaMes?.length) return { labels: [], values: [] };
     return normalizeDailyMonthSeries(serieDiariaMes);
   }, [serieDiariaMes]);
 
-  // ✅ Serie para chart: mensual (N meses)
   const { labels: labelsMonths, values: valuesMonths, fullLabels: fullMonthLabels } = useMemo(() => {
     if (!serieMensual?.length) return { labels: [], values: [], fullLabels: [] as string[] };
     return normalizeMonthlySeries(serieMensual);
@@ -415,14 +515,16 @@ export const DayToDayKpisScreen: React.FC = () => {
   const chartWidth = Math.max(360, width - 24);
   const chartHeight = 220;
 
-  // En modo categoría: KPI de la categoría seleccionada
+  const monthlyChartWidth = Math.max(chartWidth, labelsMonths.length * 36);
+
+  // KPIs contenedor
   const selectedCategoryKpis = useMemo(() => {
     if (!effectiveSelectedCategory) return null;
     return categoryKpis[effectiveSelectedCategory.key] ?? null;
   }, [effectiveSelectedCategory, categoryKpis]);
 
   // --------------------
-  // Header de sección (título + InfoButton)
+  // Section header
   // --------------------
   const SectionHeader = ({
     title,
@@ -440,6 +542,51 @@ export const DayToDayKpisScreen: React.FC = () => {
   };
 
   // --------------------
+  // Acciones selector contenedor
+  // --------------------
+  const selectAllContainers = useCallback(() => {
+    setSelectedCategoryKey(null);
+    setSelectedSubtipoId(null);
+    setSelectedView('GENERAL');
+  }, []);
+
+  const selectContainer = useCallback((key: string) => {
+    setSelectedCategoryKey(key);
+    setSelectedSubtipoId(null);
+    setSelectedView('CATEGORIA');
+  }, []);
+
+  // --------------------
+  // Fallback tap en barras por coordenadas
+  // (garantiza tooltip aunque BarChart no emita onDataPointClick)
+  // --------------------
+  const onMonthlyChartTap = useCallback(
+    (evt: GestureResponderEvent) => {
+      if (!labelsMonths.length) return;
+
+      const { locationX, locationY } = evt.nativeEvent;
+
+      // Área útil aproximada: usamos todo el ancho del chart.
+      // Índice proporcional (robusto y suficiente para uso “tap para ver importe”)
+      const n = labelsMonths.length;
+      const x = Math.max(0, Math.min(monthlyChartWidth, locationX));
+      const idx = Math.max(0, Math.min(n - 1, Math.floor((x / monthlyChartWidth) * n)));
+
+      const val = valuesMonths[idx] ?? 0;
+      const full = fullMonthLabels[idx] ?? labelsMonths[idx] ?? '';
+
+      showTooltip({
+        value: Number(val ?? 0),
+        x: locationX,
+        y: locationY,
+        label: full ? `MES ${String(full).toUpperCase()}` : 'MES',
+        width: monthlyChartWidth,
+      });
+    },
+    [labelsMonths.length, monthlyChartWidth, valuesMonths, fullMonthLabels, labelsMonths, showTooltip]
+  );
+
+  // --------------------
   // Render
   // --------------------
   return (
@@ -449,14 +596,56 @@ export const DayToDayKpisScreen: React.FC = () => {
         subtitle="Evolución y métricas avanzadas para profundizar en tus gastos cotidianos."
         showBack
         onBackPress={() => {
-          if (fromHome) navigation.navigate('HomeTab');
-          else navigation.goBack();
+          // Volver SIEMPRE a DayToDayAnalysisScreen
+          navigation.navigate('DayToDayTab', {
+            screen: 'DayToDayAnalysisScreen',
+            params: {
+              fromHome,
+              returnToTab: params.returnToTab,
+              returnToScreen: params.returnToScreen,
+            },
+          });
         }}
       />
 
       <View style={panelStyles.screen}>
-        <ScrollView contentContainerStyle={panelStyles.scrollContent}>
-          {/* FILTROS (DESPLEGABLE) */}
+        <ScrollView
+          contentContainerStyle={panelStyles.scrollContent}
+          onScrollBeginDrag={hideTooltip}
+          keyboardShouldPersistTaps="handled"
+        >
+          {/* Selector MES (solo flechas) */}
+          <View style={panelStyles.section}>
+            <View style={panelStyles.card}>
+              <View style={styles.monthRow}>
+                <TouchableOpacity
+                  activeOpacity={0.85}
+                  style={styles.monthIconBtn}
+                  onPress={() => setSelectedMonth((prev) => addMonths(prev, -1))}
+                >
+                  <Ionicons name="chevron-back" size={18} color={colors.textSecondary} />
+                </TouchableOpacity>
+
+                <View style={styles.monthCenter}>
+                  <Text style={styles.monthTitle}>{monthLabelEsUpper(selectedMonth)}</Text>
+                  <Text style={styles.monthHint}>
+                    Se aplica a ranking, concentración y serie diaria del mes.
+                  </Text>
+                </View>
+
+                <TouchableOpacity
+                  activeOpacity={0.85}
+                  style={[styles.monthIconBtn, isFutureMonth(addMonths(selectedMonth, 1)) && styles.monthBtnDisabled]}
+                  disabled={isFutureMonth(addMonths(selectedMonth, 1))}
+                  onPress={() => setSelectedMonth((prev) => addMonths(prev, +1))}
+                >
+                  <Ionicons name="chevron-forward" size={18} color={colors.textSecondary} />
+                </TouchableOpacity>
+              </View>
+            </View>
+          </View>
+
+          {/* FILTROS (DESPLEGABLE) — sin Contenedores/Subgasto */}
           <View style={panelStyles.section}>
             <TouchableOpacity
               style={analysisStyles.filterToggle}
@@ -471,19 +660,19 @@ export const DayToDayKpisScreen: React.FC = () => {
                   style={{ marginRight: 8 }}
                 />
                 <Text style={analysisStyles.filterToggleText}>
-                  {filtrosAbiertos ? 'Ocultar filtros' : 'Mostrar filtros'}
+                  {filtrosAbiertos ? 'OCULTAR FILTROS' : 'MOSTRAR FILTROS'}
                 </Text>
               </View>
             </TouchableOpacity>
 
             {filtrosAbiertos && (
               <View style={analysisStyles.filterContent}>
-                <Text style={analysisStyles.filterLabel}>Modo</Text>
+                <Text style={analysisStyles.filterLabel}>MODO</Text>
                 <FilterRow columns={2}>
                   {(['GENERAL', 'CATEGORIA'] as const).map((vista) => (
                     <FilterPill
                       key={vista}
-                      label={vista === 'GENERAL' ? 'General' : 'Por categoría'}
+                      label={vista === 'GENERAL' ? 'GENERAL' : 'POR CONTENEDOR'}
                       selected={selectedView === vista}
                       onPress={() => setSelectedView(vista)}
                     />
@@ -491,86 +680,30 @@ export const DayToDayKpisScreen: React.FC = () => {
                 </FilterRow>
 
                 <Text style={analysisStyles.filterHelper}>
-                  En “General” ves KPIs globales. En “Por categoría” profundizas en un contenedor (y opcionalmente
-                  un subgasto) para obtener métricas más específicas.
+                  EN “GENERAL” VES KPIS GLOBALES. EN “POR CONTENEDOR” PROFUNDIZAS EN UN CONTENEDOR (Y OPCIONALMENTE UN
+                  SUBGASTO) DESDE EL RANKING SUPERIOR.
                 </Text>
 
                 <View style={{ marginTop: 12 }}>
-                  <Text style={analysisStyles.filterLabel}>Quién paga</Text>
+                  <Text style={analysisStyles.filterLabel}>QUIÉN PAGA</Text>
                   <FilterRow columns={3}>
-                    <FilterPill
-                      label="Todos"
-                      selected={pagoFiltro === 'TODOS'}
-                      onPress={() => setPagoFiltro('TODOS')}
-                    />
-                    <FilterPill
-                      label="Pagados por mi"
-                      selected={pagoFiltro === 'YO'}
-                      onPress={() => setPagoFiltro('YO')}
-                    />
-                    <FilterPill
-                      label="Lo paga otro"
-                      selected={pagoFiltro === 'OTRO'}
-                      onPress={() => setPagoFiltro('OTRO')}
-                    />
+                    <FilterPill label="TODOS" selected={pagoFiltro === 'TODOS'} onPress={() => setPagoFiltro('TODOS')} />
+                    <FilterPill label="PAGADOS POR MI" selected={pagoFiltro === 'YO'} onPress={() => setPagoFiltro('YO')} />
+                    <FilterPill label="LO PAGA OTRO" selected={pagoFiltro === 'OTRO'} onPress={() => setPagoFiltro('OTRO')} />
                   </FilterRow>
                 </View>
 
-                {/* ✅ Ventana mensual (months_back) */}
                 <View style={{ marginTop: 12 }}>
-                  <Text style={analysisStyles.filterLabel}>Ventana evolución (meses)</Text>
+                  <Text style={analysisStyles.filterLabel}>VENTANA EVOLUCIÓN (MESES)</Text>
                   <FilterRow columns={3}>
                     {[6, 12, 18].map((m) => (
-                      <FilterPill
-                        key={m}
-                        label={`${m}M`}
-                        selected={monthsBack === m}
-                        onPress={() => setMonthsBack(m)}
-                      />
+                      <FilterPill key={m} label={`${m}M`} selected={monthsBack === m} onPress={() => setMonthsBack(m)} />
                     ))}
                   </FilterRow>
                   <Text style={analysisStyles.filterHelper}>
-                    Afecta a la evolución mensual (serie de meses y KPIs de tendencia).
+                    AFECTA A LA EVOLUCIÓN MENSUAL (SERIE DE MESES Y KPIS DE TENDENCIA).
                   </Text>
                 </View>
-
-                {selectedView === 'CATEGORIA' && (
-                  <View style={{ marginTop: 12 }}>
-                    <Text style={analysisStyles.filterLabel}>Contenedores</Text>
-                    {categoryRows.map((row, idx) => (
-                      <FilterRow key={idx} columns={3}>
-                        {row.map((cat) => (
-                          <FilterPill
-                            key={cat.key}
-                            label={cat.label}
-                            selected={selectedCategoryKey === cat.key}
-                            onPress={() => setSelectedCategoryKey(cat.key)}
-                          />
-                        ))}
-                      </FilterRow>
-                    ))}
-
-                    {/* Subtipo (si existe) */}
-                    {effectiveSelectedCategory && (
-                      <View style={{ marginTop: 10 }}>
-                        <Text style={analysisStyles.filterLabel}>Subgasto</Text>
-                        <View style={analysisStyles.filterRowWrap}>
-                          {subtipoOptions.map((opt) => (
-                            <FilterPill
-                              key={opt.id ?? 'ALL'}
-                              label={opt.label}
-                              selected={selectedSubtipoId === opt.id}
-                              onPress={() => setSelectedSubtipoId(opt.id)}
-                            />
-                          ))}
-                        </View>
-                        <Text style={analysisStyles.filterHelper}>
-                          Si no seleccionas subgasto, las métricas se calculan sobre el contenedor completo.
-                        </Text>
-                      </View>
-                    )}
-                  </View>
-                )}
               </View>
             )}
           </View>
@@ -588,7 +721,7 @@ export const DayToDayKpisScreen: React.FC = () => {
               <View style={[panelStyles.card, { alignItems: 'center' }]}>
                 <ActivityIndicator size="small" color={colors.primary} />
                 <Text style={{ marginTop: 8, fontSize: 12, color: colors.textSecondary }}>
-                  Cargando KPIs...
+                  CARGANDO KPIS...
                 </Text>
               </View>
             </View>
@@ -597,14 +730,159 @@ export const DayToDayKpisScreen: React.FC = () => {
           {/* CONTENIDO */}
           {data && (
             <>
-              {/* Resumen (mini-cards) */}
+              {/* Ranking / Selector contenedor (ARRIBA) */}
               <View style={panelStyles.section}>
                 <SectionHeader
-                  title="Resumen avanzado"
+                  title="RANKING POR CONTENEDORES (MES)"
                   onInfo={() =>
                     info.open(
-                      'Resumen avanzado',
-                      'KPIs adicionales para entender el “ritmo” y la estabilidad de tu gasto: medias, máximos/mínimos y concentración por categorías.'
+                      'RANKING POR CONTENEDORES',
+                      'SELECTOR PRINCIPAL DE CONTENEDOR. POR DEFECTO “TODOS”. SE MUESTRA TOP 3 Y PUEDES DESPLEGAR PARA VER TODOS (INCLUYENDO LOS QUE NO TIENEN GASTO). AL SELECCIONAR UN CONTENEDOR, APARECEN DEBAJO SUS SUBCATEGORÍAS COMO BOTONES.'
+                    )
+                  }
+                />
+
+                <View style={panelStyles.card}>
+                  <View style={styles.rankHeaderRow}>
+                    <Text style={analysisStyles.cardSubtitle}>
+                      {(rankingExpanded ? 'TODOS LOS CONTENEDORES' : 'TOP 3 CONTENEDORES')}
+                    </Text>
+
+                    <TouchableOpacity
+                      activeOpacity={0.85}
+                      onPress={() => setRankingExpanded((p) => !p)}
+                      style={styles.rankExpandBtn}
+                    >
+                      <Text style={styles.rankExpandText}>
+                        {rankingExpanded ? 'VER MENOS' : 'VER TODOS'}
+                      </Text>
+                      <Ionicons
+                        name={rankingExpanded ? 'chevron-up' : 'chevron-down'}
+                        size={16}
+                        color={colors.textSecondary}
+                      />
+                    </TouchableOpacity>
+                  </View>
+
+                  {(rankingExpanded ? fullCategoryRanking : top3Categories).map((cat) => {
+                    const pct = maxRankImporte ? (safeNum(cat.importe) / maxRankImporte) * 100 : 0;
+                    const isSelected = selectedView === 'CATEGORIA' && cat.key === selectedCategoryKey;
+
+                    return (
+                      <TouchableOpacity
+                        key={cat.key}
+                        activeOpacity={0.85}
+                        onPress={() => selectContainer(cat.key)}
+                        style={[styles.rankRow, isSelected && styles.rankRowSelected]}
+                      >
+                        <View style={styles.rankLeft}>
+                          <View style={[styles.rankDot, isSelected && styles.rankDotSelected]} />
+                          <View style={{ flex: 1 }}>
+                            <Text style={[styles.rankLabel, isSelected && styles.rankLabelSelected]}>
+                              {cat.label}
+                            </Text>
+                            <Text style={styles.rankSub}>{fmtCurrency(cat.importe)}</Text>
+                          </View>
+                        </View>
+
+                        <View style={styles.rankRight}>
+                          <Text style={[styles.rankValue, isSelected && styles.rankValueSelected]}>
+                            {safeNum(cat.porcentaje) ? `${safeNum(cat.porcentaje).toFixed(1)}%` : '—'}
+                          </Text>
+                          <View style={styles.rankBarBg}>
+                            <View style={[styles.rankBarFill, { width: `${Math.min(100, pct)}%` }]} />
+                          </View>
+                        </View>
+                      </TouchableOpacity>
+                    );
+                  })}
+
+                  {/* TODOS */}
+                  <TouchableOpacity
+                    activeOpacity={0.85}
+                    onPress={selectAllContainers}
+                    style={[
+                      styles.allRow,
+                      selectedView === 'GENERAL' && !selectedCategoryKey ? styles.allRowSelected : null,
+                    ]}
+                  >
+                    <View style={styles.allLeft}>
+                      <Ionicons
+                        name={selectedView === 'GENERAL' && !selectedCategoryKey ? 'checkmark-circle' : 'ellipse-outline'}
+                        size={18}
+                        color={selectedView === 'GENERAL' && !selectedCategoryKey ? colors.primary : colors.textSecondary}
+                      />
+                      <Text
+                        style={[
+                          styles.allLabel,
+                          selectedView === 'GENERAL' && !selectedCategoryKey ? styles.allLabelSelected : null,
+                        ]}
+                      >
+                        TODOS
+                      </Text>
+                    </View>
+                    <Text style={styles.allHint}>SIN FILTRO DE CONTENEDOR</Text>
+                  </TouchableOpacity>
+
+                  {/* Subcategorías (una sola fila, botones iguales) */}
+                  {selectedView === 'CATEGORIA' && effectiveSelectedCategory && (
+                    <View style={{ marginTop: 12 }}>
+                      <View style={styles.subHeaderRow}>
+                        <Text style={styles.subTitle}>
+                          SUBCATEGORÍAS · {effectiveSelectedCategory.label}
+                        </Text>
+
+                        <TouchableOpacity
+                          activeOpacity={0.85}
+                          onPress={() =>
+                            info.open(
+                              'SUBCATEGORÍAS (SUBGASTO)',
+                              'REFINA EL CONTENEDOR SELECCIONADO. SI ELIGES “TODOS”, SE CALCULA SOBRE EL CONTENEDOR COMPLETO.'
+                            )
+                          }
+                          style={styles.subInfoBtn}
+                        >
+                          <Ionicons name="information-circle-outline" size={18} color={colors.primary} />
+                          <Text style={styles.subInfoText}>QUÉ ES</Text>
+                        </TouchableOpacity>
+                      </View>
+
+                      <ScrollView horizontal showsHorizontalScrollIndicator={false}>
+                        <View style={styles.subRow}>
+                          {subtipoOptions.map((opt) => {
+                            const selected = selectedSubtipoId === opt.id;
+                            return (
+                              <TouchableOpacity
+                                key={opt.id ?? 'ALL'}
+                                activeOpacity={0.85}
+                                style={[styles.subPill, selected && styles.subPillSelected]}
+                                onPress={() => setSelectedSubtipoId(opt.id)}
+                              >
+                                <Text style={[styles.subPillText, selected && styles.subPillTextSelected]}>
+                                  {opt.label}
+                                </Text>
+                              </TouchableOpacity>
+                            );
+                          })}
+                        </View>
+                      </ScrollView>
+
+                      <Text style={[panelStyles.cardSubtitle, { marginTop: 10 }]}>
+                        TOCA UNA SUBCATEGORÍA PARA FILTRAR. “TODOS” INCLUYE EL CONTENEDOR COMPLETO.
+                      </Text>
+                    </View>
+                  )}
+                </View>
+              </View>
+
+              {/* Resumen avanzado */}
+              <View style={panelStyles.section}>
+                <SectionHeader
+                  title="RESUMEN AVANZADO"
+                  onInfo={() =>
+                    info.open(
+                      'RESUMEN AVANZADO',
+                      'KPIS ADICIONALES PARA ENTENDER EL “RITMO” Y LA ESTABILIDAD DE TU GASTO: MEDIAS, MÁXIMOS/MÍNIMOS Y CONCENTRACIÓN POR CATEGORÍAS.'
                     )
                   }
                 />
@@ -616,8 +894,8 @@ export const DayToDayKpisScreen: React.FC = () => {
                       style={styles.kpiCard}
                       onPress={() =>
                         info.open(
-                          'Media diaria (7 días)',
-                          'Promedio del gasto diario en los últimos 7 días. Útil para comparar tu ritmo de gasto semana a semana.'
+                          'MEDIA DIARIA (7 DÍAS)',
+                          'PROMEDIO DEL GASTO DIARIO EN LOS ÚLTIMOS 7 DÍAS. ÚTIL PARA COMPARAR TU RITMO DE GASTO SEMANA A SEMANA.'
                         )
                       }
                     >
@@ -625,9 +903,9 @@ export const DayToDayKpisScreen: React.FC = () => {
                         <Ionicons name="stats-chart-outline" size={18} color={colors.primary} />
                       </View>
                       <View style={{ flex: 1 }}>
-                        <Text style={styles.kpiCardLabel}>Media diaria (7d)</Text>
+                        <Text style={styles.kpiCardLabel}>MEDIA DIARIA (7D)</Text>
                         <Text style={styles.kpiCardValue}>{fmtCurrency(kpi7d.avg)}</Text>
-                        <Text style={styles.kpiCardHint}>Promedio</Text>
+                        <Text style={styles.kpiCardHint}>PROMEDIO</Text>
                       </View>
                     </TouchableOpacity>
 
@@ -636,8 +914,8 @@ export const DayToDayKpisScreen: React.FC = () => {
                       style={styles.kpiCard}
                       onPress={() =>
                         info.open(
-                          'Volatilidad (7 días)',
-                          'Mide cuánto “oscila” tu gasto día a día. Cuanto más alta, más irregular está siendo tu semana.'
+                          'VOLATILIDAD (7 DÍAS)',
+                          'MIDE CUÁNTO “OSCILA” TU GASTO DÍA A DÍA. CUANTO MÁS ALTA, MÁS IRREGULAR ESTÁ SIENDO TU SEMANA.'
                         )
                       }
                     >
@@ -645,9 +923,9 @@ export const DayToDayKpisScreen: React.FC = () => {
                         <Ionicons name="pulse-outline" size={18} color={colors.primary} />
                       </View>
                       <View style={{ flex: 1 }}>
-                        <Text style={styles.kpiCardLabel}>Volatilidad (7d)</Text>
+                        <Text style={styles.kpiCardLabel}>VOLATILIDAD (7D)</Text>
                         <Text style={styles.kpiCardValue}>{fmtCurrency(kpi7d.std)}</Text>
-                        <Text style={styles.kpiCardHint}>Desv. estándar</Text>
+                        <Text style={styles.kpiCardHint}>DESV. ESTÁNDAR</Text>
                       </View>
                     </TouchableOpacity>
                   </View>
@@ -658,8 +936,8 @@ export const DayToDayKpisScreen: React.FC = () => {
                       style={styles.kpiCard}
                       onPress={() =>
                         info.open(
-                          'Día más alto (7 días)',
-                          'El día con mayor gasto en los últimos 7 días. Sirve para identificar “picos” y revisar qué pasó ese día.'
+                          'DÍA MÁS ALTO (7 DÍAS)',
+                          'EL DÍA CON MAYOR GASTO EN LOS ÚLTIMOS 7 DÍAS. SIRVE PARA IDENTIFICAR “PICOS”.'
                         )
                       }
                     >
@@ -667,9 +945,9 @@ export const DayToDayKpisScreen: React.FC = () => {
                         <Ionicons name="trending-up-outline" size={18} color={colors.primary} />
                       </View>
                       <View style={{ flex: 1 }}>
-                        <Text style={styles.kpiCardLabel}>Día más alto</Text>
+                        <Text style={styles.kpiCardLabel}>DÍA MÁS ALTO</Text>
                         <Text style={styles.kpiCardValue}>{fmtCurrency(kpi7d.max.value)}</Text>
-                        <Text style={styles.kpiCardHint}>{kpi7d.max.label}</Text>
+                        <Text style={styles.kpiCardHint}>{String(kpi7d.max.label ?? '—').toUpperCase()}</Text>
                       </View>
                     </TouchableOpacity>
 
@@ -678,8 +956,8 @@ export const DayToDayKpisScreen: React.FC = () => {
                       style={styles.kpiCard}
                       onPress={() =>
                         info.open(
-                          'Días sin gasto (7 días)',
-                          'Número de días en los últimos 7 en los que no hubo gasto cotidiano. Puede indicar días “limpios” o falta de registros.'
+                          'DÍAS SIN GASTO (7 DÍAS)',
+                          'NÚMERO DE DÍAS EN LOS ÚLTIMOS 7 EN LOS QUE NO HUBO GASTO COTIDIANO.'
                         )
                       }
                     >
@@ -687,26 +965,30 @@ export const DayToDayKpisScreen: React.FC = () => {
                         <Ionicons name="calendar-outline" size={18} color={colors.primary} />
                       </View>
                       <View style={{ flex: 1 }}>
-                        <Text style={styles.kpiCardLabel}>Días sin gasto</Text>
+                        <Text style={styles.kpiCardLabel}>DÍAS SIN GASTO</Text>
                         <Text style={styles.kpiCardValue}>{kpi7d.zeroDays}</Text>
-                        <Text style={styles.kpiCardHint}>Últimos 7 días</Text>
+                        <Text style={styles.kpiCardHint}>ÚLTIMOS 7 DÍAS</Text>
                       </View>
                     </TouchableOpacity>
                   </View>
 
                   <View style={[styles.readingCard, { marginTop: 12 }]}>
-                    <Text style={styles.readingTitle}>Lectura rápida</Text>
+                    <Text style={styles.readingTitle}>LECTURA RÁPIDA</Text>
 
                     <Text style={styles.readingText}>
-                      Ritmo semanal actual:{' '}
+                      RITMO SEMANAL ACTUAL:{' '}
                       <Text style={styles.readingStrong}>{fmtCurrency(week?.total_semana ?? 0)}</Text>
                       {week?.limite_semana ? (
                         <>
-                          {' '}de <Text style={styles.readingStrong}>{fmtCurrency(week.limite_semana)}</Text>
-                          {' '}({fmtPct(((safeNum(week.total_semana) / Math.max(1, safeNum(week.limite_semana))) * 100) || 0)})
+                          {' '}DE <Text style={styles.readingStrong}>{fmtCurrency(week.limite_semana)}</Text>
+                          {' '}(
+                          {fmtPct(
+                            ((safeNum(week.total_semana) / Math.max(1, safeNum(week.limite_semana))) * 100) || 0
+                          )}
+                          )
                         </>
                       ) : (
-                        <> (sin límite semanal configurado)</>
+                        <> (SIN LÍMITE SEMANAL CONFIGURADO)</>
                       )}
                       .
                     </Text>
@@ -716,26 +998,26 @@ export const DayToDayKpisScreen: React.FC = () => {
                       style={styles.readingInlineInfo}
                       onPress={() =>
                         info.open(
-                          'Lectura rápida',
-                          'Compara el gasto semanal acumulado con el límite semanal (si existe). Si el porcentaje es alto pronto en la semana, conviene revisar hábitos o categorías dominantes.'
+                          'LECTURA RÁPIDA',
+                          'COMPARA EL GASTO SEMANAL ACUMULADO CON EL LÍMITE SEMANAL (SI EXISTE).'
                         )
                       }
                     >
                       <Ionicons name="information-circle-outline" size={18} color={colors.primary} />
-                      <Text style={styles.readingInlineInfoText}>Qué significa</Text>
+                      <Text style={styles.readingInlineInfoText}>QUÉ SIGNIFICA</Text>
                     </TouchableOpacity>
                   </View>
                 </View>
               </View>
 
-              {/* Concentración del gasto (mes) */}
+              {/* Concentración */}
               <View style={panelStyles.section}>
                 <SectionHeader
-                  title="Concentración del gasto (mes)"
+                  title="CONCENTRACIÓN DEL GASTO (MES)"
                   onInfo={() =>
                     info.open(
-                      'Concentración del gasto (mes)',
-                      'Indica cuánto del gasto del mes se concentra en pocas categorías. Si Top 1 o Top 3 son altos, probablemente hay un contenedor dominando el mes.'
+                      'CONCENTRACIÓN DEL GASTO (MES)',
+                      'INDICA CUÁNTO DEL GASTO DEL MES SE CONCENTRA EN POCAS CATEGORÍAS.'
                     )
                   }
                 />
@@ -745,43 +1027,38 @@ export const DayToDayKpisScreen: React.FC = () => {
                     <>
                       <View style={styles.concentrationRow}>
                         <View style={styles.concentrationCell}>
-                          <Text style={styles.concentrationLabel}>Top 1 categoría</Text>
+                          <Text style={styles.concentrationLabel}>TOP 1 CATEGORÍA</Text>
                           <Text style={styles.concentrationValue}>{fmtPct(concentration.top1Pct)}</Text>
                           <Text style={styles.concentrationHint}>
-                            {concentration.top1?.label ?? '—'}
+                            {String(concentration.top1?.label ?? '—').toUpperCase()}
                           </Text>
                         </View>
 
                         <View style={styles.concentrationCell}>
-                          <Text style={styles.concentrationLabel}>Top 3 categorías</Text>
+                          <Text style={styles.concentrationLabel}>TOP 3 CATEGORÍAS</Text>
                           <Text style={styles.concentrationValue}>{fmtPct(concentration.top3Pct)}</Text>
-                          <Text style={styles.concentrationHint}>
-                            Peso conjunto (Top 3)
-                          </Text>
+                          <Text style={styles.concentrationHint}>PESO CONJUNTO (TOP 3)</Text>
                         </View>
                       </View>
 
                       <Text style={[panelStyles.cardSubtitle, { marginTop: 10 }]}>
-                        Consejo: si Top 1 supera ~35–40% de forma recurrente, merece la pena revisar
-                        ese contenedor (subgastos, proveedores y ticket medio).
+                        CONSEJO: SI TOP 1 SUPERA ~35–40% DE FORMA RECURRENTE, REVISA ESE CONTENEDOR.
                       </Text>
                     </>
                   ) : (
-                    <Text style={analysisStyles.emptyText}>
-                      Aún no hay gastos en el mes para calcular concentración.
-                    </Text>
+                    <Text style={analysisStyles.emptyText}>AÚN NO HAY GASTOS EN EL MES.</Text>
                   )}
                 </View>
               </View>
 
-              {/* Evolución últimos 7 días (LineChart) */}
+              {/* Evolución 7 días */}
               <View style={panelStyles.section}>
                 <SectionHeader
-                  title="Evolución (últimos 7 días)"
+                  title="EVOLUCIÓN (ÚLTIMOS 7 DÍAS)"
                   onInfo={() =>
                     info.open(
-                      'Evolución (7 días)',
-                      'Serie diaria del gasto cotidiano (últimos 7 días). Toca un punto para ver el importe exacto del día.'
+                      'EVOLUCIÓN (7 DÍAS)',
+                      'SERIE DIARIA DEL GASTO COTIDIANO (ÚLTIMOS 7 DÍAS). TOCA UN PUNTO PARA VER EL IMPORTE.'
                     )
                   }
                 />
@@ -789,11 +1066,11 @@ export const DayToDayKpisScreen: React.FC = () => {
                 <View style={panelStyles.card}>
                   <Text style={panelStyles.cardTitle}>
                     {selectedView === 'CATEGORIA' && effectiveSelectedCategory
-                      ? `Tendencia · ${effectiveSelectedCategory.label}`
-                      : 'Tendencia global'}
+                      ? `TENDENCIA · ${effectiveSelectedCategory.label}`
+                      : 'TENDENCIA GLOBAL'}
                   </Text>
                   <Text style={[panelStyles.cardSubtitle, { marginTop: 4 }]}>
-                    Línea diaria con tooltip (tap) para inspección rápida.
+                    TOCA UN PUNTO PARA VER EL IMPORTE.
                   </Text>
 
                   <View style={{ marginTop: 10 }}>
@@ -812,46 +1089,44 @@ export const DayToDayKpisScreen: React.FC = () => {
                           yAxisSuffix=""
                           onDataPointClick={(dp: any) => {
                             const idx = Number(dp?.index ?? 0);
-                            const lab = labels7[idx] ?? '';
+                            const lab = String(labels7[idx] ?? '').toUpperCase();
                             const val = Number(dp?.value ?? 0);
 
-                            const tipX = Math.max(8, Math.min(chartWidth - 160, Number(dp?.x ?? 0) - 70));
-                            const tipY = Math.max(8, Number(dp?.y ?? 0) - 52);
-
-                            setTrendTip({
-                              visible: true,
-                              x: tipX,
-                              y: tipY,
-                              label: lab,
+                            showTooltip({
                               value: val,
+                              x: Number(dp?.x ?? 0),
+                              y: Number(dp?.y ?? 0),
+                              label: lab || 'DÍA',
+                              width: chartWidth,
                             });
                           }}
                         />
 
-                        {trendTip.visible && (
-                          <View style={[styles.tooltip, { left: trendTip.x, top: trendTip.y }]}>
-                            <Text style={styles.tooltipLabel}>{trendTip.label}</Text>
-                            <Text style={styles.tooltipValue}>{fmtCurrency(trendTip.value)}</Text>
+                        {chartTip.visible && (
+                          <View style={[styles.tooltip, { left: chartTip.x, top: chartTip.y }]}>
+                            <View style={styles.tooltipTopRow}>
+                              <Text style={styles.tooltipLabel}>{chartTip.label}</Text>
+                              <Pressable onPress={hideTooltip} hitSlop={8}>
+                                <Ionicons name="close" size={14} color={colors.textSecondary} />
+                              </Pressable>
+                            </View>
+                            <Text style={styles.tooltipValue}>{fmtCurrency(chartTip.value)}</Text>
                           </View>
                         )}
                       </View>
                     </ScrollView>
                   </View>
-
-                  <Text style={[panelStyles.cardSubtitle, { marginTop: 10 }]}>
-                    Tip: si ves “picos”, usa el modo Por categoría para aislar el contenedor que lo provoca.
-                  </Text>
                 </View>
               </View>
 
-              {/* ✅ NUEVO: Evolución diaria del mes */}
+              {/* Evolución diaria del mes */}
               <View style={panelStyles.section}>
                 <SectionHeader
-                  title="Evolución diaria del mes"
+                  title="EVOLUCIÓN DIARIA DEL MES"
                   onInfo={() =>
                     info.open(
-                      'Evolución diaria del mes',
-                      'Serie diaria completa del mes (rellenada con 0 cuando no hay gasto). Permite detectar patrones: fines de semana, semanas de carga, etc.'
+                      'EVOLUCIÓN DIARIA DEL MES',
+                      'SERIE DIARIA COMPLETA DEL MES. TOCA UN PUNTO PARA VER EL IMPORTE.'
                     )
                   }
                 />
@@ -861,49 +1136,69 @@ export const DayToDayKpisScreen: React.FC = () => {
                     <>
                       <Text style={panelStyles.cardTitle}>
                         {selectedView === 'CATEGORIA' && effectiveSelectedCategory
-                          ? `Mes · ${effectiveSelectedCategory.label}`
-                          : 'Mes · Global'}
-                      </Text>
-                      <Text style={[panelStyles.cardSubtitle, { marginTop: 4 }]}>
-                        Gráfica diaria del mes actual. Si el mes es largo, desplaza horizontalmente.
+                          ? `MES · ${effectiveSelectedCategory.label}`
+                          : 'MES · GLOBAL'}
                       </Text>
 
                       <View style={{ marginTop: 10 }}>
                         <ScrollView horizontal showsHorizontalScrollIndicator={false}>
-                          <LineChart
-                            data={{ labels: labelsMonthDays, datasets: [{ data: valuesMonthDays }] }}
-                            width={Math.max(chartWidth, labelsMonthDays.length * 18)}
-                            height={chartHeight}
-                            chartConfig={chartConfig}
-                            style={{ borderRadius: 14 }}
-                            withInnerLines={false}
-                            withOuterLines={false}
-                            yAxisLabel=""
-                            yAxisSuffix=""
-                          />
+                          <View style={{ position: 'relative' }}>
+                            <LineChart
+                              data={{ labels: labelsMonthDays, datasets: [{ data: valuesMonthDays }] }}
+                              width={Math.max(chartWidth, labelsMonthDays.length * 18)}
+                              height={chartHeight}
+                              chartConfig={chartConfig}
+                              style={{ borderRadius: 14 }}
+                              withInnerLines={false}
+                              withOuterLines={false}
+                              yAxisLabel=""
+                              yAxisSuffix=""
+                              onDataPointClick={(dp: any) => {
+                                const idx = Number(dp?.index ?? 0);
+                                const dayLab = String(labelsMonthDays[idx] ?? '').toUpperCase();
+                                const val = Number(dp?.value ?? 0);
+
+                                showTooltip({
+                                  value: val,
+                                  x: Number(dp?.x ?? 0),
+                                  y: Number(dp?.y ?? 0),
+                                  label: dayLab ? `DÍA ${dayLab}` : 'DÍA',
+                                  width: Math.max(chartWidth, labelsMonthDays.length * 18),
+                                });
+                              }}
+                            />
+
+                            {chartTip.visible && (
+                              <View style={[styles.tooltip, { left: chartTip.x, top: chartTip.y }]}>
+                                <View style={styles.tooltipTopRow}>
+                                  <Text style={styles.tooltipLabel}>{chartTip.label}</Text>
+                                  <Pressable onPress={hideTooltip} hitSlop={8}>
+                                    <Ionicons name="close" size={14} color={colors.textSecondary} />
+                                  </Pressable>
+                                </View>
+                                <Text style={styles.tooltipValue}>{fmtCurrency(chartTip.value)}</Text>
+                              </View>
+                            )}
+                          </View>
                         </ScrollView>
                       </View>
-
-                      <Text style={[panelStyles.cardSubtitle, { marginTop: 10 }]}>
-                        Consejo: combina esto con “Ranking de categorías” para explicar subidas.
-                      </Text>
                     </>
                   ) : (
                     <Text style={analysisStyles.emptyText}>
-                      Este backend aún no devuelve serie diaria del mes (serie_diaria_mes) o no hay datos.
+                      ESTE BACKEND AÚN NO DEVUELVE SERIE DIARIA DEL MES (SERIE_DIARIA_MES) O NO HAY DATOS.
                     </Text>
                   )}
                 </View>
               </View>
 
-              {/* ✅ NUEVO: Evolución mensual + KPIs */}
+              {/* Evolución mensual */}
               <View style={panelStyles.section}>
                 <SectionHeader
-                  title={`Evolución mensual (${monthsBack} meses)`}
+                  title={`EVOLUCIÓN MENSUAL (${monthsBack} MESES)`}
                   onInfo={() =>
                     info.open(
-                      'Evolución mensual',
-                      'Serie mensual para ver tendencia y estacionalidad. Incluye KPIs de evolución (MoM, medias móviles, tendencia).'
+                      'EVOLUCIÓN MENSUAL',
+                      'SERIE MENSUAL PARA VER TENDENCIA Y ESTACIONALIDAD. TOCA UNA BARRA PARA VER EL IMPORTE.'
                     )
                   }
                 />
@@ -911,7 +1206,6 @@ export const DayToDayKpisScreen: React.FC = () => {
                 <View style={panelStyles.card}>
                   {serieMensual?.length ? (
                     <>
-                      {/* KPIs evolución */}
                       {kpisEvolucion ? (
                         <>
                           <View style={styles.evoRow}>
@@ -920,15 +1214,13 @@ export const DayToDayKpisScreen: React.FC = () => {
                               style={styles.evoCard}
                               onPress={() =>
                                 info.open(
-                                  'Variación vs mes anterior',
-                                  'Diferencia del mes actual respecto al mes anterior (importe absoluto y porcentaje).'
+                                  'VARIACIÓN VS MES ANTERIOR',
+                                  'DIFERENCIA DEL MES ACTUAL RESPECTO AL MES ANTERIOR (IMPORTE Y PORCENTAJE).'
                                 )
                               }
                             >
-                              <Text style={styles.evoLabel}>MoM</Text>
-                              <Text style={styles.evoValue}>
-                                {fmtCurrency(kpisEvolucion.variacion_mes_abs)}
-                              </Text>
+                              <Text style={styles.evoLabel}>MOM</Text>
+                              <Text style={styles.evoValue}>{fmtCurrency(kpisEvolucion.variacion_mes_abs)}</Text>
                               <Text
                                 style={[
                                   styles.evoHint,
@@ -942,16 +1234,11 @@ export const DayToDayKpisScreen: React.FC = () => {
                             <TouchableOpacity
                               activeOpacity={0.9}
                               style={styles.evoCard}
-                              onPress={() =>
-                                info.open(
-                                  'Media 3 meses',
-                                  'Media de gasto de los últimos 3 meses. Útil para ver el “nivel” reciente.'
-                                )
-                              }
+                              onPress={() => info.open('MEDIA 3 MESES', 'MEDIA DE GASTO DE LOS ÚLTIMOS 3 MESES.')}
                             >
-                              <Text style={styles.evoLabel}>Media 3M</Text>
+                              <Text style={styles.evoLabel}>MEDIA 3M</Text>
                               <Text style={styles.evoValue}>{fmtCurrency(kpisEvolucion.media_3m)}</Text>
-                              <Text style={styles.evoHint}>Base 3 meses</Text>
+                              <Text style={styles.evoHint}>BASE 3 MESES</Text>
                             </TouchableOpacity>
                           </View>
 
@@ -959,151 +1246,112 @@ export const DayToDayKpisScreen: React.FC = () => {
                             <TouchableOpacity
                               activeOpacity={0.9}
                               style={styles.evoCard}
-                              onPress={() =>
-                                info.open(
-                                  'Media 6 meses',
-                                  'Media de gasto de los últimos 6 meses. Útil para reducir ruido y ver tendencia.'
-                                )
-                              }
+                              onPress={() => info.open('MEDIA 6 MESES', 'MEDIA DE GASTO DE LOS ÚLTIMOS 6 MESES.')}
                             >
-                              <Text style={styles.evoLabel}>Media 6M</Text>
+                              <Text style={styles.evoLabel}>MEDIA 6M</Text>
                               <Text style={styles.evoValue}>{fmtCurrency(kpisEvolucion.media_6m)}</Text>
-                              <Text style={styles.evoHint}>Base 6 meses</Text>
+                              <Text style={styles.evoHint}>BASE 6 MESES</Text>
                             </TouchableOpacity>
 
                             <TouchableOpacity
                               activeOpacity={0.9}
                               style={styles.evoCard}
-                              onPress={() =>
-                                info.open(
-                                  'Tendencia',
-                                  'Indicador cualitativo calculado por backend combinando medias móviles y variación mensual.'
-                                )
-                              }
+                              onPress={() => info.open('TENDENCIA', 'INDICADOR CUALITATIVO CALCULADO POR BACKEND.')}
                             >
-                              <Text style={styles.evoLabel}>Tendencia</Text>
-                              <Text style={styles.evoValue}>{kpisEvolucion.tendencia}</Text>
+                              <Text style={styles.evoLabel}>TENDENCIA</Text>
+                              <Text style={styles.evoValue}>{String(kpisEvolucion.tendencia ?? '').toUpperCase()}</Text>
                               <Text style={styles.evoHint} numberOfLines={2}>
-                                {kpisEvolucion.tendencia_detalle}
+                                {String(kpisEvolucion.tendencia_detalle ?? '').toUpperCase()}
                               </Text>
                             </TouchableOpacity>
                           </View>
                         </>
                       ) : (
                         <Text style={[panelStyles.cardSubtitle, { marginBottom: 10 }]}>
-                          KPIs de evolución no disponibles (kpis_evolucion).
+                          KPIS DE EVOLUCIÓN NO DISPONIBLES (KPIS_EVOLUCION).
                         </Text>
                       )}
 
-                      {/* Bar chart mensual */}
-                      <Text style={[panelStyles.cardTitle, { marginTop: 12 }]}>Serie mensual</Text>
+                      <Text style={[panelStyles.cardTitle, { marginTop: 12 }]}>SERIE MENSUAL</Text>
                       <Text style={[panelStyles.cardSubtitle, { marginTop: 4 }]}>
-                        Barras por mes (etiquetas = mes). Desliza si es necesario.
+                        TOCA UNA BARRA PARA VER EL IMPORTE.
                       </Text>
 
                       <View style={{ marginTop: 10 }}>
                         <ScrollView horizontal showsHorizontalScrollIndicator={false}>
-                            <BarChart
-                            data={{
-                                labels: labelsMonths,
-                                datasets: [{ data: valuesMonths }],
-                            }}
-                            width={Math.max(chartWidth, labelsMonths.length * 36)}
-                            height={260}
-                            chartConfig={chartConfig}
-                            style={{ borderRadius: 14 }}
-                            fromZero
-                            withInnerLines={false}
-                            yAxisLabel=""
-                            yAxisSuffix=""
-                            showValuesOnTopOfBars={false}
-                            />
+                          <View style={{ position: 'relative' }}>
+                            {/* Captura tap por coordenadas (fallback robusto) */}
+                            <View
+                              onStartShouldSetResponder={() => true}
+                              onResponderRelease={onMonthlyChartTap}
+                            >
+                              <BarChartAny
+                                data={{
+                                  labels: labelsMonths,
+                                  datasets: [{ data: valuesMonths }],
+                                }}
+                                width={monthlyChartWidth}
+                                height={260}
+                                chartConfig={chartConfig}
+                                style={{ borderRadius: 14 }}
+                                fromZero
+                                withInnerLines={false}
+                                yAxisLabel=""
+                                yAxisSuffix=""
+                                showValuesOnTopOfBars={false}
+                                // Si en runtime se dispara, perfecto. Si no, el fallback de arriba lo cubre.
+                                onDataPointClick={(dp: any) => {
+                                  const idx = Number(dp?.index ?? 0);
+                                  const val = Number(dp?.value ?? 0);
+                                  const full = fullMonthLabels[idx] ?? labelsMonths[idx] ?? '';
+
+                                  showTooltip({
+                                    value: val,
+                                    x: Number(dp?.x ?? 0),
+                                    y: Number(dp?.y ?? 0),
+                                    label: full ? `MES ${String(full).toUpperCase()}` : 'MES',
+                                    width: monthlyChartWidth,
+                                  });
+                                }}
+                              />
+                            </View>
+
+                            {chartTip.visible && (
+                              <View style={[styles.tooltip, { left: chartTip.x, top: chartTip.y }]}>
+                                <View style={styles.tooltipTopRow}>
+                                  <Text style={styles.tooltipLabel}>{chartTip.label}</Text>
+                                  <Pressable onPress={hideTooltip} hitSlop={8}>
+                                    <Ionicons name="close" size={14} color={colors.textSecondary} />
+                                  </Pressable>
+                                </View>
+                                <Text style={styles.tooltipValue}>{fmtCurrency(chartTip.value)}</Text>
+                              </View>
+                            )}
+                          </View>
                         </ScrollView>
 
-                        {/* Etiquetas completas (YYYY-MM) para contexto */}
                         <Text style={[panelStyles.cardSubtitle, { marginTop: 10 }]}>
-                          Rango: {fullMonthLabels[0] ?? '—'} → {fullMonthLabels[fullMonthLabels.length - 1] ?? '—'}
+                          RANGO: {(fullMonthLabels[0] ?? '—').toUpperCase()} → {(fullMonthLabels[fullMonthLabels.length - 1] ?? '—').toUpperCase()}
                         </Text>
                       </View>
                     </>
                   ) : (
                     <Text style={analysisStyles.emptyText}>
-                      Este backend aún no devuelve serie mensual (serie_mensual) o no hay datos para la ventana seleccionada.
+                      ESTE BACKEND AÚN NO DEVUELVE SERIE MENSUAL (SERIE_MENSUAL) O NO HAY DATOS.
                     </Text>
                   )}
                 </View>
               </View>
 
-              {/* Ranking categorías (mes) */}
-              <View style={[panelStyles.section, { marginBottom: 24 }]}>
-                <SectionHeader
-                  title="Ranking de categorías (mes)"
-                  onInfo={() =>
-                    info.open(
-                      'Ranking de categorías (mes)',
-                      'Top categorías del mes por importe. Toca una fila para seleccionar esa categoría (útil para pasar al modo “Por categoría”).'
-                    )
-                  }
-                />
-
-                <View style={panelStyles.card}>
-                  {topCategorias.length ? (
-                    <>
-                      <Text style={analysisStyles.cardSubtitle}>
-                        Top 6 categorías por gasto del mes. Toca una para enfocarte.
-                      </Text>
-
-                      {topCategorias.map((cat) => {
-                        const pct = maxTopCat ? (safeNum(cat.importe) / maxTopCat) * 100 : 0;
-                        const isSelected = cat.key === effectiveSelectedCategory?.key;
-
-                        return (
-                          <TouchableOpacity
-                            key={cat.key}
-                            activeOpacity={0.85}
-                            onPress={() => {
-                              setSelectedView('CATEGORIA');
-                              setSelectedCategoryKey(cat.key);
-                            }}
-                            style={[styles.rankRow, isSelected && styles.rankRowSelected]}
-                          >
-                            <View style={styles.rankLeft}>
-                              <View style={[styles.rankDot, isSelected && styles.rankDotSelected]} />
-                              <View style={{ flex: 1 }}>
-                                <Text style={[styles.rankLabel, isSelected && styles.rankLabelSelected]}>
-                                  {cat.label}
-                                </Text>
-                                <Text style={styles.rankSub}>{fmtCurrency(cat.importe)}</Text>
-                              </View>
-                            </View>
-
-                            <View style={styles.rankRight}>
-                              <Text style={[styles.rankValue, isSelected && styles.rankValueSelected]}>
-                                {cat.porcentaje?.toFixed ? `${cat.porcentaje.toFixed(1)}%` : '—'}
-                              </Text>
-                              <View style={styles.rankBarBg}>
-                                <View style={[styles.rankBarFill, { width: `${Math.min(100, pct)}%` }]} />
-                              </View>
-                            </View>
-                          </TouchableOpacity>
-                        );
-                      })}
-                    </>
-                  ) : (
-                    <Text style={analysisStyles.emptyText}>Sin datos de categorías para este mes.</Text>
-                  )}
-                </View>
-              </View>
-
-              {/* Extra (solo en modo categoría): mini-lectura de KPIs de categoría si existen */}
+              {/* KPIs contenedor */}
               {selectedView === 'CATEGORIA' && effectiveSelectedCategory && (
                 <View style={[panelStyles.section, { marginBottom: 24 }]}>
                   <SectionHeader
-                    title={`KPIs del contenedor · ${effectiveSelectedCategory.label}`}
+                    title={`KPIS DEL CONTENEDOR · ${effectiveSelectedCategory.label}`}
                     onInfo={() =>
                       info.open(
-                        'KPIs del contenedor',
-                        'Resumen compacto del contenedor seleccionado: tickets, ticket medio, peso sobre el total y variación vs mes anterior.'
+                        'KPIS DEL CONTENEDOR',
+                        'RESUMEN COMPACTO DEL CONTENEDOR SELECCIONADO: TICKETS, TICKET MEDIO, PESO SOBRE EL TOTAL Y VARIACIÓN VS MES ANTERIOR.'
                       )
                     }
                   />
@@ -1115,28 +1363,18 @@ export const DayToDayKpisScreen: React.FC = () => {
                           <TouchableOpacity
                             activeOpacity={0.9}
                             style={styles.kpiCell}
-                            onPress={() =>
-                              info.open(
-                                'Tickets',
-                                'Número de compras (tickets) registradas para el contenedor en el mes (y filtro actual).'
-                              )
-                            }
+                            onPress={() => info.open('TICKETS', 'NÚMERO DE COMPRAS (TICKETS) REGISTRADAS EN EL MES.')}
                           >
-                            <Text style={analysisStyles.kpiLabel}># Tickets</Text>
+                            <Text style={analysisStyles.kpiLabel}># TICKETS</Text>
                             <Text style={analysisStyles.kpiValue}>{selectedCategoryKpis.tickets}</Text>
                           </TouchableOpacity>
 
                           <TouchableOpacity
                             activeOpacity={0.9}
                             style={styles.kpiCell}
-                            onPress={() =>
-                              info.open(
-                                'Ticket medio',
-                                'Importe medio por compra en este contenedor. Útil para diferenciar “muchas compras pequeñas” vs “pocas compras grandes”.'
-                              )
-                            }
+                            onPress={() => info.open('TICKET MEDIO', 'IMPORTE MEDIO POR COMPRA EN ESTE CONTENEDOR.')}
                           >
-                            <Text style={analysisStyles.kpiLabel}>Ticket medio</Text>
+                            <Text style={analysisStyles.kpiLabel}>TICKET MEDIO</Text>
                             <Text style={analysisStyles.kpiValue}>
                               {fmtCurrency(selectedCategoryKpis.ticket_medio)}
                             </Text>
@@ -1145,14 +1383,9 @@ export const DayToDayKpisScreen: React.FC = () => {
                           <TouchableOpacity
                             activeOpacity={0.9}
                             style={styles.kpiCell}
-                            onPress={() =>
-                              info.open(
-                                'Peso sobre total',
-                                'Porcentaje del gasto total del mes que representa este contenedor.'
-                              )
-                            }
+                            onPress={() => info.open('PESO SOBRE TOTAL', 'PORCENTAJE DEL GASTO TOTAL DEL MES QUE REPRESENTA ESTE CONTENEDOR.')}
                           >
-                            <Text style={analysisStyles.kpiLabel}>Peso sobre total</Text>
+                            <Text style={analysisStyles.kpiLabel}>PESO SOBRE TOTAL</Text>
                             <Text style={analysisStyles.kpiValue}>
                               {safeNum(selectedCategoryKpis.peso_sobre_total_gasto).toFixed(1)}%
                             </Text>
@@ -1161,48 +1394,35 @@ export const DayToDayKpisScreen: React.FC = () => {
                           <TouchableOpacity
                             activeOpacity={0.9}
                             style={styles.kpiCell}
-                            onPress={() =>
-                              info.open(
-                                'Variación vs mes anterior',
-                                'Cambio porcentual respecto al mes anterior (mismo contenedor).'
-                              )
-                            }
+                            onPress={() => info.open('VARIACIÓN VS MES ANTERIOR', 'CAMBIO PORCENTUAL RESPECTO AL MES ANTERIOR.')}
                           >
-                            <Text style={analysisStyles.kpiLabel}>Var. importe</Text>
+                            <Text style={analysisStyles.kpiLabel}>VAR. IMPORTE</Text>
                             <Text
                               style={[
                                 analysisStyles.kpiValue,
-                                safeNum(selectedCategoryKpis.variacion_importe_pct) >= 0
-                                  ? styles.varUp
-                                  : styles.varDown,
+                                safeNum(selectedCategoryKpis.variacion_importe_pct) >= 0 ? styles.varUp : styles.varDown,
                               ]}
                             >
                               {fmtPct(selectedCategoryKpis.variacion_importe_pct)}
                             </Text>
                           </TouchableOpacity>
                         </View>
-
-                        <Text style={[panelStyles.cardSubtitle, { marginTop: 10 }]}>
-                          Si quieres “KPIs por proveedor” (frecuencia, repetición, top tickets), añadimos endpoint y lo montamos aquí.
-                        </Text>
                       </>
                     ) : (
                       <Text style={analysisStyles.emptyText}>
-                        No hay KPIs suficientes para este contenedor con el filtro actual.
+                        NO HAY KPIS SUFICIENTES PARA ESTE CONTENEDOR CON EL FILTRO ACTUAL.
                       </Text>
                     )}
                   </View>
                 </View>
               )}
 
-              {/* (Opcional) Diagnóstico de features nuevas */}
               {!hasMonthlyCharts && (
                 <View style={[panelStyles.section, { marginBottom: 24 }]}>
                   <View style={panelStyles.card}>
-                    <Text style={panelStyles.cardTitle}>Nota</Text>
+                    <Text style={panelStyles.cardTitle}>NOTA</Text>
                     <Text style={[panelStyles.cardSubtitle, { marginTop: 6 }]}>
-                      No se detectan series mensuales (serie_diaria_mes / serie_mensual). Si el backend ya está actualizado,
-                      revisa que el endpoint móvil esté apuntando al mismo entorno (baseURL) y que estés autenticado.
+                      NO SE DETECTAN SERIES MENSUALES (SERIE_DIARIA_MES / SERIE_MENSUAL).
                     </Text>
                   </View>
                 </View>
@@ -1211,7 +1431,6 @@ export const DayToDayKpisScreen: React.FC = () => {
           )}
         </ScrollView>
 
-        {/* ✅ Modal Info (uno global para toda la pantalla) */}
         <InfoModal
           visible={info.visible}
           title={info.title}
@@ -1235,7 +1454,45 @@ const styles = StyleSheet.create({
     justifyContent: 'space-between',
   },
 
-  // Mini cards (resumen)
+  // Selector mes
+  monthRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 10,
+  },
+  monthIconBtn: {
+    width: 42,
+    height: 42,
+    borderRadius: 12,
+    backgroundColor: colors.neutralSoft,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: colors.border,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  monthBtnDisabled: {
+    opacity: 0.45,
+  },
+  monthCenter: {
+    flex: 1,
+    alignItems: 'center',
+    paddingHorizontal: 6,
+  },
+  monthTitle: {
+    fontSize: 14,
+    fontWeight: '900',
+    color: colors.textPrimary,
+  },
+  monthHint: {
+    marginTop: 2,
+    fontSize: 11,
+    color: colors.textMuted,
+    textAlign: 'center',
+    fontWeight: '700',
+  },
+
+  // Resumen
   summaryRow: {
     flexDirection: 'row',
     gap: 10,
@@ -1265,7 +1522,7 @@ const styles = StyleSheet.create({
     fontSize: 11,
     color: colors.textSecondary,
     marginBottom: 2,
-    fontWeight: '700',
+    fontWeight: '900',
   },
   kpiCardValue: {
     fontSize: 16,
@@ -1276,6 +1533,7 @@ const styles = StyleSheet.create({
     marginTop: 2,
     fontSize: 11,
     color: colors.textMuted,
+    fontWeight: '700',
   },
 
   // Lectura rápida
@@ -1290,7 +1548,7 @@ const styles = StyleSheet.create({
   readingTitle: {
     fontSize: 12,
     color: colors.textPrimary,
-    fontWeight: '800',
+    fontWeight: '900',
   },
   readingText: {
     marginTop: 6,
@@ -1312,7 +1570,7 @@ const styles = StyleSheet.create({
   readingInlineInfoText: {
     fontSize: 12,
     color: colors.primary,
-    fontWeight: '800',
+    fontWeight: '900',
   },
 
   // Concentración
@@ -1333,7 +1591,7 @@ const styles = StyleSheet.create({
   concentrationLabel: {
     fontSize: 11,
     color: colors.textSecondary,
-    fontWeight: '700',
+    fontWeight: '900',
   },
   concentrationValue: {
     marginTop: 4,
@@ -1345,12 +1603,13 @@ const styles = StyleSheet.create({
     marginTop: 2,
     fontSize: 11,
     color: colors.textMuted,
+    fontWeight: '700',
   },
 
-  // Tooltip chart
+  // Tooltip
   tooltip: {
     position: 'absolute',
-    width: 150,
+    width: 160,
     paddingVertical: 8,
     paddingHorizontal: 10,
     borderRadius: 12,
@@ -1363,19 +1622,45 @@ const styles = StyleSheet.create({
     shadowOffset: { width: 0, height: 6 },
     elevation: 2,
   },
+  tooltipTopRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
   tooltipLabel: {
     fontSize: 11,
     color: colors.textSecondary,
-    fontWeight: '700',
+    fontWeight: '900',
+    paddingRight: 8,
   },
   tooltipValue: {
     marginTop: 2,
     fontSize: 14,
     color: colors.textPrimary,
-    fontWeight: '800',
+    fontWeight: '900',
   },
 
-  // Ranking categorías
+  // Ranking selector
+  rankHeaderRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: 6,
+  },
+  rankExpandBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    paddingVertical: 6,
+    paddingHorizontal: 8,
+    borderRadius: 10,
+  },
+  rankExpandText: {
+    fontSize: 12,
+    color: colors.textSecondary,
+    fontWeight: '900',
+  },
+
   rankRow: {
     flexDirection: 'row',
     justifyContent: 'space-between',
@@ -1407,7 +1692,7 @@ const styles = StyleSheet.create({
   rankLabel: {
     fontSize: 12,
     color: colors.textPrimary,
-    fontWeight: '800',
+    fontWeight: '900',
   },
   rankLabelSelected: {
     color: colors.primary,
@@ -1416,6 +1701,7 @@ const styles = StyleSheet.create({
     fontSize: 11,
     color: colors.textSecondary,
     marginTop: 2,
+    fontWeight: '700',
   },
   rankRight: {
     flex: 1,
@@ -1424,7 +1710,7 @@ const styles = StyleSheet.create({
   rankValue: {
     fontSize: 12,
     color: colors.textPrimary,
-    fontWeight: '800',
+    fontWeight: '900',
     marginBottom: 4,
   },
   rankValueSelected: {
@@ -1443,7 +1729,97 @@ const styles = StyleSheet.create({
     backgroundColor: colors.primary,
   },
 
-  // KPIs grid (modo categoría)
+  // TODOS
+  allRow: {
+    marginTop: 10,
+    paddingVertical: 10,
+    paddingHorizontal: 10,
+    borderRadius: 14,
+    backgroundColor: colors.neutralSoft,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: colors.border,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
+  allRowSelected: {
+    backgroundColor: colors.primarySoft,
+    borderColor: colors.primary,
+  },
+  allLeft: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  allLabel: {
+    fontSize: 12,
+    color: colors.textPrimary,
+    fontWeight: '900',
+  },
+  allLabelSelected: {
+    color: colors.primary,
+  },
+  allHint: {
+    fontSize: 11,
+    color: colors.textMuted,
+    fontWeight: '900',
+  },
+
+  // Subcategorías (una fila, botones iguales)
+  subHeaderRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: 8,
+  },
+  subTitle: {
+    fontSize: 12,
+    color: colors.textPrimary,
+    fontWeight: '900',
+  },
+  subInfoBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    paddingVertical: 4,
+    paddingHorizontal: 6,
+    borderRadius: 10,
+  },
+  subInfoText: {
+    fontSize: 12,
+    color: colors.primary,
+    fontWeight: '900',
+  },
+  subRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+  },
+  subPill: {
+    width: 118, // tamaño igual para todos
+    paddingVertical: 10,
+    paddingHorizontal: 10,
+    borderRadius: 999,
+    backgroundColor: colors.neutralSoft,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: colors.border,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  subPillSelected: {
+    backgroundColor: colors.primarySoft,
+    borderColor: colors.primary,
+  },
+  subPillText: {
+    fontSize: 11,
+    color: colors.textSecondary,
+    fontWeight: '900',
+  },
+  subPillTextSelected: {
+    color: colors.primary,
+  },
+
+  // KPIs grid
   kpiGrid: {
     flexDirection: 'row',
     flexWrap: 'wrap',
@@ -1455,7 +1831,7 @@ const styles = StyleSheet.create({
     marginBottom: 10,
   },
 
-  // ✅ Evolución (tarjetas)
+  // Evolución KPIs
   evoRow: {
     flexDirection: 'row',
     gap: 10,
@@ -1472,7 +1848,7 @@ const styles = StyleSheet.create({
   evoLabel: {
     fontSize: 11,
     color: colors.textSecondary,
-    fontWeight: '800',
+    fontWeight: '900',
   },
   evoValue: {
     marginTop: 4,
@@ -1484,10 +1860,11 @@ const styles = StyleSheet.create({
     marginTop: 4,
     fontSize: 11,
     color: colors.textMuted,
+    fontWeight: '800',
   },
 
   varUp: {
-    color: colors.danger, // gasto sube => “peligro”
+    color: colors.danger,
   },
   varDown: {
     color: colors.success,

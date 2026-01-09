@@ -129,6 +129,13 @@ function fmtCurrency(n: number | undefined | null) {
   }
 }
 
+// ✅ NUEVO: moneda con signo explícito (+ / -)
+function fmtSignedCurrency(n: number | undefined | null) {
+  const v = typeof n === 'number' ? n : 0;
+  const sign = v > 0 ? '+' : '';
+  return `${sign}${fmtCurrency(v)}`;
+}
+
 function fmtPct(n: number | undefined | null) {
   const v = Number.isFinite(n as number) ? (n as number) : 0;
   const sign = v > 0 ? '+' : '';
@@ -161,6 +168,49 @@ function insightIconName(sev: InsightSeverity) {
   return 'information-circle-outline';
 }
 
+// ✅ NUEVO: utilidades de fecha ISO (YYYY-MM-DD)
+// Motivo: el backend permite `fecha=...` y así alineamos comparación mes actual vs mes anterior.
+function parseIsoDate(iso: string) {
+  const [y, m, d] = (iso || '').split('-').map((x) => parseInt(x, 10));
+  return { y, m, d }; // m: 1-12
+}
+
+function isoFromParts(y: number, m: number, d: number) {
+  const mm = String(m).padStart(2, '0');
+  const dd = String(d).padStart(2, '0');
+  return `${y}-${mm}-${dd}`;
+}
+
+/**
+ * ✅ NUEVO: resta/suma meses conservando el “día del mes”,
+ * capando al último día si el mes objetivo es más corto.
+ *
+ * Ejemplo:
+ * - 2026-03-31 con -1 mes => 2026-02-28 (o 29 en bisiesto)
+ */
+function shiftIsoMonthSameDay(baseIso: string, deltaMonths: number) {
+  const { y, m, d } = parseIsoDate(baseIso);
+  if (!y || !m || !d) return baseIso;
+
+  const baseIndex = (y * 12 + (m - 1)) + deltaMonths;
+  const ty = Math.floor(baseIndex / 12);
+  const tm0 = baseIndex % 12; // 0-11
+  const tm = tm0 + 1;
+
+  // último día del mes objetivo: Date(ty, tm, 0) => último día del mes tm (1-12)
+  const lastDay = new Date(ty, tm, 0).getDate();
+  const td = Math.min(d, lastDay);
+
+  return isoFromParts(ty, tm, td);
+}
+
+function sumDailySeriesUpToDay(series: any[], day: number) {
+  if (!Array.isArray(series) || !day) return 0;
+  return series
+    .filter((it) => Number(it?.dia ?? 0) >= 1 && Number(it?.dia ?? 0) <= day)
+    .reduce((acc, it) => acc + Number(it?.importe ?? 0), 0);
+}
+
 // --------------------
 // Tipado route params
 // --------------------
@@ -177,6 +227,24 @@ type MonthBreakdownItem = {
   categoriaKey: string;
   presupuesto: number;
   gastado: number;
+};
+
+// ✅ NUEVO: tipo UI para tarjeta comparativa
+type MonthToDateCompareTone = 'DANGER' | 'SUCCESS' | 'WARNING';
+
+type MonthToDateCompareUi = {
+  currentIso: string;
+  prevIso: string;
+  currentDay: number;
+  prevDay: number;
+  currentMtd: number;
+  prevMtd: number;
+  deltaAbs: number;
+  deltaPct: number; // ya resuelto incluso si prev=0 (ver lógica)
+  tone: MonthToDateCompareTone;
+  message: string;
+  bgColor: string;
+  borderColor: string;
 };
 
 // --------------------
@@ -225,6 +293,11 @@ export const DayToDayAnalysisScreen: React.FC = () => {
   const [selectedTrend7d, setSelectedTrend7d] = useState<Last7DayItem[]>([]);
   const [selectedTrendLoading, setSelectedTrendLoading] = useState(false);
   const [selectedTrendError, setSelectedTrendError] = useState<string | null>(null);
+
+  // ✅ NUEVO: datos del mes anterior para tarjeta comparativa MTD
+  const [prevMonthData, setPrevMonthData] = useState<DayToDayAnalysisResponse | null>(null);
+  const [prevMonthLoading, setPrevMonthLoading] = useState(false);
+  const [prevMonthError, setPrevMonthError] = useState<string | null>(null);
 
   // Si cambia categoría, resetea subgasto
   useEffect(() => {
@@ -318,6 +391,59 @@ export const DayToDayAnalysisScreen: React.FC = () => {
 
   const insights: InsightItem[] = data?.insights ?? [];
   const alertasStrings: string[] = data?.alertas ?? [];
+
+  // ✅ NUEVO: ISO base (preferimos el que viene del backend vía ultimos_7_dias)
+  const baseIso = useMemo(() => {
+    const last = ultimos7DiasGeneral?.[ultimos7DiasGeneral.length - 1];
+    const iso = last?.fecha;
+    if (typeof iso === 'string' && iso.includes('-')) return iso;
+    // fallback defensivo
+    const now = new Date();
+    return isoFromParts(now.getFullYear(), now.getMonth() + 1, now.getDate());
+  }, [ultimos7DiasGeneral]);
+
+  // --------------------
+  // ✅ NUEVO: carga de datos para mes anterior (solo para vista GENERAL)
+  // - Se basa en el mismo filtro de pago que el resumen de “Hoy”.
+  // - No aplica filtro de categoría/subtipo porque en GENERAL tu endpoint tampoco lo aplica.
+  // --------------------
+  const fetchPrevMonthDataForMtdCompare = useCallback(async () => {
+    if (!baseIso) return;
+
+    // Solo tiene sentido mostrar la tarjeta arriba de “Hoy” en vista GENERAL
+    if (selectedView !== 'GENERAL') {
+      setPrevMonthData(null);
+      setPrevMonthError(null);
+      setPrevMonthLoading(false);
+      return;
+    }
+
+    try {
+      setPrevMonthLoading(true);
+      setPrevMonthError(null);
+
+      const prevIso = shiftIsoMonthSameDay(baseIso, -1);
+
+      // Mismo filtro de pago que “Hoy”
+      const params: any = { pago: pagoFiltro, fecha: prevIso };
+
+      // Nota: se fuerza `as any` para evitar que typings estrictos bloqueen el param fecha
+      const resp = await getDayToDayAnalysis(params as any);
+      setPrevMonthData(resp);
+    } catch (e) {
+      console.log('[DayToDayAnalysisScreen] Error prev month data (MTD compare)', e);
+      setPrevMonthError('No se pudo cargar la comparativa con el mes anterior.');
+      setPrevMonthData(null);
+    } finally {
+      setPrevMonthLoading(false);
+    }
+  }, [baseIso, pagoFiltro, selectedView]);
+
+  useEffect(() => {
+    // Se refresca cuando cambia pago o cuando cambia el baseIso (carga principal)
+    if (!data) return;
+    fetchPrevMonthDataForMtdCompare();
+  }, [data, fetchPrevMonthDataForMtdCompare]);
 
   // Categorías con “TODOS” al principio
   const categoriasMesConTodos = useMemo(() => {
@@ -451,6 +577,66 @@ export const DayToDayAnalysisScreen: React.FC = () => {
       <InfoButton align="title" onPress={onInfo} />
     </View>
   );
+
+  // --------------------
+  // ✅ NUEVO: comparativa mes-a-fecha (este mes vs mes anterior)
+  // --------------------
+  const monthToDateCompareUi: MonthToDateCompareUi | null = useMemo(() => {
+    if (!data) return null;
+    if (selectedView !== 'GENERAL') return null;
+
+    // Serie diaria del mes actual y del mes anterior (se accede defensivamente por si types no incluyen el campo)
+    const currentSeries: any[] = ((data as any)?.serie_diaria_mes ?? []) as any[];
+    const prevSeries: any[] = ((prevMonthData as any)?.serie_diaria_mes ?? []) as any[];
+
+    const { d: currentDay } = parseIsoDate(baseIso);
+    const prevIso = shiftIsoMonthSameDay(baseIso, -1);
+    const { d: prevDay } = parseIsoDate(prevIso);
+
+    // Si aún no hay prevMonthData, no computamos
+    if (!prevMonthData) return null;
+
+    const currentMtd = sumDailySeriesUpToDay(currentSeries, currentDay);
+    const prevMtd = sumDailySeriesUpToDay(prevSeries, prevDay);
+
+    const deltaAbs = currentMtd - prevMtd;
+
+    // Regla consistente con tu backend: si prev=0 y curr>0 => 100% (evita infinito)
+    const deltaPct =
+      prevMtd > 0 ? (deltaAbs / prevMtd) * 100 : (currentMtd > 0 ? 100 : 0);
+
+    let tone: MonthToDateCompareTone = 'WARNING';
+    let message = 'En tu línea!';
+
+    if (deltaPct > 15) {
+      tone = 'DANGER';
+      message = 'Estas Gastón!';
+    } else if (deltaPct < -15) {
+      tone = 'SUCCESS';
+      message = 'Así me gusta ahorrando!';
+    }
+
+    const bgColor =
+      tone === 'DANGER' ? colors.dangerSoft : tone === 'SUCCESS' ? colors.successSoft : colors.warningSoft;
+
+    const borderColor =
+      tone === 'DANGER' ? colors.danger : tone === 'SUCCESS' ? colors.success : colors.warning;
+
+    return {
+      currentIso: baseIso,
+      prevIso,
+      currentDay,
+      prevDay,
+      currentMtd,
+      prevMtd,
+      deltaAbs,
+      deltaPct,
+      tone,
+      message,
+      bgColor,
+      borderColor,
+    };
+  }, [data, prevMonthData, baseIso, selectedView]);
 
   // --------------------
   // Mes en curso: desglose por tipo
@@ -741,6 +927,85 @@ export const DayToDayAnalysisScreen: React.FC = () => {
                   }
                 />
 
+                {/* ✅ NUEVO: Tarjeta comparativa MTD (encima de la tarjeta de Hoy) */}
+                <View
+                  style={[
+                    panelStyles.card,
+                    styles.mtdCompareCard,
+                    prevMonthLoading && styles.mtdCompareCardLoading,
+                    monthToDateCompareUi
+                      ? { backgroundColor: monthToDateCompareUi.bgColor, borderColor: monthToDateCompareUi.borderColor }
+                      : { backgroundColor: colors.neutralSoft, borderColor: colors.border },
+                  ]}
+                >
+                  <View style={styles.mtdCompareHeaderRow}>
+                    <View style={{ flex: 1 }}>
+                      <Text style={styles.mtdCompareTitle}>Comparativa mes a fecha</Text>
+                      <Text style={styles.mtdCompareSubtitle}>
+                        {prevMonthLoading
+                          ? 'Calculando mes actual vs mes anterior...'
+                          : prevMonthError
+                          ? prevMonthError
+                          : monthToDateCompareUi
+                          ? `Día ${monthToDateCompareUi.currentDay} (este mes) vs día ${monthToDateCompareUi.prevDay} (mes anterior)`
+                          : 'Sin datos para comparar.'}
+                      </Text>
+                    </View>
+
+                    <TouchableOpacity
+                      onPress={() =>
+                        info.open(
+                          'Comparativa mes a fecha',
+                          'Compara lo gastado desde el día 1 hasta hoy, contra el mes anterior hasta el mismo día (si el mes anterior es más corto, se usa su último día).'
+                        )
+                      }
+                      activeOpacity={0.85}
+                      style={styles.mtdCompareInfoBtn}
+                    >
+                      <Ionicons name="information-circle-outline" size={18} color={colors.textSecondary} />
+                    </TouchableOpacity>
+                  </View>
+
+                  {prevMonthLoading ? (
+                    <View style={styles.inlineLoaderRow}>
+                      <ActivityIndicator size="small" color={colors.primary} />
+                      <Text style={styles.inlineLoaderText}>Cargando comparativa...</Text>
+                    </View>
+                  ) : monthToDateCompareUi ? (
+                    <View style={styles.mtdCompareBodyRow}>
+                      {/* Columna izquierda: mes actual */}
+                      <View style={styles.mtdCompareCol}>
+                        <Text style={styles.mtdCompareKpiLabel}>Este mes (a fecha)</Text>
+                        <Text style={styles.mtdCompareKpiValue}>{fmtCurrency(monthToDateCompareUi.currentMtd)}</Text>
+
+                        <View style={{ marginTop: 10 }}>
+                          <Text style={styles.mtdCompareDeltaLabel}>Diferencia</Text>
+                          <Text style={styles.mtdCompareDeltaValue}>
+                            {fmtSignedCurrency(monthToDateCompareUi.deltaAbs)} [{fmtPct(monthToDateCompareUi.deltaPct)}]
+                          </Text>
+                        </View>
+                      </View>
+
+                      {/* Columna derecha: mes anterior + mensaje alineado con diferencia */}
+                      <View style={[styles.mtdCompareCol, styles.mtdCompareColRight]}>
+                        <Text style={styles.mtdCompareKpiLabel}>Mes anterior (a fecha)</Text>
+                        <Text style={styles.mtdCompareKpiValue}>{fmtCurrency(monthToDateCompareUi.prevMtd)}</Text>
+
+                        <View style={{ marginTop: 10 }}>
+                          <Text style={styles.mtdCompareDeltaLabel}>&nbsp;</Text>
+                          <Text style={styles.mtdCompareMessageInline}>
+                            “{monthToDateCompareUi.message}”
+                          </Text>
+                        </View>
+                      </View>
+                    </View>
+                  ) : (
+                    <Text style={analysisStyles.emptyText}>No hay datos suficientes para generar la comparativa.</Text>
+                  )}
+
+                </View>
+
+                {/* Tarjeta original de Hoy (sin cambios funcionales) */}
                 <View style={panelStyles.card}>
                   <View style={styles.cardHeaderRow}>
                     <View style={styles.todayTextBlock}>
@@ -821,8 +1086,8 @@ export const DayToDayAnalysisScreen: React.FC = () => {
                           {
                             width: `${Math.min(
                               100,
-                              week && week.limite_semana > 0
-                                ? (week.total_semana / week.limite_semana) * 100
+                              week && (week as any).limite_semana > 0
+                                ? ((week as any).total_semana / (week as any).limite_semana) * 100
                                 : 0
                             )}%`,
                           },
@@ -911,8 +1176,8 @@ export const DayToDayAnalysisScreen: React.FC = () => {
 
                     <View style={analysisStyles.progressRow}>
                       <Text style={analysisStyles.progressCaption}>
-                        {month && month.presupuesto_mes > 0
-                          ? `${((month.gastado_mes / month.presupuesto_mes) * 100).toFixed(1)}% del presupuesto mensual usado`
+                        {month && (month as any).presupuesto_mes > 0
+                          ? `${(((month as any).gastado_mes / (month as any).presupuesto_mes) * 100).toFixed(1)}% del presupuesto mensual usado`
                           : 'Aún no hay presupuesto estimado suficiente para este mes'}
                       </Text>
                       <View style={analysisStyles.progressBarBackground}>
@@ -921,8 +1186,8 @@ export const DayToDayAnalysisScreen: React.FC = () => {
                             analysisStyles.progressBarFillSoft,
                             {
                               width:
-                                month && month.presupuesto_mes > 0
-                                  ? `${Math.min(100, (month.gastado_mes / month.presupuesto_mes) * 100)}%`
+                                month && (month as any).presupuesto_mes > 0
+                                  ? `${Math.min(100, ((month as any).gastado_mes / (month as any).presupuesto_mes) * 100)}%`
                                   : '0%',
                             },
                           ]}
@@ -1170,7 +1435,7 @@ export const DayToDayAnalysisScreen: React.FC = () => {
             </View>
           )}
 
-          {/* ✅ AQUÍ VA: entre Detalle categoría y Proveedores destacados */}
+          {/* ✅ Tendencia gasto seleccionado */}
           {data && effectiveSelectedCategory && (
             <View style={panelStyles.section}>
               <SectionHeader
@@ -1433,6 +1698,97 @@ const styles = StyleSheet.create({
     marginTop: 2,
     fontSize: 11,
     color: colors.textSecondary,
+  },
+
+  // ✅ NUEVO: estilos tarjeta comparativa mes-a-fecha
+  mtdCompareCard: {
+    marginBottom: 12,
+    borderWidth: StyleSheet.hairlineWidth,
+  },
+  mtdCompareCardLoading: {
+    opacity: 0.9,
+  },
+  mtdCompareHeaderRow: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    justifyContent: 'space-between',
+  },
+  mtdCompareTitle: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: colors.textPrimary,
+  },
+  mtdCompareSubtitle: {
+    marginTop: 2,
+    fontSize: 11,
+    color: colors.textSecondary,
+  },
+  mtdCompareInfoBtn: {
+    paddingLeft: 8,
+    paddingTop: 2,
+  },
+  mtdCompareBodyRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    marginTop: 10,
+  },
+  mtdCompareCol: {
+    flex: 1,
+  },
+  mtdCompareKpiLabel: {
+    fontSize: 11,
+    color: colors.textSecondary,
+  },
+  mtdCompareKpiValue: {
+    marginTop: 2,
+    fontSize: 15,
+    fontWeight: '800',
+    color: colors.textPrimary,
+  },
+  mtdCompareDeltaRow: {
+    marginTop: 10,
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+  },
+  mtdCompareDeltaLeft: {
+    flex: 1,
+    paddingRight: 8,
+  },
+  mtdCompareDeltaLabel: {
+    fontSize: 11,
+    color: colors.textSecondary,
+  },
+  mtdCompareDeltaValue: {
+    marginTop: 2,
+    fontSize: 13,
+    fontWeight: '800',
+    color: colors.textPrimary,
+  },
+  mtdCompareMessagePill: {
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 999,
+    backgroundColor: colors.surface,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: colors.border,
+  },
+  mtdCompareMessageText: {
+    fontSize: 11,
+    fontWeight: '800',
+    color: colors.textPrimary,
+  },
+
+  mtdCompareColRight: {
+    alignItems: 'flex-end',
+  },
+
+  mtdCompareMessageInline: {
+    marginTop: 2,
+    fontSize: 12,
+    fontWeight: '800',
+    color: colors.textPrimary,
+    textAlign: 'right',
   },
 
   monthHeaderRow: {

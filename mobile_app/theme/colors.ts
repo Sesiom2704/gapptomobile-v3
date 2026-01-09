@@ -36,6 +36,12 @@ export const colors = {
   warning: '#F59E0B',
   danger: '#EF4444',
 
+  // ✅ Estados soft (fondos claros para tarjetas/badges)
+  // Motivo: evita hardcodes de hex en pantallas y unifica el look & feel.
+  successSoft: '#ECFDF5',
+  warningSoft: '#FFFBEB',
+  dangerSoft: '#FEF2F2',
+
   // Neutrales
   neutralSoft: '#F3F4F6',
   neutral200: '#E5E7EB',
