@@ -1,22 +1,10 @@
 // mobile_app/services/homeDashboardApi.ts
 //
-// Objetivo del cambio (sin crear un service nuevo):
-// - Mantener el HomeDashboard tal cual.
-// - Añadir un bloque "Patrimonio" calculado con la MISMA lógica que el Ranking:
-//   - KPIs por propiedad desde /api/v1/analytics/patrimonios/{id}/kpis
-//   - Valor mercado / inversión desde /api/v1/patrimonios/{id}/compra
-// - Agregar a nivel usuario (activos):
-//   - rentabilidadBrutaMediaPct (ponderada por valor_base)
-//   - noiTotal (anual, annualize=true)
-//   - valorMercadoTotal
-//   - equityTotal = Σ(valor_mercado) − Σ(total_inversion)
-//   - indicadores extra "pro":
-//       * noiSobreVmPct = NOI / Valor Mercado
-//       * ltvAproxPct   = Total Inversión / Valor Mercado  (aprox, no es deuda real)
-//
-// Nota importante:
-// - NO usamos /api/v1/analytics/patrimonio/summary porque en tu entorno daba 404.
-// - Si alguna propiedad no tiene compra/kpis, se agrega de forma defensiva (no rompe).
+// Objetivo:
+// - Mantener HomeDashboard tal cual.
+// - Añadir soporte para barras 3 estados (real/pagado, omitido, pendiente) en Home.
+// - Mantener aliases legacy para no romper navegación ni pantallas previas.
+// - Mantener bloque Patrimonio (como ya tenías).
 
 import { getMonthlySummary } from './analyticsApi';
 import { fetchBalanceMes } from './balanceApi';
@@ -37,7 +25,7 @@ export type HomeDashboardResponse = {
   gastosMes: number;
   ahorroMes: number;
 
-  // --- NOMBRES NUEVOS (base) ---
+  // --- NOMBRES NUEVOS (base / ajustados) ---
   ingresosPresupuestados: number;
   gestionablesPresupuestados: number;
   cotidianosPresupuestados: number;
@@ -45,11 +33,22 @@ export type HomeDashboardResponse = {
 
   gestionablesConsumidos: number; // ✅ SOLO recurrentes (excluye PAGO UNICO)
   cotidianosConsumidos: number;
-  totalGastoConsumido: number;    // ✅ incluye extras gastos
+  totalGastoConsumido: number; // ✅ incluye extras gastos
 
   extrasIngresosMes: number; // ingresos PAGO UNICO cobrados en el mes
-  extrasGastosMes: number;   // gastos gestionables PAGO UNICO pagados en el mes
-  extrasNetoMes: number;     // extrasIngresosMes - extrasGastosMes
+  extrasGastosMes: number; // gastos gestionables PAGO UNICO pagados en el mes
+  extrasNetoMes: number; // extrasIngresosMes - extrasGastosMes
+
+  // --- NUEVO: ORIGINAL + OMITIDOS (para Home 3 estados) ---
+  ingresosPresupuestadosOriginal: number;
+  gestionablesPresupuestadosOriginal: number;
+  cotidianosPresupuestadosOriginal: number;
+  totalGastoPresupuestadoOriginal: number;
+
+  ingresosOmitidosMes: number;
+  gestionablesOmitidosMes: number;
+  cotidianosOmitidosMes: number;
+  totalGastoOmitidoMes: number;
 
   // --- ALIAS LEGACY (para que MainTabs no rompa) ---
   gestionablesReal: number;
@@ -76,18 +75,18 @@ export type HomeDashboardResponse = {
   }>;
 
   // -----------------------
-  // NUEVO: Resumen Patrimonio (para Home)
+  // Patrimonio (para Home)
   // -----------------------
   patrimonioPropiedadesCount: number;
   patrimonioValorMercadoTotal: number;
   patrimonioNoiTotal: number; // anual (annualize=true)
   patrimonioEquityTotal: number;
-  patrimonioRentabilidadBrutaMediaPct: number | null; // % (ponderada). null si no hay base
+  patrimonioRentabilidadBrutaMediaPct: number | null; // % ponderada, null si no hay base
 
   // Extras "pro"
   patrimonioNoiSobreVmPct: number | null; // NOI / VM * 100
-  patrimonioLtvAproxPct: number | null;   // Inversión / VM * 100 (aprox)
-  patrimonioNoiMensual: number;           // NOI / 12
+  patrimonioLtvAproxPct: number | null; // Inversión / VM * 100 (aprox)
+  patrimonioNoiMensual: number; // NOI / 12
 };
 
 function n(v: unknown): number {
@@ -164,7 +163,6 @@ async function fetchPatrimonioSummaryForHome(year: number): Promise<{
   ltvAproxPct: number | null;
   noiMensual: number;
 }> {
-  // 1) Listado patrimonios
   const rProps = await api.get<PatrimonioRow[]>(`/api/v1/patrimonios`);
   const activos = (rProps.data ?? []).filter(isActive);
 
@@ -181,7 +179,6 @@ async function fetchPatrimonioSummaryForHome(year: number): Promise<{
     };
   }
 
-  // 2) Enriquecemos cada propiedad con compra y kpis (en paralelo)
   const enriched = await Promise.all(
     activos.map(async (p) => {
       const pid = encodeURIComponent(p.id);
@@ -203,14 +200,12 @@ async function fetchPatrimonioSummaryForHome(year: number): Promise<{
     })
   );
 
-  // 3) Agregados
   let valorMercadoTotal = 0;
   let totalInversionTotal = 0;
   let noiTotal = 0;
 
-  // rentabilidad bruta media ponderada por valor_base
-  let wSum = 0; // SUM(valor_base)
-  let wPct = 0; // SUM(rendimiento_bruto_pct * valor_base)
+  let wSum = 0;
+  let wPct = 0;
 
   for (const it of enriched) {
     const vm = numOrNull(it.compra?.valor_mercado) ?? 0;
@@ -235,10 +230,7 @@ async function fetchPatrimonioSummaryForHome(year: number): Promise<{
   const rentabilidadBrutaMediaPct = wSum > 0 ? wPct / wSum : null;
 
   const noiSobreVmPct = valorMercadoTotal > 0 ? (noiTotal / valorMercadoTotal) * 100 : null;
-
-  // “LTV aprox” (realmente: inversión/valor mercado). Útil como indicador rápido, pero no es deuda.
   const ltvAproxPct = valorMercadoTotal > 0 ? (totalInversionTotal / valorMercadoTotal) * 100 : null;
-
   const noiMensual = noiTotal / 12;
 
   return {
@@ -246,7 +238,8 @@ async function fetchPatrimonioSummaryForHome(year: number): Promise<{
     valorMercadoTotal: Number(valorMercadoTotal.toFixed(2)),
     noiTotal: Number(noiTotal.toFixed(2)),
     equityTotal: Number(equityTotal.toFixed(2)),
-    rentabilidadBrutaMediaPct: rentabilidadBrutaMediaPct == null ? null : Number(rentabilidadBrutaMediaPct.toFixed(2)),
+    rentabilidadBrutaMediaPct:
+      rentabilidadBrutaMediaPct == null ? null : Number(rentabilidadBrutaMediaPct.toFixed(2)),
     noiSobreVmPct: noiSobreVmPct == null ? null : Number(noiSobreVmPct.toFixed(2)),
     ltvAproxPct: ltvAproxPct == null ? null : Number(ltvAproxPct.toFixed(2)),
     noiMensual: Number(noiMensual.toFixed(2)),
@@ -264,8 +257,6 @@ export async function fetchHomeDashboard(params: {
     fetchBalanceMes({ year, month }),
     sumGastosCotidianosMes(year, month),
     fetchMovimientosMes(year, month),
-
-    // ✅ Patrimonio (si falla, no rompemos Home)
     fetchPatrimonioSummaryForHome(year).catch(() => ({
       propiedadesCount: 0,
       valorMercadoTotal: 0,
@@ -279,7 +270,7 @@ export async function fetchHomeDashboard(params: {
   ]);
 
   // -----------------------
-  // REALES (corregidos)
+  // REALES (mes)
   // -----------------------
   const ingresosRecurrentesMes = n((summary as any)?.detalle_ingresos?.recurrentes);
   const extrasIngresosMes = n((summary as any)?.detalle_ingresos?.extraordinarios);
@@ -288,16 +279,16 @@ export async function fetchHomeDashboard(params: {
   const gastosMes = n((summary as any)?.general?.gastos_mes);
   const ahorroMes = n((summary as any)?.general?.ahorro_mes);
 
-  // ✅ Gestionables (barra 3): SOLO recurrentes (periodicidad <> PAGO UNICO)
+  // ✅ Gestionables (solo recurrentes)
   const gestionablesConsumidos = n((summary as any)?.detalle_gastos?.recurrentes);
 
-  // ✅ Extras gastos (barra 5): SOLO PAGO UNICO
+  // ✅ Extras gastos (PAGO UNICO)
   const extrasGastosMes = n((summary as any)?.detalle_gastos?.extraordinarios);
 
-  // ✅ Cotidianos consumidos pagados (barra 4)
+  // ✅ Cotidianos pagados (barra 4)
   const cotidianosConsumidos = n(totalCotidianos);
 
-  // ✅ Total gasto consumido (barra 1): gestionables recurrentes + cotidianos + extras gastos
+  // ✅ Total gasto consumido (incluye extras gastos)
   const totalGastoConsumido = gestionablesConsumidos + cotidianosConsumidos + extrasGastosMes;
 
   // ✅ Neto extras
@@ -306,10 +297,33 @@ export async function fetchHomeDashboard(params: {
   // -----------------------
   // PRESUPUESTOS (backend)
   // -----------------------
-  const ingresosPresupuestados = n((summary as any)?.presupuestos?.ingresos_presupuesto);
-  const gestionablesPresupuestados = n((summary as any)?.presupuestos?.gestionables_presupuesto);
-  const cotidianosPresupuestados = n((summary as any)?.presupuestos?.cotidianos_presupuesto);
-  const totalGastoPresupuestado = n((summary as any)?.presupuestos?.gasto_total_presupuesto);
+  const pres = (summary as any)?.presupuestos ?? {};
+
+  // Ajustados (legacy)
+  const ingresosPresupuestados = n(pres?.ingresos_presupuesto);
+  const gestionablesPresupuestados = n(pres?.gestionables_presupuesto);
+  const cotidianosPresupuestados = n(pres?.cotidianos_presupuesto);
+  const totalGastoPresupuestado = n(pres?.gasto_total_presupuesto);
+
+  // Originales (si no vienen, fallback a ajustados)
+  const ingresosPresupuestadosOriginal = n(
+    pres?.ingresos_presupuesto_original ?? pres?.ingresos_presupuesto
+  );
+  const gestionablesPresupuestadosOriginal = n(
+    pres?.gestionables_presupuesto_original ?? pres?.gestionables_presupuesto
+  );
+  const cotidianosPresupuestadosOriginal = n(
+    pres?.cotidianos_presupuesto_original ?? pres?.cotidianos_presupuesto
+  );
+  const totalGastoPresupuestadoOriginal = n(
+    pres?.gasto_total_presupuesto_original ?? pres?.gasto_total_presupuesto
+  );
+
+  // Omitidos (si no vienen, 0)
+  const ingresosOmitidosMes = n(pres?.ingresos_omitidos_mes);
+  const gestionablesOmitidosMes = n(pres?.gestionables_omitidos_mes);
+  const cotidianosOmitidosMes = n(pres?.cotidianos_omitidos_mes);
+  const totalGastoOmitidoMes = n(pres?.gasto_total_omitido_mes);
 
   // -----------------------
   // PENDIENTES (balance)
@@ -340,7 +354,7 @@ export async function fetchHomeDashboard(params: {
     }));
 
   // -----------------------
-  // ALIAS para MainTabs
+  // ALIAS para compat (MainTabs)
   // -----------------------
   const gestionablesReal = gestionablesConsumidos;
   const cotidianosReal = cotidianosConsumidos;
@@ -373,6 +387,18 @@ export async function fetchHomeDashboard(params: {
     extrasGastosMes,
     extrasNetoMes,
 
+    // ✅ nuevos para Home (3 estados)
+    ingresosPresupuestadosOriginal,
+    gestionablesPresupuestadosOriginal,
+    cotidianosPresupuestadosOriginal,
+    totalGastoPresupuestadoOriginal,
+
+    ingresosOmitidosMes,
+    gestionablesOmitidosMes,
+    cotidianosOmitidosMes,
+    totalGastoOmitidoMes,
+
+    // legacy
     gestionablesReal,
     cotidianosReal,
     totalGastoReal,
@@ -386,9 +412,7 @@ export async function fetchHomeDashboard(params: {
 
     ultimosMovimientos,
 
-    // -----------------------
-    // Patrimonio para Home
-    // -----------------------
+    // Patrimonio
     patrimonioPropiedadesCount: patrimonioSummary.propiedadesCount,
     patrimonioValorMercadoTotal: patrimonioSummary.valorMercadoTotal,
     patrimonioNoiTotal: patrimonioSummary.noiTotal,

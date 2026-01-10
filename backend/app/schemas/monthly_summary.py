@@ -14,6 +14,17 @@ class MonthlyPresupuestos(BaseModel):
     cotidianos_presupuesto: float = Field(..., description="Presupuesto de gastos cotidianos (KPI/activo).")
     gasto_total_presupuesto: float = Field(..., description="Suma de gestionables_presupuesto + cotidianos_presupuesto.")
 
+    # ✅ NUEVO (opcionales, backward compatible)
+    ingresos_presupuesto_original: Optional[float] = None
+    gestionables_presupuesto_original: Optional[float] = None
+    cotidianos_presupuesto_original: Optional[float] = None
+    gasto_total_presupuesto_original: Optional[float] = None
+
+    ingresos_omitidos_mes: Optional[float] = None
+    gestionables_omitidos_mes: Optional[float] = None
+    cotidianos_omitidos_mes: Optional[float] = None
+    gasto_total_omitido_mes: Optional[float] = None
+
 
 class MonthlyGeneralKpi(BaseModel):
     """

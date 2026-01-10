@@ -3,11 +3,11 @@
 // Home UI (pantalla de mostrar) separada de la navegación.
 // Mantiene funcionalidad existente sin romper navegación.
 //
-// CAMBIO SOLICITADO (Moises):
-// - La tarjeta "Gastos cotidianos / Consumidos este mes" (Resumen rápido)
-//   ahora es pulsable y navega a Día a Día Análisis (DayToDayAnalysisScreen).
-// - Se añade un botón de info (icono "i") en esa tarjeta, igual al patrón de
-//   otras tarjetas (ej. Liquidez total), sin perder funcionalidades existentes.
+// CAMBIOS (Moises):
+// - Barras presupuesto en 3 estados (Real/Pagado, Omitido, Pendiente).
+// - Mostrar "Cumplimiento de movimientos %" en el texto de cada barra.
+// - Corregir typing TS para width: "xx%" (DimensionValue).
+// - Mantener tarjetas, navegación e InfoModal sin pérdidas.
 // -----------------------------------------------------------------------------
 
 import React, { useMemo, useState } from 'react';
@@ -19,6 +19,7 @@ import {
   TouchableOpacity,
   RefreshControl,
   ActivityIndicator,
+  DimensionValue,
 } from 'react-native';
 import { useNavigation } from '@react-navigation/native';
 import { SafeAreaView } from 'react-native-safe-area-context';
@@ -66,9 +67,7 @@ function formatMovDateTime(raw: string): string {
   if (!raw) return '—';
 
   const cleaned = raw.replace(' T:', 'T').trim();
-  const m = cleaned.match(
-    /^(\d{4})-(\d{2})-(\d{2})(?:[T\s](\d{2}):(\d{2})(?::(\d{2}))?)?/
-  );
+  const m = cleaned.match(/^(\d{4})-(\d{2})-(\d{2})(?:[T\s](\d{2}):(\d{2})(?::(\d{2}))?)?/);
 
   if (m) {
     const [, yyyy, mm, dd, hh = '00', mi = '00', ss = '00'] = m;
@@ -118,25 +117,101 @@ const HOME_INFO: Record<string, string> = {
   acciones_rapidas:
     'Accesos directos para crear movimientos sin navegar por menús: gasto extra, gasto cotidiano e ingreso extra.',
   presupuesto_mensual:
-    'Comparación entre real y presupuesto. Cada barra muestra cuánto llevas consumido/cobrado frente a lo previsto.',
+    'Comparación entre real y presupuesto. Cada barra muestra cuánto llevas consumido/cobrado frente a lo previsto (incluyendo omitidos/pending).',
   actividad_reciente:
     'Últimos movimientos registrados. Útil para validar que lo reciente está bien categorizado y fechado.',
-  patrimonio:
-    'Resumen de tus propiedades: valor de mercado, NOI anual, equity y métricas derivadas.',
+  patrimonio: 'Resumen de tus propiedades: valor de mercado, NOI anual, equity y métricas derivadas.',
   liquidez_total:
     'Liquidez total: saldo actual agregado de cuentas. Pulsar te lleva a Balance para ver el detalle.',
-  total_gasto:
-    'Total gasto: barra agregada del gasto del mes. Pulsar te lleva a Análisis día a día.',
+  total_gasto: 'Total gasto: barra agregada del gasto del mes. Pulsar te lleva a Análisis día a día.',
 
   // ✅ nuevos: de dónde salen los indicadores
   noi_vm:
     'NOI/VM: se calcula como (NOI anual) / (Valor de mercado). Refleja la rentabilidad anual aproximada sobre el valor actual.',
   ltv_aprox:
-    'LTV aprox: se estima como (Deuda pendiente) / (Valor de mercado). Es una aproximación del nivel de apalancamiento.',
+    'LTV aprox: se estima como (Inversión total) / (Valor de mercado). Es una aproximación del nivel de apalancamiento.',
 
-  // ✅ NUEVO: info específica para la tarjeta "Gastos cotidianos / Consumidos este mes"
+  // ✅ tarjeta "Gastos cotidianos / Consumidos este mes"
   cotidianos_consumidos_mes:
-    'Gastos cotidianos consumidos este mes: suma de los movimientos clasificados como gasto cotidiano dentro del mes actual. Pulsando la tarjeta accedes a "Día a día análisis" para ver el detalle y su distribución.',
+    'Gastos cotidianos consumidos este mes: suma de los movimientos clasificados como gasto cotidiano dentro del mes actual. Pulsando la tarjeta accedes a "Día a día análisis".',
+};
+
+// --------------------
+// ✅ Barra 3 estados (Real/Pagado, Omitido, Pendiente)
+// --------------------
+
+type Segments = {
+  realPct: number; // % del plan original que está “real/pagado”
+  omittedPct: number; // % del plan original omitido
+  pendingPct: number; // % del plan original pendiente
+  moneyPct: number; // real/plan
+  movimientosPct: number; // (real+omitido)/plan
+};
+
+function clamp01(x: number) {
+  if (!Number.isFinite(x)) return 0;
+  return Math.min(1, Math.max(0, x));
+}
+
+function calcSegments(real: number, omitted: number, planned: number): Segments {
+  const plan = planned > 0 ? planned : 0;
+
+  if (plan <= 0) {
+    return { realPct: 0, omittedPct: 0, pendingPct: 0, moneyPct: 0, movimientosPct: 0 };
+  }
+
+  const realClamped = Math.max(0, real);
+  const omittedClamped = Math.max(0, omitted);
+
+  const moneyPct = clamp01(realClamped / plan);
+  const movimientosPct = clamp01((realClamped + omittedClamped) / plan);
+
+  // segmentos del “plan original”
+  let realPct = moneyPct * 100;
+  let omittedPct = clamp01(omittedClamped / plan) * 100;
+
+  // pendiente = lo que falta para completar el plan con (real + omitido)
+  let pendingPct = 100 - (realPct + omittedPct);
+  if (pendingPct < 0) pendingPct = 0;
+
+  // Ajuste defensivo (por redondeos)
+  const sum = realPct + omittedPct + pendingPct;
+  if (sum > 100) {
+    const exceso = sum - 100;
+    // Quitamos el exceso del pending primero (lo más razonable visualmente)
+    pendingPct = Math.max(0, pendingPct - exceso);
+  }
+
+  return { realPct, omittedPct, pendingPct, moneyPct, movimientosPct };
+}
+
+function formatPctEs(x: number) {
+  // 2 decimales con coma
+  return `${(x * 100).toFixed(2).replace('.', ',')}%`;
+}
+
+const SegmentedProgressBar: React.FC<{
+  realPct: number;
+  omittedPct: number;
+  pendingPct: number;
+  realColor: string;
+  omittedColor: string;
+  pendingColor: string;
+}> = ({ realPct, omittedPct, pendingPct, realColor, omittedColor, pendingColor }) => {
+  const wReal: DimensionValue = `${Math.max(0, Math.min(100, realPct))}%`;
+  const wOmitted: DimensionValue = `${Math.max(0, Math.min(100, omittedPct))}%`;
+  const wPending: DimensionValue = `${Math.max(0, Math.min(100, pendingPct))}%`;
+
+  return (
+    <View style={styles.progressBarBackground}>
+      {/* Contenedor en fila: 3 segmentos */}
+      <View style={styles.segmentRow}>
+        <View style={[styles.segmentBase, { width: wReal, backgroundColor: realColor }]} />
+        <View style={[styles.segmentBase, { width: wOmitted, backgroundColor: omittedColor }]} />
+        <View style={[styles.segmentBase, { width: wPending, backgroundColor: pendingColor }]} />
+      </View>
+    </View>
+  );
 };
 
 // --------------------
@@ -195,11 +270,7 @@ const HomeHeader: React.FC<{
           <View style={styles.homeSaldoContainer}>
             <Text style={styles.homeSaldoLabel}>Saldo fin de mes (estimado)</Text>
             <Text style={styles.homeSaldoValue}>
-              {saldoPrevisto == null
-                ? '–'
-                : hideAmounts
-                ? masked
-                : EuroformatEuro(saldoPrevisto, 'signed')}
+              {saldoPrevisto == null ? '–' : hideAmounts ? masked : EuroformatEuro(saldoPrevisto, 'signed')}
             </Text>
           </View>
         </View>
@@ -223,7 +294,7 @@ const HomeScreen: React.FC = () => {
 
   const info = useInfoModal();
 
-  const fmt = (value: number | null | undefined, mode: any) => {
+  const fmtMoney = (value: number | null | undefined, mode: any) => {
     if (value == null) return '–';
     return hideAmounts ? masked : EuroformatEuro(value, mode);
   };
@@ -322,11 +393,7 @@ const HomeScreen: React.FC = () => {
     });
   };
 
-  // --------------------
-  // ✅ NUEVO: navegación específica para la tarjeta
-  // "Gastos cotidianos / Consumidos este mes"
-  // Requisito: al pulsar la tarjeta, ir a Día a día análisis.
-  // --------------------
+  // ✅ tarjeta "Gastos cotidianos / Consumidos este mes"
   const goCotidianosConsumidosToDiaADia = () => {
     navigation.navigate('DayToDayTab', {
       screen: 'DayToDayAnalysisScreen',
@@ -343,17 +410,24 @@ const HomeScreen: React.FC = () => {
   const gastosGestionablesMes = data?.gestionablesReal ?? null;
   const gastosCotidianosMes = data?.cotidianosReal ?? null;
 
+  // Barras (real + plan)
   const totalGastoActual = data?.totalGastoReal ?? 0;
-  const totalGastoPresupuesto = data?.totalGastoPresupuestado ?? 0;
+  const totalGastoPlanOriginal = data?.totalGastoPresupuestadoOriginal ?? data?.totalGastoPresupuestado ?? 0;
+  const totalGastoOmitido = data?.totalGastoOmitidoMes ?? 0;
 
   const ingresosRecibidos = data?.ingresosMes ?? 0;
-  const ingresosPrevistos = data?.ingresosPresupuestados ?? 0;
+  const ingresosPlanOriginal = data?.ingresosPresupuestadosOriginal ?? data?.ingresosPresupuestados ?? 0;
+  const ingresosOmitidos = data?.ingresosOmitidosMes ?? 0;
 
   const gestionablesPagados = data?.gestionablesReal ?? 0;
-  const gestionablesPresupuestados = data?.gestionablesPresupuestado ?? 0;
+  const gestionablesPlanOriginal =
+    data?.gestionablesPresupuestadosOriginal ?? data?.gestionablesPresupuestado ?? data?.gestionablesPresupuestados ?? 0;
+  const gestionablesOmitidos = data?.gestionablesOmitidosMes ?? 0;
 
   const cotidianosConsumidos = data?.cotidianosReal ?? 0;
-  const cotidianosPresupuestados = data?.cotidianosPresupuestado ?? 0;
+  const cotidianosPlanOriginal =
+    data?.cotidianosPresupuestadosOriginal ?? data?.cotidianosPresupuestado ?? data?.cotidianosPresupuestados ?? 0;
+  const cotidianosOmitidos = data?.cotidianosOmitidosMes ?? 0;
 
   // Patrimonio (Home)
   const patPropsCount = data?.patrimonioPropiedadesCount ?? 0;
@@ -365,6 +439,40 @@ const HomeScreen: React.FC = () => {
   // Indicadores
   const patNoiSobreVmPct = data?.patrimonioNoiSobreVmPct ?? null;
   const patLtvAproxPct = data?.patrimonioLtvAproxPct ?? null;
+
+  // --------------------
+  // Colores barras 3 estados
+  // --------------------
+  // Real: ingresos (verde), gastos (rojo suave)
+  const REAL_INCOME = colors.success;
+  const REAL_EXPENSE_SOFT = 'rgba(220, 38, 38, 0.70)'; // rojo menos intenso
+  const OMITTED = 'rgba(245, 158, 11, 0.85)'; // naranja (omitido)
+  const PENDING = 'rgba(107, 114, 128, 0.35)'; // gris (pendiente)
+
+  // --------------------
+  // Helpers para texto de barra
+  // --------------------
+  const formatBudgetValue = (opts: {
+    real: number;
+    planned: number;
+    omitted: number;
+    mode: any;
+  }) => {
+    const { real, planned, omitted, mode } = opts;
+
+    const seg = calcSegments(real, omitted, planned);
+
+    // En modo oculto: ocultamos importes y % también
+    if (hideAmounts) {
+      return `${masked} / ${masked} · Cumplimiento mov. ${masked}`;
+    }
+
+    const realLabel = EuroformatEuro(real, mode);
+    const planLabel = EuroformatEuro(planned, mode);
+    const movPctLabel = formatPctEs(seg.movimientosPct);
+
+    return `${realLabel} / ${planLabel} · Cumplimiento mov. ${movPctLabel}`;
+  };
 
   return (
     <>
@@ -431,15 +539,11 @@ const HomeScreen: React.FC = () => {
                       accessibilityRole="button"
                       accessibilityLabel="Información sobre liquidez total"
                     >
-                      <Ionicons
-                        name="information-circle-outline"
-                        size={14}
-                        color={colors.textSecondary}
-                      />
+                      <Ionicons name="information-circle-outline" size={14} color={colors.textSecondary} />
                     </TouchableOpacity>
                   </View>
 
-                  <Text style={styles.summaryValue}>{fmt(liquidezTotal, 'normal')}</Text>
+                  <Text style={styles.summaryValue}>{fmtMoney(liquidezTotal, 'normal')}</Text>
                   <Text style={styles.summaryDelta}>Saldo actual entre cuentas</Text>
                 </View>
               </TouchableOpacity>
@@ -450,7 +554,7 @@ const HomeScreen: React.FC = () => {
                 </View>
                 <View style={styles.summaryTextBlock}>
                   <Text style={styles.summaryLabel}>Ingresos del mes</Text>
-                  <Text style={styles.summaryValue}>{fmt(ingresosMes, 'plus')}</Text>
+                  <Text style={styles.summaryValue}>{fmtMoney(ingresosMes, 'plus')}</Text>
                   <Text style={styles.summaryDelta}>Cobrado este mes</Text>
                 </View>
               </View>
@@ -463,18 +567,12 @@ const HomeScreen: React.FC = () => {
                 </View>
                 <View style={styles.summaryTextBlockSmall}>
                   <Text style={styles.summaryLabel}>Gastos gestionables</Text>
-                  <Text style={styles.summaryValue}>{fmt(gastosGestionablesMes, 'minus')}</Text>
+                  <Text style={styles.summaryValue}>{fmtMoney(gastosGestionablesMes, 'minus')}</Text>
                   <Text style={styles.summaryDelta}>Pagados este mes</Text>
                 </View>
               </View>
 
-              {/* ======================================================================
-                 ✅ CAMBIO: esta tarjeta ahora es pulsable + tiene botón de info.
-                 Requisito:
-                 - Pulsar la tarjeta => ir a "Día a día análisis".
-                 - Botón "i" como patrón ya usado en Liquidez total.
-                 - Sin perder estilos ni lógica.
-                 ====================================================================== */}
+              {/* ✅ Tarjeta pulsable + info */}
               <TouchableOpacity
                 style={styles.summaryCardSmall}
                 onPress={goCotidianosConsumidosToDiaADia}
@@ -487,31 +585,21 @@ const HomeScreen: React.FC = () => {
                 </View>
 
                 <View style={styles.summaryTextBlockSmall}>
-                  {/* Label + Info (icono i) */}
                   <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
                     <Text style={styles.summaryLabel}>Gastos cotidianos</Text>
-
-                    {/* El touch del icono se queda en el icono (no dispara el onPress padre) */}
                     <TouchableOpacity
                       onPress={() =>
-                        info.open(
-                          'Gastos cotidianos consumidos',
-                          HOME_INFO.cotidianos_consumidos_mes
-                        )
+                        info.open('Gastos cotidianos consumidos', HOME_INFO.cotidianos_consumidos_mes)
                       }
                       style={{ paddingHorizontal: 2, paddingVertical: 2 }}
                       accessibilityRole="button"
                       accessibilityLabel="Información sobre gastos cotidianos consumidos este mes"
                     >
-                      <Ionicons
-                        name="information-circle-outline"
-                        size={14}
-                        color={colors.textSecondary}
-                      />
+                      <Ionicons name="information-circle-outline" size={14} color={colors.textSecondary} />
                     </TouchableOpacity>
                   </View>
 
-                  <Text style={styles.summaryValue}>{fmt(gastosCotidianosMes, 'minus')}</Text>
+                  <Text style={styles.summaryValue}>{fmtMoney(gastosCotidianosMes, 'minus')}</Text>
                   <Text style={styles.summaryDelta}>Consumidos este mes</Text>
                 </View>
               </TouchableOpacity>
@@ -533,29 +621,17 @@ const HomeScreen: React.FC = () => {
             </View>
 
             <View style={styles.quickActionsRow}>
-              <TouchableOpacity
-                style={styles.secondaryActionTall}
-                onPress={goGastoExtra}
-                activeOpacity={0.9}
-              >
+              <TouchableOpacity style={styles.secondaryActionTall} onPress={goGastoExtra} activeOpacity={0.9}>
                 <Ionicons name="add-outline" size={26} color={colors.primary} />
                 <Text style={styles.secondaryActionTextTall}>Añadir gasto extra</Text>
               </TouchableOpacity>
 
-              <TouchableOpacity
-                style={styles.primaryActionTall}
-                onPress={goCotidiano}
-                activeOpacity={0.9}
-              >
+              <TouchableOpacity style={styles.primaryActionTall} onPress={goCotidiano} activeOpacity={0.9}>
                 <Ionicons name="fast-food-outline" size={26} color="#fff" />
                 <Text style={styles.primaryActionTextTall}>Añadir cotidiano</Text>
               </TouchableOpacity>
 
-              <TouchableOpacity
-                style={styles.secondaryActionTall}
-                onPress={goIngresoExtra}
-                activeOpacity={0.9}
-              >
+              <TouchableOpacity style={styles.secondaryActionTall} onPress={goIngresoExtra} activeOpacity={0.9}>
                 <Ionicons name="cash-outline" size={26} color={colors.primary} />
                 <Text style={styles.secondaryActionTextTall}>Añadir ingreso extra</Text>
               </TouchableOpacity>
@@ -586,106 +662,135 @@ const HomeScreen: React.FC = () => {
                   accessibilityRole="button"
                   accessibilityLabel="Información sobre Total gasto"
                 >
-                  <Ionicons
-                    name="information-circle-outline"
-                    size={16}
-                    color={colors.textSecondary}
-                  />
+                  <Ionicons name="information-circle-outline" size={16} color={colors.textSecondary} />
                 </TouchableOpacity>
               </View>
 
-              <TouchableOpacity
-                style={styles.budgetRowPressable}
-                onPress={goBarTotalGasto}
-                activeOpacity={0.85}
-              >
+              {/* ========== TOTAL GASTO (3 estados) ========== */}
+              <TouchableOpacity style={styles.budgetRowPressable} onPress={goBarTotalGasto} activeOpacity={0.85}>
                 <View style={styles.budgetRow}>
                   <View style={styles.budgetRowHeader}>
                     <Text style={styles.budgetRowLabel}>Total gasto</Text>
                     <Text style={styles.budgetRowValue}>
-                      {fmt(totalGastoActual, 'minus')} / {fmt(totalGastoPresupuesto, 'minus')}
+                      {formatBudgetValue({
+                        real: totalGastoActual,
+                        planned: totalGastoPlanOriginal,
+                        omitted: totalGastoOmitido,
+                        mode: 'minus',
+                      })}
                     </Text>
                   </View>
-                  <View style={styles.progressBarBackground}>
-                    <View
-                      style={[
-                        styles.progressBarFill,
-                        { width: `${safeRatio(totalGastoActual, totalGastoPresupuesto) * 100}%` } as any,
-                      ]}
-                    />
-                  </View>
+
+                  {(() => {
+                    const seg = calcSegments(totalGastoActual, totalGastoOmitido, totalGastoPlanOriginal);
+                    return (
+                      <SegmentedProgressBar
+                        realPct={seg.realPct}
+                        omittedPct={seg.omittedPct}
+                        pendingPct={seg.pendingPct}
+                        realColor={REAL_EXPENSE_SOFT}
+                        omittedColor={OMITTED}
+                        pendingColor={PENDING}
+                      />
+                    );
+                  })()}
                 </View>
               </TouchableOpacity>
 
-              <TouchableOpacity
-                style={styles.budgetRowPressable}
-                onPress={goBarIngresos}
-                activeOpacity={0.85}
-              >
+              {/* ========== INGRESOS (3 estados) ========== */}
+              <TouchableOpacity style={styles.budgetRowPressable} onPress={goBarIngresos} activeOpacity={0.85}>
                 <View style={styles.budgetRow}>
                   <View style={styles.budgetRowHeader}>
                     <Text style={styles.budgetRowLabel}>Ingresos</Text>
                     <Text style={styles.budgetRowValue}>
-                      {fmt(ingresosRecibidos, 'plus')} / {fmt(ingresosPrevistos, 'plus')}
+                      {formatBudgetValue({
+                        real: ingresosRecibidos,
+                        planned: ingresosPlanOriginal,
+                        omitted: ingresosOmitidos,
+                        mode: 'plus',
+                      })}
                     </Text>
                   </View>
-                  <View style={styles.progressBarBackground}>
-                    <View
-                      style={[
-                        styles.progressBarFillIncome,
-                        { width: `${safeRatio(ingresosRecibidos, ingresosPrevistos) * 100}%` } as any,
-                      ]}
-                    />
-                  </View>
+
+                  {(() => {
+                    const seg = calcSegments(ingresosRecibidos, ingresosOmitidos, ingresosPlanOriginal);
+                    return (
+                      <SegmentedProgressBar
+                        realPct={seg.realPct}
+                        omittedPct={seg.omittedPct}
+                        pendingPct={seg.pendingPct}
+                        realColor={REAL_INCOME}
+                        omittedColor={OMITTED}
+                        pendingColor={PENDING}
+                      />
+                    );
+                  })()}
                 </View>
               </TouchableOpacity>
 
-              <TouchableOpacity
-                style={styles.budgetRowPressable}
-                onPress={goBarGestionables}
-                activeOpacity={0.85}
-              >
+              {/* ========== GESTIONABLES (3 estados) ========== */}
+              <TouchableOpacity style={styles.budgetRowPressable} onPress={goBarGestionables} activeOpacity={0.85}>
                 <View style={styles.budgetRow}>
                   <View style={styles.budgetRowHeader}>
                     <Text style={styles.budgetRowLabel}>Gestionables</Text>
                     <Text style={styles.budgetRowValue}>
-                      {fmt(gestionablesPagados, 'minus')} / {fmt(gestionablesPresupuestados, 'minus')}
+                      {formatBudgetValue({
+                        real: gestionablesPagados,
+                        planned: gestionablesPlanOriginal,
+                        omitted: gestionablesOmitidos,
+                        mode: 'minus',
+                      })}
                     </Text>
                   </View>
-                  <View style={styles.progressBarBackground}>
-                    <View
-                      style={[
-                        styles.progressBarFill,
-                        { width: `${safeRatio(gestionablesPagados, gestionablesPresupuestados) * 100}%` } as any,
-                      ]}
-                    />
-                  </View>
+
+                  {(() => {
+                    const seg = calcSegments(gestionablesPagados, gestionablesOmitidos, gestionablesPlanOriginal);
+                    return (
+                      <SegmentedProgressBar
+                        realPct={seg.realPct}
+                        omittedPct={seg.omittedPct}
+                        pendingPct={seg.pendingPct}
+                        realColor={REAL_EXPENSE_SOFT}
+                        omittedColor={OMITTED}
+                        pendingColor={PENDING}
+                      />
+                    );
+                  })()}
                 </View>
               </TouchableOpacity>
 
-              <TouchableOpacity
-                style={styles.budgetRowPressable}
-                onPress={goBarCotidianos}
-                activeOpacity={0.85}
-              >
+              {/* ========== COTIDIANOS (3 estados) ========== */}
+              <TouchableOpacity style={styles.budgetRowPressable} onPress={goBarCotidianos} activeOpacity={0.85}>
                 <View style={styles.budgetRow}>
                   <View style={styles.budgetRowHeader}>
                     <Text style={styles.budgetRowLabel}>Cotidianos</Text>
                     <Text style={styles.budgetRowValue}>
-                      {fmt(cotidianosConsumidos, 'minus')} / {fmt(cotidianosPresupuestados, 'minus')}
+                      {formatBudgetValue({
+                        real: cotidianosConsumidos,
+                        planned: cotidianosPlanOriginal,
+                        omitted: cotidianosOmitidos,
+                        mode: 'minus',
+                      })}
                     </Text>
                   </View>
-                  <View style={styles.progressBarBackground}>
-                    <View
-                      style={[
-                        styles.progressBarFill,
-                        { width: `${safeRatio(cotidianosConsumidos, cotidianosPresupuestados) * 100}%` } as any,
-                      ]}
-                    />
-                  </View>
+
+                  {(() => {
+                    const seg = calcSegments(cotidianosConsumidos, cotidianosOmitidos, cotidianosPlanOriginal);
+                    return (
+                      <SegmentedProgressBar
+                        realPct={seg.realPct}
+                        omittedPct={seg.omittedPct}
+                        pendingPct={seg.pendingPct}
+                        realColor={REAL_EXPENSE_SOFT}
+                        omittedColor={OMITTED}
+                        pendingColor={PENDING}
+                      />
+                    );
+                  })()}
                 </View>
               </TouchableOpacity>
 
+              {/* ========== EXTRAS (se mantiene igual, con fix TS width) ========== */}
               <TouchableOpacity
                 style={[styles.budgetRowPressable, { marginBottom: 0 }]}
                 onPress={goBarExtras}
@@ -695,8 +800,7 @@ const HomeScreen: React.FC = () => {
                   <View style={styles.budgetRowHeader}>
                     <Text style={styles.budgetRowLabel}>Extras</Text>
                     <Text style={styles.budgetRowValue}>
-                      Ing {fmt(data?.extrasIngresosMes ?? 0, 'plus')} · Gas{' '}
-                      {fmt(data?.extrasGastosMes ?? 0, 'minus')}
+                      Ing {fmtMoney(data?.extrasIngresosMes ?? 0, 'plus')} · Gas {fmtMoney(data?.extrasGastosMes ?? 0, 'minus')}
                     </Text>
                   </View>
 
@@ -711,25 +815,22 @@ const HomeScreen: React.FC = () => {
                     const leftPct = (extraIng / EXTRAS_RANGE) * 50;
                     const rightPct = (extraGas / EXTRAS_RANGE) * 50;
 
+                    const wLeft: DimensionValue = `${leftPct}%`;
+                    const wRight: DimensionValue = `${rightPct}%`;
+
                     return (
                       <View style={styles.extrasBarBg}>
                         <View style={styles.extrasBarCenterLine} />
-                        <View style={[styles.extrasBarLeft, { width: `${leftPct}%` }]} />
-                        <View style={[styles.extrasBarRight, { width: `${rightPct}%` }]} />
+                        <View style={[styles.extrasBarLeft, { width: wLeft }]} />
+                        <View style={[styles.extrasBarRight, { width: wRight }]} />
                       </View>
                     );
                   })()}
 
                   <View style={{ flexDirection: 'row', justifyContent: 'space-between', marginTop: 4 }}>
-                    <Text style={{ fontSize: 10, color: colors.textSecondary }}>
-                      {hideAmounts ? masked : '+2.000 €'}
-                    </Text>
-                    <Text style={{ fontSize: 10, color: colors.textSecondary }}>
-                      {hideAmounts ? masked : '0 €'}
-                    </Text>
-                    <Text style={{ fontSize: 10, color: colors.textSecondary }}>
-                      {hideAmounts ? masked : '-2.000 €'}
-                    </Text>
+                    <Text style={{ fontSize: 10, color: colors.textSecondary }}>{hideAmounts ? masked : '+2.000 €'}</Text>
+                    <Text style={{ fontSize: 10, color: colors.textSecondary }}>{hideAmounts ? masked : '0 €'}</Text>
+                    <Text style={{ fontSize: 10, color: colors.textSecondary }}>{hideAmounts ? masked : '-2.000 €'}</Text>
                   </View>
                 </View>
               </TouchableOpacity>
@@ -802,18 +903,16 @@ const HomeScreen: React.FC = () => {
                 <View>
                   <Text style={panelStyles.cardTitle}>Resumen de propiedades</Text>
                   <Text style={panelStyles.cardSubtitle}>
-                    {patPropsCount > 0
-                      ? `${patPropsCount} activa${patPropsCount === 1 ? '' : 's'}`
-                      : 'Sin propiedades activas'}
+                    {patPropsCount > 0 ? `${patPropsCount} activa${patPropsCount === 1 ? '' : 's'}` : 'Sin propiedades activas'}
                   </Text>
                 </View>
 
-                <Text style={styles.cardChipHighlight}>Equity {fmt(patEquityTotal, 'signed')}</Text>
+                <Text style={styles.cardChipHighlight}>Equity {fmtMoney(patEquityTotal, 'signed')}</Text>
               </View>
 
               <View style={styles.patrimonioTopRow}>
                 <View style={styles.patrimonioColLeft}>
-                  <Text style={panelStyles.cardValue}>{fmt(patValorMercadoTotal, 'normal')}</Text>
+                  <Text style={panelStyles.cardValue}>{fmtMoney(patValorMercadoTotal, 'normal')}</Text>
                   <Text style={panelStyles.cardSubtitleSmall}>Valor mercado total</Text>
                 </View>
 
@@ -823,14 +922,12 @@ const HomeScreen: React.FC = () => {
                 </View>
               </View>
 
-              {/* NOI total */}
               <View style={styles.patrimonioMetaRow}>
                 <View style={styles.patrimonioMetaItem}>
                   <Text style={styles.patrimonioMetaLabel}>NOI total (anual)</Text>
-                  <Text style={styles.patrimonioMetaValue}>{fmt(patNoiTotal, 'signed')}</Text>
+                  <Text style={styles.patrimonioMetaValue}>{fmtMoney(patNoiTotal, 'signed')}</Text>
                 </View>
 
-                {/* ✅ Indicadores: dos filas, cada una con cifra + botón info */}
                 <View style={styles.patrimonioMetaItemRight}>
                   <Text style={styles.patrimonioMetaLabel}>Indicadores</Text>
 
@@ -877,7 +974,7 @@ const HomeScreen: React.FC = () => {
 export default HomeScreen;
 
 // --------------------
-// Estilos (migrados tal cual y ampliados)
+// Estilos
 // --------------------
 
 const styles = StyleSheet.create({
@@ -936,7 +1033,12 @@ const styles = StyleSheet.create({
   },
   sectionHeaderLeft: { flexDirection: 'row', alignItems: 'center', gap: 8, flex: 1, paddingRight: 8 },
 
-  cardTitleRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 },
+  cardTitleRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: 8,
+  },
 
   summaryRowTop: { flexDirection: 'row', gap: 10, marginBottom: 10 },
   summaryTopCard: {
@@ -993,9 +1095,22 @@ const styles = StyleSheet.create({
   budgetRowHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'baseline', marginBottom: 4 },
   budgetRowLabel: { fontSize: 12, fontWeight: '600', color: colors.textPrimary },
   budgetRowValue: { fontSize: 11, color: colors.textSecondary },
-  progressBarBackground: { height: 8, borderRadius: 999, backgroundColor: colors.border, overflow: 'hidden' },
-  progressBarFill: { height: '100%', borderRadius: 999, backgroundColor: colors.primary },
-  progressBarFillIncome: { height: '100%', borderRadius: 999, backgroundColor: colors.success },
+
+  // ✅ fondo barra + segmentos (3 estados)
+  progressBarBackground: {
+    height: 8,
+    borderRadius: 999,
+    backgroundColor: colors.border,
+    overflow: 'hidden',
+  },
+  segmentRow: {
+    flex: 1,
+    flexDirection: 'row',
+    height: '100%',
+  },
+  segmentBase: {
+    height: '100%',
+  },
 
   quickActionsRow: { flexDirection: 'row', marginTop: 8, gap: 10, flexWrap: 'nowrap' },
   primaryActionTall: {
@@ -1049,13 +1164,19 @@ const styles = StyleSheet.create({
   patrimonioRentLabel: { fontSize: 11, color: colors.textSecondary },
   patrimonioRentValue: { fontSize: 20, fontWeight: '700', color: colors.primary, marginTop: 2 },
 
-  patrimonioMetaRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 8, marginTop: 2, gap: 12 },
+  patrimonioMetaRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'flex-start',
+    marginBottom: 8,
+    marginTop: 2,
+    gap: 12,
+  },
   patrimonioMetaItem: { flex: 1 },
   patrimonioMetaItemRight: { flex: 1, alignItems: 'flex-end' },
   patrimonioMetaLabel: { fontSize: 11, color: colors.textSecondary },
   patrimonioMetaValue: { marginTop: 2, fontSize: 14, fontWeight: '700', color: colors.textPrimary },
 
-  // ✅ indicadores en dos líneas con botón de info
   indicatorLine: {
     marginTop: 4,
     flexDirection: 'row',
@@ -1070,7 +1191,13 @@ const styles = StyleSheet.create({
   },
   indicatorInfoBtn: { paddingHorizontal: 2, paddingVertical: 2 },
 
-  extrasBarBg: { height: 10, borderRadius: 999, backgroundColor: colors.border, overflow: 'hidden', position: 'relative' },
+  extrasBarBg: {
+    height: 10,
+    borderRadius: 999,
+    backgroundColor: colors.border,
+    overflow: 'hidden',
+    position: 'relative',
+  },
   extrasBarCenterLine: { position: 'absolute', left: '50%', top: 0, bottom: 0, width: 2, backgroundColor: colors.textSecondary, opacity: 0.4 },
   extrasBarLeft: { position: 'absolute', right: '50%', top: 0, bottom: 0, backgroundColor: colors.success },
   extrasBarRight: { position: 'absolute', left: '50%', top: 0, bottom: 0, backgroundColor: colors.danger },

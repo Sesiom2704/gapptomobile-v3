@@ -1,20 +1,19 @@
+# backend/app/api/v1/analytics/monthly_summary_router.py
 """
 Monthly Summary Router (analytics/monthly-summary)
 
 Objetivo:
-- Proveer un resumen mensual de ingresos y gastos, coherente con la pantalla Home
-  y con la lógica de cierres/reinicio de GapptoMobile v3.
-- Separar de forma explícita:
+- Proveer un resumen mensual de ingresos y gastos coherente con Home (GapptoMobile v3).
+- Separar explícitamente:
   - Real recurrente vs real extraordinario (PAGO ÚNICO)
   - Presupuesto (plan) vs consumido (real)
+- NUEVO:
+  - Presupuestos originales (sin excluir omitidos)
+  - Importes omitidos del mes (si el modelo lo soporta con omitido_este_mes)
 
-Notas v3 (nuevas columnas / normalizaciones):
+Notas v3:
 - `periodicidad` se normaliza para tolerar valores legacy como 'PAGO_UNICO' (underscore)
   y evitar inconsistencias de mayúsculas/minúsculas.
-- Si el modelo `Gasto` incluye `omitido_este_mes`, los presupuestos del mes excluyen
-  gastos omitidos (omitido_este_mes=True) para que el “plan” del mes refleje la
-  decisión de omitirlos. Los consumidos (real) no se ven afectados: sólo cuentan
-  pagos reales dentro de la ventana mensual.
 - Ventanas de fechas: [ini, fin_excl) para robustez en SQL.
 """
 
@@ -25,7 +24,7 @@ from typing import Optional, List, Tuple
 
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.orm import Session
-from sqlalchemy import func, cast, Integer  # ✅ Cast a Integer para evitar overflow SMALLINT
+from sqlalchemy import func, cast, Integer
 
 from backend.app.schemas.monthly_summary import (
     MonthlySummaryResponse,
@@ -63,12 +62,6 @@ def _periodicidad_norm_sql(col):
 def _get_month_range(year: Optional[int], month: Optional[int]) -> Tuple[date, date]:
     """
     Devuelve el rango [ini, fin_excl) del mes solicitado.
-
-    - ini: primer día del mes
-    - fin_excl: primer día del mes siguiente (fin exclusivo)
-
-    Usamos fin_excl para filtros SQL robustos:
-      fecha >= ini AND fecha < fin_excl
     """
     today = date.today()
     y = year or today.year
@@ -86,13 +79,7 @@ def _get_month_range(year: Optional[int], month: Optional[int]) -> Tuple[date, d
 def _add_months(y: int, m: int, delta: int) -> Tuple[int, int]:
     """
     Suma (o resta) meses a un (year, month) y devuelve el nuevo (year, month).
-
-    Ej:
-      _add_months(2025, 1, -1) -> (2024, 12)
-      _add_months(2025, 12,  1) -> (2026, 1)
-
-    Implementación robusta basada en "mes absoluto":
-      abs = year*12 + (month-1)
+    Implementación robusta basada en "mes absoluto".
     """
     total = y * 12 + (m - 1) + delta
     y2 = total // 12
@@ -112,24 +99,36 @@ def get_monthly_summary(
     current_user: User = Depends(require_user),
 ) -> MonthlySummaryResponse:
     """
-    Resumen mensual de ingresos y gastos (alineado con Home):
+    Resumen mensual de ingresos y gastos (alineado con Home).
 
     INGRESOS
-    - REAL recurrentes: activo+kpi+cobrados dentro del mes, periodicidad != PAGO UNICO
-    - REAL extras: cobrados dentro del mes, periodicidad = PAGO UNICO (sin filtrar activo/kpi)
-    - PRESUPUESTO ingresos: activo+kpi, periodicidad != PAGO UNICO (extras NO se presupuestan)
+    - REAL recurrentes KPI del mes:
+        activo+kpi+cobrados dentro del mes, periodicidad != PAGO UNICO, periodicidad no vacía.
+    - REAL extras:
+        cobrados dentro del mes, periodicidad = PAGO UNICO (sin filtrar activo/kpi).
+    - PRESUPUESTO ingresos:
+        activo+kpi, periodicidad != PAGO UNICO, periodicidad no vacía.
+      - NUEVO:
+        ingresos_presupuesto_original (sin excluir omitidos)
+        ingresos_omitidos_mes (si existe omitido_este_mes)
 
     GASTOS
-    - PRESUPUESTO gestionables: activo+kpi, segmento != COT, periodicidad != PAGO UNICO (extras NO se presupuestan)
-    - PRESUPUESTO cotidianos: activo+kpi, segmento = COT
-    - REAL gestionables recurrentes: pagados en mes, segmento != COT, periodicidad != PAGO UNICO (SIN filtros activo/kpi)
-    - REAL gestionables extras: pagados en mes, segmento != COT, periodicidad = PAGO UNICO
-    - REAL cotidianos: gasto_cotidiano pagado en mes
-    - REAL gastos_mes: gestionables_recurrentes + gestionables_extras + cotidianos
+    - PRESUPUESTO gestionables:
+        activo+kpi, segmento != COT, periodicidad != PAGO UNICO, periodicidad no vacía.
+    - PRESUPUESTO cotidianos:
+        activo+kpi, segmento = COT.
+      - NUEVO:
+        *_presupuesto_original, *_omitidos_mes (si existe omitido_este_mes)
 
-    NOTA SOBRE "vs media 12m" y "run rate 12m":
-    - Ambos se calculan contra los 12 cierres ANTERIORES al mes objetivo.
-    - Esto evita "contaminar" la media incluyendo el propio mes objetivo.
+    - REAL gestionables recurrentes:
+        pagados en mes, segmento != COT, periodicidad != PAGO UNICO (SIN filtros activo/kpi)
+    - REAL gestionables extras:
+        pagados en mes, segmento != COT, periodicidad = PAGO UNICO
+    - REAL cotidianos:
+        gasto_cotidiano pagado en mes
+
+    RUN RATE / MEDIA 12M:
+    - Se calculan contra los 12 cierres ANTERIORES al mes objetivo.
     """
     ini, fin_excl = _get_month_range(year, month)
     anio = ini.year
@@ -137,7 +136,7 @@ def get_monthly_summary(
     mes_label = ini.strftime("%B %Y").capitalize()
 
     # -------------------------------------------------------------------------
-    # Ventana 12 meses (benchmark) correcta:
+    # Ventana 12 meses (benchmark):
     #  - 12 cierres ANTERIORES al mes objetivo
     # -------------------------------------------------------------------------
     end_y, end_m = _add_months(anio, mes, -1)
@@ -163,28 +162,13 @@ def get_monthly_summary(
             db.query(func.coalesce(func.sum(Ingreso.importe), 0.0))
             .filter(
                 Ingreso.user_id == current_user.id,
-                Ingreso.activo == True,  # noqa: E712
-                Ingreso.kpi == True,  # noqa: E712
+                Ingreso.activo == True,   # noqa: E712
+                Ingreso.kpi == True,      # noqa: E712
                 Ingreso.cobrado == True,  # noqa: E712
                 per_ing != PERIODICIDAD_PAGO_UNICO_NORM,
                 per_ing != "",
                 Ingreso.ultimo_ingreso_on >= ini,
                 Ingreso.ultimo_ingreso_on < fin_excl,
-            )
-        ).scalar()
-        or 0.0
-    )
-
-    # (PRESUPUESTO) ingresos recurrentes (excluye PAGO UNICO; excluye periodicidad vacía)
-    presupuesto_ingresos = float(
-        (
-            db.query(func.coalesce(func.sum(Ingreso.importe), 0.0))
-            .filter(
-                Ingreso.user_id == current_user.id,
-                Ingreso.activo == True,  # noqa: E712
-                Ingreso.kpi == True,  # noqa: E712
-                per_ing != PERIODICIDAD_PAGO_UNICO_NORM,
-                per_ing != "",
             )
         ).scalar()
         or 0.0
@@ -212,53 +196,144 @@ def get_monthly_summary(
     ingresos_mes = ingresos_recurrentes_mes + ingresos_extra_importe
 
     # -------------------------------------------------------------------------
-    # 2) PRESUPUESTOS DE GASTO (NO incluyen extras)
-    #     ✅ NUEVO: si existe omitido_este_mes, excluir omitidos del plan del mes.
+    # 2) PRESUPUESTOS (ORIGINAL + AJUSTADO) y OMITIDOS del mes
     # -------------------------------------------------------------------------
 
-    # Gestionables presupuestados (excluye PAGO UNICO; excluye periodicidad vacía)
-    q_pres_gest = (
+    # ===== INGRESOS PRESUPUESTO ORIGINAL (sin excluir omitidos) =====
+    presupuesto_ingresos_original = float(
+        (
+            db.query(func.coalesce(func.sum(Ingreso.importe), 0.0))
+            .filter(
+                Ingreso.user_id == current_user.id,
+                Ingreso.activo == True,  # noqa: E712
+                Ingreso.kpi == True,     # noqa: E712
+                per_ing != PERIODICIDAD_PAGO_UNICO_NORM,
+                per_ing != "",
+            )
+        ).scalar()
+        or 0.0
+    )
+
+    # Ingresos omitidos (si el modelo lo soporta)
+    ingresos_omitidos_mes = 0.0
+    if hasattr(Ingreso, "omitido_este_mes"):
+        ingresos_omitidos_mes = float(
+            (
+                db.query(func.coalesce(func.sum(Ingreso.importe), 0.0))
+                .filter(
+                    Ingreso.user_id == current_user.id,
+                    Ingreso.activo == True,  # noqa: E712
+                    Ingreso.kpi == True,     # noqa: E712
+                    Ingreso.omitido_este_mes == True,  # noqa: E712
+                    per_ing != PERIODICIDAD_PAGO_UNICO_NORM,
+                    per_ing != "",
+                )
+            ).scalar()
+            or 0.0
+        )
+
+    # Presupuesto ingresos AJUSTADO (legacy): excluye omitidos
+    presupuesto_ingresos = presupuesto_ingresos_original - ingresos_omitidos_mes
+    if presupuesto_ingresos < 0:
+        presupuesto_ingresos = 0.0
+
+    # ===== GASTOS PRESUPUESTO ORIGINAL (sin excluir omitidos) =====
+    q_pres_gest_original = (
         db.query(func.coalesce(func.sum(Gasto.importe_cuota), 0.0))
         .filter(
             Gasto.user_id == current_user.id,
             Gasto.activo == True,  # noqa: E712
-            Gasto.kpi == True,  # noqa: E712
+            Gasto.kpi == True,     # noqa: E712
             Gasto.segmento_id != SEGMENTO_COTIDIANO_ID,
             per_gas != PERIODICIDAD_PAGO_UNICO_NORM,
             per_gas != "",
         )
     )
-    if hasattr(Gasto, "omitido_este_mes"):
-        q_pres_gest = q_pres_gest.filter(Gasto.omitido_este_mes == False)  # noqa: E712
-    presupuesto_gestionables = float(q_pres_gest.scalar() or 0.0)
+    presupuesto_gestionables_original = float(q_pres_gest_original.scalar() or 0.0)
 
-    # Cotidianos presupuestados
-    q_pres_cot = (
+    q_pres_cot_original = (
         db.query(func.coalesce(func.sum(Gasto.importe_cuota), 0.0))
         .filter(
             Gasto.user_id == current_user.id,
             Gasto.activo == True,  # noqa: E712
-            Gasto.kpi == True,  # noqa: E712
+            Gasto.kpi == True,     # noqa: E712
             Gasto.segmento_id == SEGMENTO_COTIDIANO_ID,
         )
     )
-    if hasattr(Gasto, "omitido_este_mes"):
-        q_pres_cot = q_pres_cot.filter(Gasto.omitido_este_mes == False)  # noqa: E712
-    presupuesto_cotidianos = float(q_pres_cot.scalar() or 0.0)
+    presupuesto_cotidianos_original = float(q_pres_cot_original.scalar() or 0.0)
 
+    # Omitidos de gastos (si existe omitido_este_mes)
+    gestionables_omitidos_mes = 0.0
+    cotidianos_omitidos_mes = 0.0
+
+    if hasattr(Gasto, "omitido_este_mes"):
+        gestionables_omitidos_mes = float(
+            (
+                db.query(func.coalesce(func.sum(Gasto.importe_cuota), 0.0))
+                .filter(
+                    Gasto.user_id == current_user.id,
+                    Gasto.activo == True,  # noqa: E712
+                    Gasto.kpi == True,     # noqa: E712
+                    Gasto.omitido_este_mes == True,  # noqa: E712
+                    Gasto.segmento_id != SEGMENTO_COTIDIANO_ID,
+                    per_gas != PERIODICIDAD_PAGO_UNICO_NORM,
+                    per_gas != "",
+                )
+            ).scalar()
+            or 0.0
+        )
+
+        cotidianos_omitidos_mes = float(
+            (
+                db.query(func.coalesce(func.sum(Gasto.importe_cuota), 0.0))
+                .filter(
+                    Gasto.user_id == current_user.id,
+                    Gasto.activo == True,  # noqa: E712
+                    Gasto.kpi == True,     # noqa: E712
+                    Gasto.omitido_este_mes == True,  # noqa: E712
+                    Gasto.segmento_id == SEGMENTO_COTIDIANO_ID,
+                )
+            ).scalar()
+            or 0.0
+        )
+
+    # Presupuestos AJUSTADOS (legacy): excluye omitidos si existe el campo
+    presupuesto_gestionables = presupuesto_gestionables_original - gestionables_omitidos_mes
+    if presupuesto_gestionables < 0:
+        presupuesto_gestionables = 0.0
+
+    presupuesto_cotidianos = presupuesto_cotidianos_original - cotidianos_omitidos_mes
+    if presupuesto_cotidianos < 0:
+        presupuesto_cotidianos = 0.0
+
+    gasto_total_presupuesto_original = presupuesto_gestionables_original + presupuesto_cotidianos_original
     gasto_total_presupuesto = presupuesto_gestionables + presupuesto_cotidianos
 
+    gasto_total_omitido_mes = gestionables_omitidos_mes + cotidianos_omitidos_mes
+
     presupuestos = MonthlyPresupuestos(
+        # legacy (ajustados)
         ingresos_presupuesto=presupuesto_ingresos,
         gestionables_presupuesto=presupuesto_gestionables,
         cotidianos_presupuesto=presupuesto_cotidianos,
         gasto_total_presupuesto=gasto_total_presupuesto,
+
+        # nuevos
+        ingresos_presupuesto_original=presupuesto_ingresos_original,
+        gestionables_presupuesto_original=presupuesto_gestionables_original,
+        cotidianos_presupuesto_original=presupuesto_cotidianos_original,
+        gasto_total_presupuesto_original=gasto_total_presupuesto_original,
+
+        ingresos_omitidos_mes=ingresos_omitidos_mes,
+        gestionables_omitidos_mes=gestionables_omitidos_mes,
+        cotidianos_omitidos_mes=cotidianos_omitidos_mes,
+        gasto_total_omitido_mes=gasto_total_omitido_mes,
     )
 
     # -------------------------------------------------------------------------
     # 3) GASTOS REALES (consumidos)
-    # -------------------------------------------------------------------------
     # Importante: NO filtramos por activo/kpi en consumidos gestionables.
+    # -------------------------------------------------------------------------
 
     # Gestionables recurrentes consumidos (excluye PAGO UNICO; excluye periodicidad vacía)
     consumidos_gestionables_recurrentes = float(
@@ -277,7 +352,7 @@ def get_monthly_summary(
         or 0.0
     )
 
-    # Gestionables extras consumidos (PAGO UNICO normalizado)
+    # Gestionables extras consumidos (PAGO UNICO)
     gastos_extra_importe, gastos_extra_num = (
         db.query(
             func.coalesce(func.sum(Gasto.importe_cuota), 0.0),
@@ -297,7 +372,7 @@ def get_monthly_summary(
     gastos_extra_importe = float(gastos_extra_importe or 0.0)
     gastos_extra_num = int(gastos_extra_num or 0)
 
-    # Total gestionables consumidos
+    # Total gestionables consumidos (recurrentes + extras)
     consumidos_gestionables_total = consumidos_gestionables_recurrentes + gastos_extra_importe
 
     # Cotidianos consumidos (pagado = true)
@@ -314,13 +389,12 @@ def get_monthly_summary(
         or 0.0
     )
 
-    # Gastos totales reales del mes (sin doble contar extras)
+    # Gastos totales reales del mes
     gastos_mes = consumidos_gestionables_total + consumidos_cotidianos
 
     # -------------------------------------------------------------------------
     # 4) KPIs generales
     # -------------------------------------------------------------------------
-
     ahorro_mes = ingresos_mes - gastos_mes
 
     # Media 12m: 12 cierres ANTERIORES al mes objetivo (start_ym..end_ym)
@@ -362,7 +436,6 @@ def get_monthly_summary(
     # -------------------------------------------------------------------------
     # 5) Detalle ingresos / gastos
     # -------------------------------------------------------------------------
-
     detalle_ingresos = MonthlyIngresosDetalle(
         recurrentes=ingresos_recurrentes_mes,
         extraordinarios=ingresos_extra_importe,
@@ -378,7 +451,6 @@ def get_monthly_summary(
     # -------------------------------------------------------------------------
     # 6) Distribuciones
     # -------------------------------------------------------------------------
-
     distribucion_ingresos: List[MonthlyDistribucionItem] = []
     if ingresos_mes > 0:
         if detalle_ingresos.recurrentes > 0:
@@ -428,8 +500,6 @@ def get_monthly_summary(
     # -------------------------------------------------------------------------
     # 7) Run rate 12 meses
     # -------------------------------------------------------------------------
-
-    # Run rate: promedio de los 12 cierres ANTERIORES (no incluye el mes objetivo)
     cierres_det_q = (
         db.query(
             func.coalesce(func.avg(CierreMensual.ingresos_reales), 0.0),
@@ -463,18 +533,15 @@ def get_monthly_summary(
         )
 
     # -------------------------------------------------------------------------
-    # 8) Alertas e Insight (ANTES: notas)
+    # 8) Alertas e Insight (notas)
     # -------------------------------------------------------------------------
-
     notas: List[MonthlyResumenNota] = []
 
     def add_note(tipo: str, titulo: str, mensaje: str) -> None:
-        # Evita duplicados por título (simple y suficiente)
         if any(n.titulo == titulo for n in notas):
             return
         notas.append(MonthlyResumenNota(tipo=tipo, titulo=titulo, mensaje=mensaje))
 
-    # 8.1) Situaciones base
     if ingresos_mes <= 0 and gastos_mes > 0:
         add_note(
             "WARNING",
@@ -489,7 +556,6 @@ def get_monthly_summary(
             "Este mes has gastado más de lo que has ingresado. Revisa gastos extraordinarios y cotidianos.",
         )
 
-    # 8.2) vs media 12m (interpretación: negativo = mejor, positivo = peor)
     if gastos_vs_media_pct is not None:
         if gastos_vs_media_pct > 10:
             add_note(
@@ -518,7 +584,6 @@ def get_monthly_summary(
                 "Tus ingresos están por encima de la media de los últimos 12 cierres. Aprovecha para reforzar ahorro o amortizar deuda.",
             )
 
-    # 8.3) Peso de extraordinarios (gastos)
     if gastos_mes > 0 and gastos_extra_importe > 0:
         pct_extra_gastos = (gastos_extra_importe / gastos_mes) * 100.0
         if pct_extra_gastos >= 35:
@@ -534,7 +599,7 @@ def get_monthly_summary(
                 f"Este mes has tenido gastos extraordinarios (aprox. {pct_extra_gastos:.1f}% del total).",
             )
 
-    # 8.4) Presupuesto vs real (si hay presupuesto > 0)
+    # Presupuesto vs real (usamos el presupuesto AJUSTADO legacy para esta nota)
     if gasto_total_presupuesto > 0:
         desviacion_gasto_pct = ((gastos_mes - gasto_total_presupuesto) / gasto_total_presupuesto) * 100.0
         if desviacion_gasto_pct > 10:
@@ -559,7 +624,6 @@ def get_monthly_summary(
                 f"Los gastos cotidianos van aprox. un +{desviacion_cot_pct:.1f}% sobre el presupuesto.",
             )
 
-    # 8.5) Insight general: ratio gastos/ingresos (solo si ingresos > 0)
     if ingresos_mes > 0:
         ratio_gasto = (gastos_mes / ingresos_mes) * 100.0
         add_note(
@@ -567,7 +631,6 @@ def get_monthly_summary(
             "Ratio de gasto sobre ingresos",
             f"Has destinado aproximadamente un {ratio_gasto:.1f}% de tus ingresos a gastos este mes.",
         )
-
         if ratio_gasto <= 70 and ahorro_mes > 0:
             add_note(
                 "SUCCESS",
@@ -575,7 +638,6 @@ def get_monthly_summary(
                 "Tu ratio de gasto es bajo y el mes cierra en positivo. Mantén el patrón.",
             )
 
-    # 8.6) Insight por ingresos extraordinarios (si existen)
     if ingresos_mes > 0 and ingresos_extra_importe > 0:
         pct_extra_ing = (ingresos_extra_importe / ingresos_mes) * 100.0
         add_note(
@@ -589,9 +651,8 @@ def get_monthly_summary(
         notas = notas[:MAX_NOTAS]
 
     # -------------------------------------------------------------------------
-    # 9) Response (IMPORTANTE: consumidos_cotidianos es REQUIRED en tu schema)
+    # 9) Response
     # -------------------------------------------------------------------------
-
     response = MonthlySummaryResponse(
         anio=anio,
         mes=mes,

@@ -196,12 +196,28 @@ export interface MonthlyResumenNota {
   mensaje: string;
 }
 
-/** ✅ NUEVO: presupuestos “base” (sin extras) */
+/**
+ * ✅ Presupuestos base (sin extras)
+ * ✅ Ampliado: originales + omitidos (para barras 3 estados Home)
+ */
 export interface MonthlyPresupuestos {
+  // Legacy (ajustados - pueden excluir omitidos según backend)
   ingresos_presupuesto: number;
   gestionables_presupuesto: number;
   cotidianos_presupuesto: number;
   gasto_total_presupuesto: number;
+
+  // ✅ NUEVO: presupuesto original (sin excluir omitidos)
+  ingresos_presupuesto_original?: number | null;
+  gestionables_presupuesto_original?: number | null;
+  cotidianos_presupuesto_original?: number | null;
+  gasto_total_presupuesto_original?: number | null;
+
+  // ✅ NUEVO: omitidos del mes (si aplica)
+  ingresos_omitidos_mes?: number | null;
+  gestionables_omitidos_mes?: number | null;
+  cotidianos_omitidos_mes?: number | null;
+  gasto_total_omitido_mes?: number | null;
 }
 
 export interface MonthlySummaryResponse {
@@ -217,8 +233,11 @@ export interface MonthlySummaryResponse {
   distribucion_ingresos: MonthlyDistribucionItem[];
   distribucion_gastos: MonthlyDistribucionItem[];
 
-  /** ✅ NUEVO: viene del backend */
+  /** ✅ viene del backend */
   presupuestos?: MonthlyPresupuestos;
+
+  /** ✅ requerido en tu backend */
+  consumidos_cotidianos: number;
 
   run_rate_12m: MonthlyRunRate | null;
 
