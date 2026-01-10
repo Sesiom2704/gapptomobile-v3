@@ -2,9 +2,9 @@
 //
 // Objetivo:
 // - Mantener HomeDashboard tal cual.
-// - Añadir soporte para barras 3 estados (real/pagado, omitido, pendiente) en Home.
+// - Añadir soporte robusto para barras 3 estados (Real/Pagado, Omitido, Pendiente) en Home.
 // - Mantener aliases legacy para no romper navegación ni pantallas previas.
-// - Mantener bloque Patrimonio (como ya tenías).
+// - Mantener bloque Patrimonio.
 
 import { getMonthlySummary } from './analyticsApi';
 import { fetchBalanceMes } from './balanceApi';
@@ -25,21 +25,23 @@ export type HomeDashboardResponse = {
   gastosMes: number;
   ahorroMes: number;
 
-  // --- NOMBRES NUEVOS (base / ajustados) ---
+  // Presupuesto “ajustado” (puede excluir omitidos según backend)
   ingresosPresupuestados: number;
   gestionablesPresupuestados: number;
   cotidianosPresupuestados: number;
   totalGastoPresupuestado: number;
 
-  gestionablesConsumidos: number; // ✅ SOLO recurrentes (excluye PAGO UNICO)
+  // Consumidos
+  gestionablesConsumidos: number; // ✅ recurrentes (excluye PAGO UNICO)
   cotidianosConsumidos: number;
   totalGastoConsumido: number; // ✅ incluye extras gastos
 
-  extrasIngresosMes: number; // ingresos PAGO UNICO cobrados en el mes
-  extrasGastosMes: number; // gastos gestionables PAGO UNICO pagados en el mes
-  extrasNetoMes: number; // extrasIngresosMes - extrasGastosMes
+  // Extras (PAGO UNICO)
+  extrasIngresosMes: number;
+  extrasGastosMes: number;
+  extrasNetoMes: number;
 
-  // --- NUEVO: ORIGINAL + OMITIDOS (para Home 3 estados) ---
+  // ✅ NUEVO: Original + Omitidos (para Home 3 estados)
   ingresosPresupuestadosOriginal: number;
   gestionablesPresupuestadosOriginal: number;
   cotidianosPresupuestadosOriginal: number;
@@ -74,23 +76,29 @@ export type HomeDashboardResponse = {
     importe: number;
   }>;
 
-  // -----------------------
-  // Patrimonio (para Home)
-  // -----------------------
+  // Patrimonio
   patrimonioPropiedadesCount: number;
   patrimonioValorMercadoTotal: number;
-  patrimonioNoiTotal: number; // anual (annualize=true)
+  patrimonioNoiTotal: number;
   patrimonioEquityTotal: number;
-  patrimonioRentabilidadBrutaMediaPct: number | null; // % ponderada, null si no hay base
+  patrimonioRentabilidadBrutaMediaPct: number | null;
 
-  // Extras "pro"
-  patrimonioNoiSobreVmPct: number | null; // NOI / VM * 100
-  patrimonioLtvAproxPct: number | null; // Inversión / VM * 100 (aprox)
-  patrimonioNoiMensual: number; // NOI / 12
+  patrimonioNoiSobreVmPct: number | null;
+  patrimonioLtvAproxPct: number | null;
+  patrimonioNoiMensual: number;
 };
 
 function n(v: unknown): number {
   return typeof v === 'number' && Number.isFinite(v) ? v : 0;
+}
+
+function pickNumber(obj: any, keys: string[], fallback = 0): number {
+  for (const k of keys) {
+    const v = obj?.[k];
+    if (typeof v === 'number' && Number.isFinite(v)) return v;
+    if (v != null && v !== '' && !Number.isNaN(Number(v))) return Number(v);
+  }
+  return fallback;
 }
 
 /**
@@ -105,7 +113,6 @@ async function sumGastosCotidianosMes(year: number, month: number): Promise<numb
     const page = await fetchGastosCotidianos({ year, month, limit, offset });
     if (!page.length) break;
 
-    // ✅ Solo pagados
     total += page.reduce((acc, g) => acc + (g.pagado ? (g.importe ?? 0) : 0), 0);
 
     if (page.length < limit) break;
@@ -118,10 +125,7 @@ async function sumGastosCotidianosMes(year: number, month: number): Promise<numb
 // -----------------------
 // Tipos mínimos para patrimonio
 // -----------------------
-type PatrimonioRow = {
-  id: string;
-  activo?: boolean | null;
-};
+type PatrimonioRow = { id: string; activo?: boolean | null };
 
 type PatrimonioCompraOut = {
   patrimonio_id: string;
@@ -136,29 +140,21 @@ type PatrimonioKpisOut = {
   rendimiento_bruto_pct?: number | null;
 };
 
-// Helpers defensivos
 function numOrNull(x: any): number | null {
   const v = typeof x === 'number' ? x : x == null ? null : Number(x);
   return v == null || Number.isNaN(v) ? null : v;
 }
 
 function isActive(p: PatrimonioRow): boolean {
-  return p.activo !== false; // por defecto true si viene null/undefined
+  return p.activo !== false;
 }
 
-/**
- * Carga resumen de patrimonio para HOME usando:
- * - /api/v1/patrimonios
- * - /api/v1/patrimonios/{id}/compra
- * - /api/v1/analytics/patrimonios/{id}/kpis
- */
 async function fetchPatrimonioSummaryForHome(year: number): Promise<{
   propiedadesCount: number;
   valorMercadoTotal: number;
   noiTotal: number;
   equityTotal: number;
   rentabilidadBrutaMediaPct: number | null;
-
   noiSobreVmPct: number | null;
   ltvAproxPct: number | null;
   noiMensual: number;
@@ -238,18 +234,14 @@ async function fetchPatrimonioSummaryForHome(year: number): Promise<{
     valorMercadoTotal: Number(valorMercadoTotal.toFixed(2)),
     noiTotal: Number(noiTotal.toFixed(2)),
     equityTotal: Number(equityTotal.toFixed(2)),
-    rentabilidadBrutaMediaPct:
-      rentabilidadBrutaMediaPct == null ? null : Number(rentabilidadBrutaMediaPct.toFixed(2)),
+    rentabilidadBrutaMediaPct: rentabilidadBrutaMediaPct == null ? null : Number(rentabilidadBrutaMediaPct.toFixed(2)),
     noiSobreVmPct: noiSobreVmPct == null ? null : Number(noiSobreVmPct.toFixed(2)),
     ltvAproxPct: ltvAproxPct == null ? null : Number(ltvAproxPct.toFixed(2)),
     noiMensual: Number(noiMensual.toFixed(2)),
   };
 }
 
-export async function fetchHomeDashboard(params: {
-  year: number;
-  month: number;
-}): Promise<HomeDashboardResponse> {
+export async function fetchHomeDashboard(params: { year: number; month: number }): Promise<HomeDashboardResponse> {
   const { year, month } = params;
 
   const [summary, balance, totalCotidianos, movimientosMes, patrimonioSummary] = await Promise.all([
@@ -279,51 +271,67 @@ export async function fetchHomeDashboard(params: {
   const gastosMes = n((summary as any)?.general?.gastos_mes);
   const ahorroMes = n((summary as any)?.general?.ahorro_mes);
 
-  // ✅ Gestionables (solo recurrentes)
   const gestionablesConsumidos = n((summary as any)?.detalle_gastos?.recurrentes);
-
-  // ✅ Extras gastos (PAGO UNICO)
   const extrasGastosMes = n((summary as any)?.detalle_gastos?.extraordinarios);
-
-  // ✅ Cotidianos pagados (barra 4)
   const cotidianosConsumidos = n(totalCotidianos);
 
-  // ✅ Total gasto consumido (incluye extras gastos)
   const totalGastoConsumido = gestionablesConsumidos + cotidianosConsumidos + extrasGastosMes;
-
-  // ✅ Neto extras
   const extrasNetoMes = extrasIngresosMes - extrasGastosMes;
 
   // -----------------------
-  // PRESUPUESTOS (backend)
+  // PRESUPUESTOS / OMITIDOS (ROBUSTO)
   // -----------------------
   const pres = (summary as any)?.presupuestos ?? {};
 
-  // Ajustados (legacy)
-  const ingresosPresupuestados = n(pres?.ingresos_presupuesto);
-  const gestionablesPresupuestados = n(pres?.gestionables_presupuesto);
-  const cotidianosPresupuestados = n(pres?.cotidianos_presupuesto);
-  const totalGastoPresupuestado = n(pres?.gasto_total_presupuesto);
+  // Ajustados
+  const ingresosPresupuestados = pickNumber(pres, ['ingresos_presupuesto'], 0);
+  const gestionablesPresupuestados = pickNumber(pres, ['gestionables_presupuesto'], 0);
+  const cotidianosPresupuestados = pickNumber(pres, ['cotidianos_presupuesto'], 0);
+  const totalGastoPresupuestado = pickNumber(pres, ['gasto_total_presupuesto'], 0);
 
-  // Originales (si no vienen, fallback a ajustados)
-  const ingresosPresupuestadosOriginal = n(
-    pres?.ingresos_presupuesto_original ?? pres?.ingresos_presupuesto
+  // Originales (fallback a ajustados si no vienen)
+  const ingresosPresupuestadosOriginal = pickNumber(
+    pres,
+    ['ingresos_presupuesto_original', 'ingresos_presupuesto_base', 'ingresos_presupuesto'],
+    ingresosPresupuestados
   );
-  const gestionablesPresupuestadosOriginal = n(
-    pres?.gestionables_presupuesto_original ?? pres?.gestionables_presupuesto
+  const gestionablesPresupuestadosOriginal = pickNumber(
+    pres,
+    ['gestionables_presupuesto_original', 'gestionables_presupuesto_base', 'gestionables_presupuesto'],
+    gestionablesPresupuestados
   );
-  const cotidianosPresupuestadosOriginal = n(
-    pres?.cotidianos_presupuesto_original ?? pres?.cotidianos_presupuesto
+  const cotidianosPresupuestadosOriginal = pickNumber(
+    pres,
+    ['cotidianos_presupuesto_original', 'cotidianos_presupuesto_base', 'cotidianos_presupuesto'],
+    cotidianosPresupuestados
   );
-  const totalGastoPresupuestadoOriginal = n(
-    pres?.gasto_total_presupuesto_original ?? pres?.gasto_total_presupuesto
+  const totalGastoPresupuestadoOriginal = pickNumber(
+    pres,
+    ['gasto_total_presupuesto_original', 'gasto_total_presupuesto_base', 'gasto_total_presupuesto'],
+    totalGastoPresupuestado
   );
 
-  // Omitidos (si no vienen, 0)
-  const ingresosOmitidosMes = n(pres?.ingresos_omitidos_mes);
-  const gestionablesOmitidosMes = n(pres?.gestionables_omitidos_mes);
-  const cotidianosOmitidosMes = n(pres?.cotidianos_omitidos_mes);
-  const totalGastoOmitidoMes = n(pres?.gasto_total_omitido_mes);
+  // Omitidos (aceptamos varias keys; si no vienen, derivamos original - ajustado)
+  const ingresosOmitidosRaw = pickNumber(pres, ['ingresos_omitidos_mes', 'ingresos_omitidos', 'ingresos_omitidos_total'], NaN);
+  const gestionablesOmitidosRaw = pickNumber(pres, ['gestionables_omitidos_mes', 'gestionables_omitidos', 'gestionables_omitidos_total'], NaN);
+  const cotidianosOmitidosRaw = pickNumber(pres, ['cotidianos_omitidos_mes', 'cotidianos_omitidos', 'cotidianos_omitidos_total'], NaN);
+  const totalGastoOmitidosRaw = pickNumber(pres, ['gasto_total_omitido_mes', 'gasto_total_omitido', 'gasto_total_omitido_total'], NaN);
+
+  const ingresosOmitidosMes = Number.isFinite(ingresosOmitidosRaw)
+    ? Math.max(0, ingresosOmitidosRaw)
+    : Math.max(0, ingresosPresupuestadosOriginal - ingresosPresupuestados);
+
+  const gestionablesOmitidosMes = Number.isFinite(gestionablesOmitidosRaw)
+    ? Math.max(0, gestionablesOmitidosRaw)
+    : Math.max(0, gestionablesPresupuestadosOriginal - gestionablesPresupuestados);
+
+  const cotidianosOmitidosMes = Number.isFinite(cotidianosOmitidosRaw)
+    ? Math.max(0, cotidianosOmitidosRaw)
+    : Math.max(0, cotidianosPresupuestadosOriginal - cotidianosPresupuestados);
+
+  const totalGastoOmitidoMes = Number.isFinite(totalGastoOmitidosRaw)
+    ? Math.max(0, totalGastoOmitidosRaw)
+    : Math.max(0, totalGastoPresupuestadoOriginal - totalGastoPresupuestado);
 
   // -----------------------
   // PENDIENTES (balance)
@@ -354,7 +362,7 @@ export async function fetchHomeDashboard(params: {
     }));
 
   // -----------------------
-  // ALIAS para compat (MainTabs)
+  // ALIAS legacy
   // -----------------------
   const gestionablesReal = gestionablesConsumidos;
   const cotidianosReal = cotidianosConsumidos;
@@ -387,7 +395,6 @@ export async function fetchHomeDashboard(params: {
     extrasGastosMes,
     extrasNetoMes,
 
-    // ✅ nuevos para Home (3 estados)
     ingresosPresupuestadosOriginal,
     gestionablesPresupuestadosOriginal,
     cotidianosPresupuestadosOriginal,
@@ -398,7 +405,6 @@ export async function fetchHomeDashboard(params: {
     cotidianosOmitidosMes,
     totalGastoOmitidoMes,
 
-    // legacy
     gestionablesReal,
     cotidianosReal,
     totalGastoReal,
@@ -412,7 +418,6 @@ export async function fetchHomeDashboard(params: {
 
     ultimosMovimientos,
 
-    // Patrimonio
     patrimonioPropiedadesCount: patrimonioSummary.propiedadesCount,
     patrimonioValorMercadoTotal: patrimonioSummary.valorMercadoTotal,
     patrimonioNoiTotal: patrimonioSummary.noiTotal,

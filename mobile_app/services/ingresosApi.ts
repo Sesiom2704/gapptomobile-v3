@@ -39,7 +39,7 @@ const ENDPOINT_INGRESOS_RESUMEN = '/api/v1/ingresos/resumen_totales';
  */
 const endpointOmitirIngreso = (id: string) => `${ENDPOINT_INGRESOS_BASE}/${id}/omitir`;
 const endpointDeshacerOmisionIngreso = (id: string) =>
-  `${ENDPOINT_INGRESOS_BASE}/${id}/deshacer_omision`;
+  `${ENDPOINT_INGRESOS_BASE}/${id}/deshacer-omision`;
 
 // ========================
 // Tipos de dominio

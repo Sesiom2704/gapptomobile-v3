@@ -445,9 +445,9 @@ const HomeScreen: React.FC = () => {
   // --------------------
   // Real: ingresos (verde), gastos (rojo suave)
   const REAL_INCOME = colors.success;
-  const REAL_EXPENSE_SOFT = 'rgba(220, 38, 38, 0.70)'; // rojo menos intenso
-  const OMITTED = 'rgba(245, 158, 11, 0.85)'; // naranja (omitido)
-  const PENDING = 'rgba(107, 114, 128, 0.35)'; // gris (pendiente)
+  const REAL_EXPENSE_SOFT = 'rgba(220, 38, 38, 0.50)'; // rojo menos intenso
+  const OMITTED = 'rgba(245, 158, 11, 0.50)'; // naranja (omitido)
+  const PENDING = 'rgba(107, 114, 128, 0.20)'; // gris (pendiente)
 
   // --------------------
   // Helpers para texto de barra
