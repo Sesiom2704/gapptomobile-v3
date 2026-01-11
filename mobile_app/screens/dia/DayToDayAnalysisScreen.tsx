@@ -1,4 +1,11 @@
 // mobile_app/screens/dia/DayToDayAnalysisScreen.tsx
+// Cambios solicitados:
+// - En la tarjeta "Hoy" > "Comparativa mes a fecha", el texto de "Diferencia" ahora cambia de color:
+//   * Positivo (gastas más que el mes anterior) => ROJO
+//   * Negativo (gastas menos que el mes anterior) => VERDE
+//   * Cero => NEUTRO
+//
+// Nota: No se modifica ninguna funcionalidad ni lógica de negocio. Solo se añade estilo dinámico.
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
@@ -168,7 +175,7 @@ function insightIconName(sev: InsightSeverity) {
   return 'information-circle-outline';
 }
 
-// ✅ NUEVO: utilidades de fecha ISO (YYYY-MM-DD)
+// ✅ Utilidades de fecha ISO (YYYY-MM-DD)
 // Motivo: el backend permite `fecha=...` y así alineamos comparación mes actual vs mes anterior.
 function parseIsoDate(iso: string) {
   const [y, m, d] = (iso || '').split('-').map((x) => parseInt(x, 10));
@@ -182,7 +189,7 @@ function isoFromParts(y: number, m: number, d: number) {
 }
 
 /**
- * ✅ NUEVO: resta/suma meses conservando el “día del mes”,
+ * Resta/suma meses conservando el “día del mes”,
  * capando al último día si el mes objetivo es más corto.
  *
  * Ejemplo:
@@ -192,7 +199,7 @@ function shiftIsoMonthSameDay(baseIso: string, deltaMonths: number) {
   const { y, m, d } = parseIsoDate(baseIso);
   if (!y || !m || !d) return baseIso;
 
-  const baseIndex = (y * 12 + (m - 1)) + deltaMonths;
+  const baseIndex = y * 12 + (m - 1) + deltaMonths;
   const ty = Math.floor(baseIndex / 12);
   const tm0 = baseIndex % 12; // 0-11
   const tm = tm0 + 1;
@@ -229,7 +236,7 @@ type MonthBreakdownItem = {
   gastado: number;
 };
 
-// ✅ NUEVO: tipo UI para tarjeta comparativa
+// ✅ Tipo UI para tarjeta comparativa
 type MonthToDateCompareTone = 'DANGER' | 'SUCCESS' | 'WARNING';
 
 type MonthToDateCompareUi = {
@@ -240,7 +247,7 @@ type MonthToDateCompareUi = {
   currentMtd: number;
   prevMtd: number;
   deltaAbs: number;
-  deltaPct: number; // ya resuelto incluso si prev=0 (ver lógica)
+  deltaPct: number; // ya resuelto incluso si prev=0
   tone: MonthToDateCompareTone;
   message: string;
   bgColor: string;
@@ -289,12 +296,12 @@ export const DayToDayAnalysisScreen: React.FC = () => {
   const [monthBreakdownItems, setMonthBreakdownItems] = useState<MonthBreakdownItem[]>([]);
   const monthBreakdownCacheRef = useRef<Record<string, MonthBreakdownItem[]>>({});
 
-  // ✅ Nueva llamada: tendencia últimos 7 días del gasto seleccionado
+  // Tendencia últimos 7 días del gasto seleccionado
   const [selectedTrend7d, setSelectedTrend7d] = useState<Last7DayItem[]>([]);
   const [selectedTrendLoading, setSelectedTrendLoading] = useState(false);
   const [selectedTrendError, setSelectedTrendError] = useState<string | null>(null);
 
-  // ✅ NUEVO: datos del mes anterior para tarjeta comparativa MTD
+  // ✅ Datos del mes anterior para tarjeta comparativa MTD
   const [prevMonthData, setPrevMonthData] = useState<DayToDayAnalysisResponse | null>(null);
   const [prevMonthLoading, setPrevMonthLoading] = useState(false);
   const [prevMonthError, setPrevMonthError] = useState<string | null>(null);
@@ -392,7 +399,7 @@ export const DayToDayAnalysisScreen: React.FC = () => {
   const insights: InsightItem[] = data?.insights ?? [];
   const alertasStrings: string[] = data?.alertas ?? [];
 
-  // ✅ NUEVO: ISO base (preferimos el que viene del backend vía ultimos_7_dias)
+  // ISO base (preferimos el que viene del backend vía ultimos_7_dias)
   const baseIso = useMemo(() => {
     const last = ultimos7DiasGeneral?.[ultimos7DiasGeneral.length - 1];
     const iso = last?.fecha;
@@ -403,7 +410,7 @@ export const DayToDayAnalysisScreen: React.FC = () => {
   }, [ultimos7DiasGeneral]);
 
   // --------------------
-  // ✅ NUEVO: carga de datos para mes anterior (solo para vista GENERAL)
+  // Carga de datos para mes anterior (solo para vista GENERAL)
   // - Se basa en el mismo filtro de pago que el resumen de “Hoy”.
   // - No aplica filtro de categoría/subtipo porque en GENERAL tu endpoint tampoco lo aplica.
   // --------------------
@@ -579,7 +586,7 @@ export const DayToDayAnalysisScreen: React.FC = () => {
   );
 
   // --------------------
-  // ✅ NUEVO: comparativa mes-a-fecha (este mes vs mes anterior)
+  // Comparativa mes-a-fecha (este mes vs mes anterior)
   // --------------------
   const monthToDateCompareUi: MonthToDateCompareUi | null = useMemo(() => {
     if (!data) return null;
@@ -603,7 +610,7 @@ export const DayToDayAnalysisScreen: React.FC = () => {
 
     // Regla consistente con tu backend: si prev=0 y curr>0 => 100% (evita infinito)
     const deltaPct =
-      prevMtd > 0 ? (deltaAbs / prevMtd) * 100 : (currentMtd > 0 ? 100 : 0);
+      prevMtd > 0 ? (deltaAbs / prevMtd) * 100 : currentMtd > 0 ? 100 : 0;
 
     let tone: MonthToDateCompareTone = 'WARNING';
     let message = 'En tu línea!';
@@ -617,10 +624,18 @@ export const DayToDayAnalysisScreen: React.FC = () => {
     }
 
     const bgColor =
-      tone === 'DANGER' ? colors.dangerSoft : tone === 'SUCCESS' ? colors.successSoft : colors.warningSoft;
+      tone === 'DANGER'
+        ? colors.dangerSoft
+        : tone === 'SUCCESS'
+        ? colors.successSoft
+        : colors.warningSoft;
 
     const borderColor =
-      tone === 'DANGER' ? colors.danger : tone === 'SUCCESS' ? colors.success : colors.warning;
+      tone === 'DANGER'
+        ? colors.danger
+        : tone === 'SUCCESS'
+        ? colors.success
+        : colors.warning;
 
     return {
       currentIso: baseIso,
@@ -722,15 +737,8 @@ export const DayToDayAnalysisScreen: React.FC = () => {
     }
   }, [buildMonthBreakdownContextKey, getTipoIdsForContext, pagoFiltro]);
 
-  const onToggleMonthExpanded = useCallback(async () => {
-    setMonthExpanded((prev) => !prev);
-
-    const willOpen = !monthExpanded;
-    if (willOpen) await fetchMonthBreakdown();
-  }, [fetchMonthBreakdown, monthExpanded]);
-
   // --------------------
-  // ✅ NUEVA llamada: tendencia 7 días del gasto seleccionado
+  // Tendencia 7 días del gasto seleccionado
   // --------------------
   const fetchSelectedTrend7d = useCallback(async () => {
     try {
@@ -761,7 +769,7 @@ export const DayToDayAnalysisScreen: React.FC = () => {
   }, [pagoFiltro, selectedCategoryKey, selectedSubtipoId]);
 
   /**
-   * ✅ CLAVE del bug que reportas:
+   * CLAVE del bug reportado en versiones previas:
    * Antes solo se cargaba en vista CATEGORIA.
    * Ahora se carga siempre que haya categoría efectiva (GENERAL o CATEGORIA),
    * y por tanto la sección SIEMPRE tiene datos.
@@ -773,7 +781,14 @@ export const DayToDayAnalysisScreen: React.FC = () => {
     if (!selectedCategoryKey) return;
 
     fetchSelectedTrend7d();
-  }, [data, effectiveSelectedCategory, selectedCategoryKey, selectedSubtipoId, pagoFiltro, fetchSelectedTrend7d]);
+  }, [
+    data,
+    effectiveSelectedCategory,
+    selectedCategoryKey,
+    selectedSubtipoId,
+    pagoFiltro,
+    fetchSelectedTrend7d,
+  ]);
 
   // Helpers gráfico
   const maxImporte7dGeneral = useMemo(() => {
@@ -858,9 +873,21 @@ export const DayToDayAnalysisScreen: React.FC = () => {
                 <View style={{ marginTop: 12 }}>
                   <Text style={analysisStyles.filterLabel}>Quién paga</Text>
                   <FilterRow columns={3}>
-                    <FilterPill label="Todos" selected={pagoFiltro === 'TODOS'} onPress={() => setPagoFiltro('TODOS')} />
-                    <FilterPill label="Pagados por mi" selected={pagoFiltro === 'YO'} onPress={() => setPagoFiltro('YO')} />
-                    <FilterPill label="Lo paga otro" selected={pagoFiltro === 'OTRO'} onPress={() => setPagoFiltro('OTRO')} />
+                    <FilterPill
+                      label="Todos"
+                      selected={pagoFiltro === 'TODOS'}
+                      onPress={() => setPagoFiltro('TODOS')}
+                    />
+                    <FilterPill
+                      label="Pagados por mi"
+                      selected={pagoFiltro === 'YO'}
+                      onPress={() => setPagoFiltro('YO')}
+                    />
+                    <FilterPill
+                      label="Lo paga otro"
+                      selected={pagoFiltro === 'OTRO'}
+                      onPress={() => setPagoFiltro('OTRO')}
+                    />
                   </FilterRow>
                 </View>
 
@@ -927,14 +954,17 @@ export const DayToDayAnalysisScreen: React.FC = () => {
                   }
                 />
 
-                {/* ✅ NUEVO: Tarjeta comparativa MTD (encima de la tarjeta de Hoy) */}
+                {/* Tarjeta comparativa MTD (encima de la tarjeta de Hoy) */}
                 <View
                   style={[
                     panelStyles.card,
                     styles.mtdCompareCard,
                     prevMonthLoading && styles.mtdCompareCardLoading,
                     monthToDateCompareUi
-                      ? { backgroundColor: monthToDateCompareUi.bgColor, borderColor: monthToDateCompareUi.borderColor }
+                      ? {
+                          backgroundColor: monthToDateCompareUi.bgColor,
+                          borderColor: monthToDateCompareUi.borderColor,
+                        }
                       : { backgroundColor: colors.neutralSoft, borderColor: colors.border },
                   ]}
                 >
@@ -962,7 +992,11 @@ export const DayToDayAnalysisScreen: React.FC = () => {
                       activeOpacity={0.85}
                       style={styles.mtdCompareInfoBtn}
                     >
-                      <Ionicons name="information-circle-outline" size={18} color={colors.textSecondary} />
+                      <Ionicons
+                        name="information-circle-outline"
+                        size={18}
+                        color={colors.textSecondary}
+                      />
                     </TouchableOpacity>
                   </View>
 
@@ -976,12 +1010,30 @@ export const DayToDayAnalysisScreen: React.FC = () => {
                       {/* Columna izquierda: mes actual */}
                       <View style={styles.mtdCompareCol}>
                         <Text style={styles.mtdCompareKpiLabel}>Este mes (a fecha)</Text>
-                        <Text style={styles.mtdCompareKpiValue}>{fmtCurrency(monthToDateCompareUi.currentMtd)}</Text>
+                        <Text style={styles.mtdCompareKpiValue}>
+                          {fmtCurrency(monthToDateCompareUi.currentMtd)}
+                        </Text>
 
                         <View style={{ marginTop: 10 }}>
                           <Text style={styles.mtdCompareDeltaLabel}>Diferencia</Text>
-                          <Text style={styles.mtdCompareDeltaValue}>
-                            {fmtSignedCurrency(monthToDateCompareUi.deltaAbs)} [{fmtPct(monthToDateCompareUi.deltaPct)}]
+
+                          {/* ✅ CAMBIO: color dinámico según el signo de deltaAbs
+                              - Positivo (gastas más) => rojo
+                              - Negativo (gastas menos) => verde
+                              - Cero => neutro
+                          */}
+                          <Text
+                            style={[
+                              styles.mtdCompareDeltaValue,
+                              monthToDateCompareUi.deltaAbs > 0
+                                ? styles.mtdCompareDeltaUp
+                                : monthToDateCompareUi.deltaAbs < 0
+                                ? styles.mtdCompareDeltaDown
+                                : styles.mtdCompareDeltaFlat,
+                            ]}
+                          >
+                            {fmtSignedCurrency(monthToDateCompareUi.deltaAbs)} [
+                            {fmtPct(monthToDateCompareUi.deltaPct)}]
                           </Text>
                         </View>
                       </View>
@@ -989,7 +1041,9 @@ export const DayToDayAnalysisScreen: React.FC = () => {
                       {/* Columna derecha: mes anterior + mensaje alineado con diferencia */}
                       <View style={[styles.mtdCompareCol, styles.mtdCompareColRight]}>
                         <Text style={styles.mtdCompareKpiLabel}>Mes anterior (a fecha)</Text>
-                        <Text style={styles.mtdCompareKpiValue}>{fmtCurrency(monthToDateCompareUi.prevMtd)}</Text>
+                        <Text style={styles.mtdCompareKpiValue}>
+                          {fmtCurrency(monthToDateCompareUi.prevMtd)}
+                        </Text>
 
                         <View style={{ marginTop: 10 }}>
                           <Text style={styles.mtdCompareDeltaLabel}>&nbsp;</Text>
@@ -1000,9 +1054,10 @@ export const DayToDayAnalysisScreen: React.FC = () => {
                       </View>
                     </View>
                   ) : (
-                    <Text style={analysisStyles.emptyText}>No hay datos suficientes para generar la comparativa.</Text>
+                    <Text style={analysisStyles.emptyText}>
+                      No hay datos suficientes para generar la comparativa.
+                    </Text>
                   )}
-
                 </View>
 
                 {/* Tarjeta original de Hoy (sin cambios funcionales) */}
@@ -1072,7 +1127,9 @@ export const DayToDayAnalysisScreen: React.FC = () => {
                     </View>
                     <View style={styles.weekColRight}>
                       <Text style={styles.weekLabel}>Proyección fin de semana</Text>
-                      <Text style={styles.weekProjection}>{fmtCurrency(week?.proyeccion_fin_semana)}</Text>
+                      <Text style={styles.weekProjection}>
+                        {fmtCurrency(week?.proyeccion_fin_semana)}
+                      </Text>
                       <Text style={styles.weekDaysLabel}>{(week?.dias_restantes ?? 0)} días restantes</Text>
                     </View>
                   </View>
@@ -1156,11 +1213,15 @@ export const DayToDayAnalysisScreen: React.FC = () => {
                 }
               />
 
-              <TouchableOpacity style={panelStyles.card} activeOpacity={0.9} onPress={async () => {
-                setMonthExpanded((prev) => !prev);
-                const willOpen = !monthExpanded;
-                if (willOpen) await fetchMonthBreakdown();
-              }}>
+              <TouchableOpacity
+                style={panelStyles.card}
+                activeOpacity={0.9}
+                onPress={async () => {
+                  setMonthExpanded((prev) => !prev);
+                  const willOpen = !monthExpanded;
+                  if (willOpen) await fetchMonthBreakdown();
+                }}
+              >
                 <View style={styles.monthHeaderRow}>
                   <View style={{ flex: 1 }}>
                     <View style={styles.monthRow}>
@@ -1177,7 +1238,9 @@ export const DayToDayAnalysisScreen: React.FC = () => {
                     <View style={analysisStyles.progressRow}>
                       <Text style={analysisStyles.progressCaption}>
                         {month && (month as any).presupuesto_mes > 0
-                          ? `${(((month as any).gastado_mes / (month as any).presupuesto_mes) * 100).toFixed(1)}% del presupuesto mensual usado`
+                          ? `${(((month as any).gastado_mes / (month as any).presupuesto_mes) * 100).toFixed(
+                              1
+                            )}% del presupuesto mensual usado`
                           : 'Aún no hay presupuesto estimado suficiente para este mes'}
                       </Text>
                       <View style={analysisStyles.progressBarBackground}>
@@ -1187,7 +1250,10 @@ export const DayToDayAnalysisScreen: React.FC = () => {
                             {
                               width:
                                 month && (month as any).presupuesto_mes > 0
-                                  ? `${Math.min(100, ((month as any).gastado_mes / (month as any).presupuesto_mes) * 100)}%`
+                                  ? `${Math.min(
+                                      100,
+                                      ((month as any).gastado_mes / (month as any).presupuesto_mes) * 100
+                                    )}%`
                                   : '0%',
                             },
                           ]}
@@ -1286,8 +1352,7 @@ export const DayToDayAnalysisScreen: React.FC = () => {
                 </Text>
 
                 {categoriasMesConTodos.map((cat: any) => {
-                  const isSelected =
-                    effectiveSelectedCategory && cat.key === effectiveSelectedCategory.key;
+                  const isSelected = effectiveSelectedCategory && cat.key === effectiveSelectedCategory.key;
                   const isAllRow = cat.key === ALL_CATEGORY_KEY;
 
                   return (
@@ -1429,13 +1494,15 @@ export const DayToDayAnalysisScreen: React.FC = () => {
                     </View>
                   </>
                 ) : (
-                  <Text style={analysisStyles.emptyText}>No hay KPIs suficientes para esta categoría en este filtro.</Text>
+                  <Text style={analysisStyles.emptyText}>
+                    No hay KPIs suficientes para esta categoría en este filtro.
+                  </Text>
                 )}
               </View>
             </View>
           )}
 
-          {/* ✅ Tendencia gasto seleccionado */}
+          {/* Tendencia gasto seleccionado */}
           {data && effectiveSelectedCategory && (
             <View style={panelStyles.section}>
               <SectionHeader
@@ -1609,12 +1676,7 @@ export const DayToDayAnalysisScreen: React.FC = () => {
           )}
         </ScrollView>
 
-        <InfoModal
-          visible={info.visible}
-          title={info.title}
-          text={info.text}
-          onClose={info.close}
-        />
+        <InfoModal visible={info.visible} title={info.title} text={info.text} onClose={info.close} />
       </View>
     </>
   );
@@ -1700,7 +1762,7 @@ const styles = StyleSheet.create({
     color: colors.textSecondary,
   },
 
-  // ✅ NUEVO: estilos tarjeta comparativa mes-a-fecha
+  // ✅ Tarjeta comparativa mes-a-fecha
   mtdCompareCard: {
     marginBottom: 12,
     borderWidth: StyleSheet.hairlineWidth,
@@ -1763,8 +1825,22 @@ const styles = StyleSheet.create({
     marginTop: 2,
     fontSize: 13,
     fontWeight: '800',
-    color: colors.textPrimary,
+    color: colors.textPrimary, // base (se sobreescribe con estilos dinámicos abajo)
   },
+
+  // ✅ NUEVO: estilos de color dinámico para "Diferencia" (MTD)
+  // Motivo: visualmente, gastar más que el mes anterior se interpreta como "peor" (rojo),
+  // y gastar menos como "mejor" (verde).
+  mtdCompareDeltaUp: {
+    color: colors.danger, // positivo => rojo
+  },
+  mtdCompareDeltaDown: {
+    color: colors.success, // negativo => verde
+  },
+  mtdCompareDeltaFlat: {
+    color: colors.textSecondary, // cero => neutro (ajustable a textPrimary si prefieres)
+  },
+
   mtdCompareMessagePill: {
     paddingHorizontal: 10,
     paddingVertical: 6,
