@@ -46,6 +46,7 @@ import { panelStyles } from '../../components/panels/panelStyles';
 import { colors } from '../../theme/colors';
 import { FilterPill } from '../../components/ui/FilterPill';
 import { FilterRow } from '../../components/ui/FilterRow';
+import PeriodNavigator from '../../components/ui/PeriodNavigator';
 import { analysisStyles } from '../../components/analysis/analysisStyles';
 
 import { getDayToDayAnalysis } from '../../services/analyticsApi';
@@ -617,33 +618,17 @@ export const DayToDayKpisScreen: React.FC = () => {
           {/* Selector MES (solo flechas) */}
           <View style={panelStyles.section}>
             <View style={panelStyles.card}>
-              <View style={styles.monthRow}>
-                <TouchableOpacity
-                  activeOpacity={0.85}
-                  style={styles.monthIconBtn}
-                  onPress={() => setSelectedMonth((prev) => addMonths(prev, -1))}
-                >
-                  <Ionicons name="chevron-back" size={18} color={colors.textSecondary} />
-                </TouchableOpacity>
-
-                <View style={styles.monthCenter}>
-                  <Text style={styles.monthTitle}>{monthLabelEsUpper(selectedMonth)}</Text>
-                  <Text style={styles.monthHint}>
-                    Se aplica a ranking, concentración y serie diaria del mes.
-                  </Text>
-                </View>
-
-                <TouchableOpacity
-                  activeOpacity={0.85}
-                  style={[styles.monthIconBtn, isFutureMonth(addMonths(selectedMonth, 1)) && styles.monthBtnDisabled]}
-                  disabled={isFutureMonth(addMonths(selectedMonth, 1))}
-                  onPress={() => setSelectedMonth((prev) => addMonths(prev, +1))}
-                >
-                  <Ionicons name="chevron-forward" size={18} color={colors.textSecondary} />
-                </TouchableOpacity>
-              </View>
+              <PeriodNavigator
+                label={monthLabelEsUpper(selectedMonth)}
+                hint="Se aplica a ranking, concentración y serie diaria del mes."
+                onPrev={() => setSelectedMonth((prev) => addMonths(prev, -1))}
+                onNext={() => setSelectedMonth((prev) => addMonths(prev, +1))}
+                disablePrev={false}
+                disableNext={isFutureMonth(addMonths(selectedMonth, 1))}
+              />
             </View>
           </View>
+
 
           {/* FILTROS (DESPLEGABLE) — sin Contenedores/Subgasto */}
           <View style={panelStyles.section}>

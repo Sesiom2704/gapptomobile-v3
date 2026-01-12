@@ -10,24 +10,27 @@ Objetivo:
 
 NUEVO (para Home):
 - /api/v1/analytics/patrimonio/summary?year=YYYY
-  Agregado multi-propiedad para mostrar en el panel principal.
 
-Criterios:
-- Multi-tenant: todo filtrado por user_id (require_user).
-- “only_kpi_expenses”: en gastos, filtra por Gasto.kpi == True (según tu modelo).
-- “basis”: base de valor para cap_rate / rendimiento_bruto:
-    - total   -> PatrimonioCompra.total_inversion (fallback: max(valor_compra, valor_referencia))
-    - compra  -> valor_compra
-    - referencia -> valor_referencia
-    - max -> max(valor_compra, valor_referencia, total_inversion)
-- “annualize”: si year es el actual, extrapola a 12 meses usando meses_contados.
+CAMBIO CLAVE (v3):
+- Se añade selector de periodo por query params:
+    mode = "LAST_12" | "ALL_TIME" | "YEAR"   (default: "YEAR")
+    as_of = YYYY-MM-DD (opcional, default date.today())
 
-Notas v3:
+- Los cálculos de ingresos/gastos recurrentes se corrigen para reflejar el modelo real:
+    * Gastos: ultimo_pago_on + cuotas_pagadas
+    * Ingresos: ultimo_ingreso_on + ingresos_cobrados
+  Es decir: se cuenta lo efectivamente pagado/cobrado, y se intersecta con el rango.
+
+POR QUÉ:
+- Antes se infería “meses/ocurrencias” con fecha_inicio/fecha y fin de año.
+- Eso provoca errores como: Resumen 2026 (enero) mostrando 12 meses.
+- Con este cambio, Resumen 2026 (enero) mostrará 1 mes si el último cobro/pago es enero.
+
+Notas:
 - Normalización de periodicidad tolerante a:
     - PAGO_UNICO / PAGO UNICO
     - mayúsculas/minúsculas
   (se aplica reemplazando '_' por ' ' y uppercasing).
-- Manejo defensivo de nulls y Numeric/Decimal -> float para JSON.
 """
 
 from __future__ import annotations
@@ -84,31 +87,9 @@ def _as_date(d: Optional[date | datetime]) -> Optional[date]:
     return d
 
 
-def _months_inclusive_between(start: date, end: date) -> int:
-    """
-    Meses inclusivos por calendario entre start y end.
-    Ej:
-      2025-01-01 a 2025-01-31 -> 1
-      2025-01-15 a 2025-03-01 -> 3
-    """
-    if start > end:
-        return 0
-    return (end.year - start.year) * 12 + (end.month - start.month) + 1
-
-
 def _year_window(year: int) -> Tuple[date, date]:
     return date(year, 1, 1), date(year, 12, 31)
 
-
-def _meses_contados_para_year(year: int) -> int:
-    """Para YTD/annualize."""
-    today = date.today()
-    return today.month if today.year == year else 12
-
-
-# =========================================================
-# Helpers periodicidad -> ocurrencias
-# =========================================================
 
 def _norm_periodicidad(p: Optional[str]) -> str:
     # ✅ v3: tolera PAGO_UNICO
@@ -145,126 +126,151 @@ def _step_months_from_periodicidad(p: str) -> Optional[int]:
     if "ANUAL" in pu or "AÑO" in pu:
         return 12
 
+    # fallback: si viene raro, lo tratamos como mensual
     return 1
 
 
-def _occurrences_in_range(start: date, end: date, periodicidad: str) -> int:
-    """
-    Ocurrencias entre start-end según periodicidad.
-    - PAGO UNICO -> 1
-    - Mensual -> meses inclusivos
-    - Trimestral/sem... -> ceil(meses_inclusivos / step)
-    """
-    step = _step_months_from_periodicidad(periodicidad)
-    meses = _months_inclusive_between(start, end)
-    if meses <= 0:
-        return 0
-
-    if step is None:
-        return 1
-
-    return (meses + step - 1) // step
-
-
 # =========================================================
-# Helpers: Ingresos (meses ocupación / cobros)
+# Helpers de rango por "period selector" (mode)
 # =========================================================
 
-def _ingreso_start(ing: models.Ingreso) -> Optional[date]:
-    if getattr(ing, "fecha_inicio", None) is not None:
-        return _as_date(ing.fecha_inicio)
-    return _as_date(getattr(ing, "createon", None))
+def _month_start(d: date) -> date:
+    return date(d.year, d.month, 1)
 
 
-def _ingreso_inactivated_on(ing: models.Ingreso) -> Optional[date]:
-    return _as_date(getattr(ing, "inactivatedon", None))
+def _month_index(d: date) -> int:
+    # índice monótono por mes (sirve para comparar / intervalos)
+    return d.year * 12 + (d.month - 1)
 
 
-def _calc_meses_ingreso_en_year(ing: models.Ingreso, year: int) -> int:
-    """
-    - Si activo: tramo hasta 31/12 (recortado por inicio), con opción de cap por ingresos_cobrados.
-    - Si inactivo: tramo hasta inactivatedon (si está en el año).
-    - Cap total a 12.
-    """
-    jan1, dec31 = _year_window(year)
-    start_any = _ingreso_start(ing)
-    if start_any is None:
+def _add_months(d: date, delta: int) -> date:
+    y = d.year + (d.month - 1 + delta) // 12
+    m = (d.month - 1 + delta) % 12 + 1
+    return date(y, m, 1)
+
+
+def _months_inclusive_between_months(start_month: date, end_month: date) -> int:
+    """Número de meses inclusivos entre dos 'month_start'."""
+    if start_month > end_month:
         return 0
+    return (end_month.year - start_month.year) * 12 + (end_month.month - start_month.month) + 1
 
-    start = start_any if start_any.year >= year else jan1
-    if start < jan1:
-        start = jan1
-    if start > dec31:
-        return 0
 
-    activo = bool(getattr(ing, "activo", True))
-    inact = _ingreso_inactivated_on(ing)
+def _ceil_div(a: int, b: int) -> int:
+    """ceil(a/b) para enteros con b>0."""
+    return -((-a) // b)
 
-    cobrados = getattr(ing, "ingresos_cobrados", None)
+
+def _range_window(
+    *,
+    mode: str,
+    year: int,
+    as_of: date,
+    adquisicion: Optional[date],
+) -> Tuple[date, date, int]:
+    """
+    Devuelve:
+      - range_start_month (primer día de mes)
+      - range_end_month   (primer día de mes)
+      - meses_contados    (denominador para promedios / YTD)
+
+    MODOS:
+    - LAST_12: últimos 12 meses exactos, incluyendo mes actual (as_of)
+    - ALL_TIME: desde adquisición (si existe) hasta mes as_of
+    - YEAR: enero..diciembre del year; si year==as_of.year: YTD hasta mes as_of
+    """
+    mode_u = (mode or "YEAR").strip().upper()
+    as_of_m = _month_start(as_of)
+
+    if mode_u == "LAST_12":
+        start = _add_months(as_of_m, -11)
+        end = as_of_m
+        return start, end, 12
+
+    if mode_u == "ALL_TIME":
+        if adquisicion is None:
+            # fallback defensivo: si falta adquisición, volvemos a LAST_12
+            start = _add_months(as_of_m, -11)
+            end = as_of_m
+            return start, end, 12
+        start = _month_start(adquisicion)
+        end = as_of_m
+        meses = _months_inclusive_between_months(start, end)
+        return start, end, max(1, meses)
+
+    # YEAR
+    start = date(year, 1, 1)
+    start_m = _month_start(start)
+
+    end_m = _month_start(date(year, 12, 1))
+
+    # si es el año actual: YTD hasta as_of.month
+    if as_of.year == year:
+        end_m = min(end_m, as_of_m)
+
+    meses = _months_inclusive_between_months(start_m, end_m)
+    return start_m, end_m, max(1, meses)
+
+
+def _occurrences_paid_in_range(
+    *,
+    last_on: Optional[date],
+    count: int,
+    periodicidad: str,
+    range_start_month: date,
+    range_end_month: date,
+) -> int:
+    """
+    Cuenta ocurrencias pagadas/cobradas dentro del rango, usando el modelo real:
+      - last_on: mes del último pago/cobro (ultimo_pago_on / ultimo_ingreso_on)
+      - count: total de cuotas/cobros acumulados (cuotas_pagadas / ingresos_cobrados)
+      - periodicidad: MENSUAL/BIMESTRAL/...
+      - range_start_month / range_end_month: límites del rango (month_start)
+
+    Idea:
+      La "serie pagada" es: last, last-step, last-2*step, ... (count elementos).
+      Contamos cuántos elementos caen dentro del rango.
+    """
     try:
-        cobrados_int = int(cobrados) if cobrados is not None else None
+        c = int(count)
     except Exception:
-        cobrados_int = None
+        return 0
+    if c <= 0:
+        return 0
+    if last_on is None:
+        return 0
 
-    if activo:
-        end = dec31
-        meses_nominal = _months_inclusive_between(start, end)
-        if cobrados_int is not None and cobrados_int >= 0:
-            meses = min(meses_nominal, cobrados_int)
-        else:
-            meses = meses_nominal
-    else:
-        if inact is not None and inact < jan1:
-            return 0
-        end = inact if (inact is not None and inact <= dec31) else dec31
-        meses = _months_inclusive_between(start, end)
+    per_u = _norm_periodicidad(periodicidad or "")
+    step = _step_months_from_periodicidad(per_u)
 
-    return max(0, min(12, meses))
+    last_m = _month_start(last_on)
+
+    li = _month_index(last_m)
+    si = _month_index(range_start_month)
+    ei = _month_index(range_end_month)
+
+    # PAGO ÚNICO: 1 si el último pago/cobro cae dentro del rango (por mes)
+    if step is None:
+        return 1 if (si <= li <= ei) else 0
+
+    # Serie: li - k*step, para k=0..c-1
+    # Queremos li - k*step ∈ [si, ei]
+    # => li - ei <= k*step <= li - si
+    k_low = _ceil_div(li - ei, step)      # mínimo k
+    k_high = (li - si) // step            # máximo k (floor)
+
+    # clamp al rango disponible de la serie [0, c-1]
+    k1 = max(0, k_low)
+    k2 = min(c - 1, k_high)
+
+    if k2 < k1:
+        return 0
+    return (k2 - k1 + 1)
 
 
 # =========================================================
-# Helpers: Gastos (ocurrencias en el año)
+# Helpers: cuota base
 # =========================================================
-
-def _gasto_start(g: models.Gasto) -> Optional[date]:
-    if getattr(g, "fecha", None) is not None:
-        return _as_date(g.fecha)
-    return _as_date(getattr(g, "createon", None))
-
-
-def _gasto_inactivated_on(g: models.Gasto) -> Optional[date]:
-    return _as_date(getattr(g, "inactivatedon", None))
-
-
-def _calc_ocurrencias_gasto_en_year(g: models.Gasto, year: int) -> int:
-    """
-    - Si activo: ocurrencias desde fecha hasta 31/12 (recortado al año).
-    - Si inactivo: hasta inactivatedon si cae dentro del año.
-    - PAGO UNICO: 1 si cae dentro del año.
-    """
-    jan1, dec31 = _year_window(year)
-    start_any = _gasto_start(g)
-    if start_any is None:
-        return 0
-
-    start = start_any if start_any.year >= year else jan1
-    if start < jan1:
-        start = jan1
-    if start > dec31:
-        return 0
-
-    activo = bool(getattr(g, "activo", True))
-    inact = _gasto_inactivated_on(g)
-
-    if activo:
-        end = dec31
-    else:
-        if inact is not None and inact < jan1:
-            return 0
-        end = inact if (inact is not None and inact <= dec31) else dec31
-
-    return _occurrences_in_range(start, end, getattr(g, "periodicidad", "") or "")
-
 
 def _gasto_cuota_base(g: models.Gasto) -> float:
     ic = getattr(g, "importe_cuota", None)
@@ -319,6 +325,8 @@ def _valor_base_from_compra(compra: Optional[models.PatrimonioCompra], basis: st
 def ingresos_breakdown(
     patrimonio_id: str,
     year: int = Query(...),
+    mode: str = Query("YEAR", description="LAST_12 | ALL_TIME | YEAR"),
+    as_of: Optional[date] = Query(None, description="Fecha de referencia YYYY-MM-DD (default hoy)"),
     db: Session = Depends(get_db),
     current_user: models.User = Depends(require_user),
 ):
@@ -326,8 +334,15 @@ def ingresos_breakdown(
     if not patr or patr.user_id != current_user.id:
         raise HTTPException(status_code=404, detail="Patrimonio no encontrado")
 
-    meses_contados = _meses_contados_para_year(year)
-    jan1, dec31 = _year_window(year)
+    as_of_date = as_of or date.today()
+    adq = _as_date(getattr(patr, "fecha_adquisicion", None))
+
+    range_start_m, range_end_m, meses_contados = _range_window(
+        mode=mode,
+        year=year,
+        as_of=as_of_date,
+        adquisicion=adq,
+    )
 
     q = (
         db.query(models.Ingreso)
@@ -348,26 +363,18 @@ def ingresos_breakdown(
 
         cuota = _ingreso_cuota_base(ing)
 
-        if _step_months_from_periodicidad(per_u) == 1:
-            meses = _calc_meses_ingreso_en_year(ing, year)
-        else:
-            start = _ingreso_start(ing)
-            if start is None:
-                meses = 0
-            else:
-                start_r = start if start.year >= year else jan1
-                if start_r < jan1:
-                    start_r = jan1
-                end_r = dec31
-                if not bool(getattr(ing, "activo", True)):
-                    inact = _ingreso_inactivated_on(ing)
-                    if inact and inact < jan1:
-                        meses = 0
-                    else:
-                        end_r = inact if (inact and inact <= dec31) else dec31
-                meses = _occurrences_in_range(start_r, end_r, per_u)
+        last_on = _as_date(getattr(ing, "ultimo_ingreso_on", None))
+        count = getattr(ing, "ingresos_cobrados", 0) or 0
 
-        total = float(cuota) * float(meses)
+        occ = _occurrences_paid_in_range(
+            last_on=last_on,
+            count=int(count),
+            periodicidad=per_u,
+            range_start_month=range_start_m,
+            range_end_month=range_end_m,
+        )
+
+        total = float(cuota) * float(occ)
         tipo = (getattr(ing, "concepto", None) or "Ingreso").strip() if getattr(ing, "concepto", None) else "Ingreso"
 
         out_rows.append(
@@ -375,7 +382,7 @@ def ingresos_breakdown(
                 tipo=tipo,
                 periodicidad=per_u or "—",
                 cuota=cuota,
-                meses=int(meses),
+                meses=int(occ),
                 total=float(round(total, 2)),
             )
         )
@@ -383,7 +390,7 @@ def ingresos_breakdown(
 
     return BreakdownOut(
         year=year,
-        meses_contados=meses_contados,
+        meses_contados=int(meses_contados),
         rows=out_rows,
         total_ytd=float(round(total_ytd, 2)),
     )
@@ -393,6 +400,8 @@ def ingresos_breakdown(
 def gastos_breakdown(
     patrimonio_id: str,
     year: int = Query(...),
+    mode: str = Query("YEAR", description="LAST_12 | ALL_TIME | YEAR"),
+    as_of: Optional[date] = Query(None, description="Fecha de referencia YYYY-MM-DD (default hoy)"),
     only_kpi: bool = Query(False, alias="only_kpi_expenses"),
     db: Session = Depends(get_db),
     current_user: models.User = Depends(require_user),
@@ -401,7 +410,15 @@ def gastos_breakdown(
     if not patr or patr.user_id != current_user.id:
         raise HTTPException(status_code=404, detail="Patrimonio no encontrado")
 
-    meses_contados = _meses_contados_para_year(year)
+    as_of_date = as_of or date.today()
+    adq = _as_date(getattr(patr, "fecha_adquisicion", None))
+
+    range_start_m, range_end_m, meses_contados = _range_window(
+        mode=mode,
+        year=year,
+        as_of=as_of_date,
+        adquisicion=adq,
+    )
 
     q = (
         db.query(models.Gasto)
@@ -423,7 +440,17 @@ def gastos_breakdown(
         per_u = _norm_periodicidad(per)
 
         cuota = _gasto_cuota_base(g)
-        occ = _calc_ocurrencias_gasto_en_year(g, year)
+
+        last_on = _as_date(getattr(g, "ultimo_pago_on", None))
+        count = getattr(g, "cuotas_pagadas", 0) or 0
+
+        occ = _occurrences_paid_in_range(
+            last_on=last_on,
+            count=int(count),
+            periodicidad=per_u,
+            range_start_month=range_start_m,
+            range_end_month=range_end_m,
+        )
 
         total = float(cuota) * float(occ)
         tipo = (getattr(g, "nombre", None) or getattr(g, "rama", None) or "Gasto").strip()
@@ -441,7 +468,7 @@ def gastos_breakdown(
 
     return BreakdownOut(
         year=year,
-        meses_contados=meses_contados,
+        meses_contados=int(meses_contados),
         rows=out_rows,
         total_ytd=float(round(total_ytd, 2)),
     )
@@ -451,6 +478,8 @@ def gastos_breakdown(
 def resumen_patrimonio(
     patrimonio_id: str,
     year: int = Query(...),
+    mode: str = Query("YEAR", description="LAST_12 | ALL_TIME | YEAR"),
+    as_of: Optional[date] = Query(None, description="Fecha de referencia YYYY-MM-DD (default hoy)"),
     only_kpi_expenses: bool = Query(False),
     db: Session = Depends(get_db),
     current_user: models.User = Depends(require_user),
@@ -459,10 +488,10 @@ def resumen_patrimonio(
     if not patr or patr.user_id != current_user.id:
         raise HTTPException(status_code=404, detail="Patrimonio no encontrado")
 
-    meses_contados = _meses_contados_para_year(year)
+    ing = ingresos_breakdown(patrimonio_id, year, mode, as_of, db, current_user)
+    gas = gastos_breakdown(patrimonio_id, year, mode, as_of, only_kpi_expenses, db, current_user)
 
-    ing = ingresos_breakdown(patrimonio_id, year, db, current_user)
-    gas = gastos_breakdown(patrimonio_id, year, only_kpi_expenses, db, current_user)
+    meses_contados = int(ing.meses_contados or 1)
 
     ingresos_ytd = float(ing.total_ytd or 0.0)
     gastos_ytd = float(gas.total_ytd or 0.0)
@@ -484,6 +513,8 @@ def resumen_patrimonio(
 def kpis_patrimonio(
     patrimonio_id: str,
     year: int = Query(...),
+    mode: str = Query("YEAR", description="LAST_12 | ALL_TIME | YEAR"),
+    as_of: Optional[date] = Query(None, description="Fecha de referencia YYYY-MM-DD (default hoy)"),
     basis: str = Query("total"),
     annualize: bool = Query(True),
     only_kpi_expenses: bool = Query(False),
@@ -494,14 +525,18 @@ def kpis_patrimonio(
     if not patr or patr.user_id != current_user.id:
         raise HTTPException(status_code=404, detail="Patrimonio no encontrado")
 
-    meses_contados = _meses_contados_para_year(year)
+    # Reutilizamos breakdowns (ya incluyen meses_contados del modo)
+    ing_bd = ingresos_breakdown(patrimonio_id, year, mode, as_of, db, current_user)
+    gas_bd = gastos_breakdown(patrimonio_id, year, mode, as_of, only_kpi_expenses, db, current_user)
 
-    ing_bd = ingresos_breakdown(patrimonio_id, year, db, current_user)
-    gas_bd = gastos_breakdown(patrimonio_id, year, only_kpi_expenses, db, current_user)
+    meses_contados = int(ing_bd.meses_contados or 1)
 
     ingresos_ytd = float(ing_bd.total_ytd or 0.0)
     gastos_ytd = float(gas_bd.total_ytd or 0.0)
 
+    # Annualize:
+    # - Si annualize=True, escalamos a "equivalente anual" en base a meses_contados del modo.
+    # - Si annualize=False, dejamos el rango tal cual.
     factor = 1.0
     if annualize:
         factor = 12.0 / float(meses_contados) if meses_contados > 0 else 1.0
@@ -510,12 +545,16 @@ def kpis_patrimonio(
     gastos_anuales = gastos_ytd * factor
     noi = ingresos_anuales - gastos_anuales
 
-    max_meses = 0
+    # Ocupación:
+    # aproximación por ingresos mensuales => max meses (mensual) / meses_contados (del rango)
+    max_occ = 0
     for r in ing_bd.rows:
-        if _step_months_from_periodicidad(r.periodicidad) == 1:
-            max_meses = max(max_meses, int(r.meses or 0))
-    max_meses = min(12, max_meses)
-    ocupacion_pct = (float(max_meses) / 12.0) * 100.0 if max_meses > 0 else 0.0
+        step = _step_months_from_periodicidad(r.periodicidad)
+        if step == 1:
+            max_occ = max(max_occ, int(r.meses or 0))
+
+    den = float(max(1, meses_contados))
+    ocupacion_pct = (float(max_occ) / den) * 100.0 if max_occ > 0 else 0.0
 
     compra = _get_compra(db, patrimonio_id)
     valor_base = _valor_base_from_compra(compra, basis)
@@ -528,14 +567,15 @@ def kpis_patrimonio(
     cashflow_mensual = cashflow_anual / 12.0
 
     info: Dict[str, str] = {
+        "mode": "Selector de periodo: LAST_12 (últimos 12 meses), ALL_TIME (desde adquisición), YEAR (año calendario / YTD).",
+        "meses_contados": "Meses del rango (denominador para promedios y annualize).",
         "valor_base": "Base usada para ratios: total_inversion (default) o compra/referencia según 'basis'.",
-        "ingresos_anuales": "Suma anualizada de ingresos (importe * meses/ocurrencias).",
-        "gastos_operativos_anuales": "Suma anualizada de gastos operativos (cuota_base * ocurrencias).",
+        "annualize": "Si annualize=True, escala a equivalente anual: 12/meses_contados.",
         "noi": "NOI = ingresos anuales − gastos operativos anuales.",
         "cap_rate_pct": "Cap rate = (NOI / valor_base) × 100.",
         "rendimiento_bruto_pct": "Rend. bruto = (ingresos anuales / valor_base) × 100.",
-        "ocupacion_pct": "Ocupación aproximada = meses cobrados / 12 × 100 (basado en ingresos mensuales).",
-        "meses_contados": "Si el año es el actual, meses_contados = mes actual. Si no, 12.",
+        "ocupacion_pct": "Ocupación aproximada = meses cobrados (mensual) / meses_contados × 100.",
+        "data_model": "Ingresos/gastos se calculan por ultimo_* + *_cobrados/pagadas (efectivo), no por fecha_inicio->fin_año.",
     }
 
     return KpisOut(
@@ -570,6 +610,10 @@ def patrimonio_summary(
 ):
     """
     Agregado multi-propiedad para el HomeDashboard.
+
+    Nota:
+    - Se mantiene el comportamiento original (usa RendimientoPatrimonio ya persistido).
+    - No se toca para no romper Home.
     """
     patrimonios = (
         db.query(models.Patrimonio)

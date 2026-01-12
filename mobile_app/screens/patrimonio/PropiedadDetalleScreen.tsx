@@ -1,4 +1,25 @@
-//mobile_app\screens\patrimonio\PropiedadDetalleScreen.tsx
+// mobile_app/screens/patrimonio/PropiedadDetalleScreen.tsx
+//
+// Detalle de propiedad (v3)
+//
+// Cambios incluidos:
+// - Selector de periodo con flechas (UX tipo DayToDayKpisScreen).
+// - Tres modos de análisis:
+//     1) LAST_12  (default) -> "Últimos 12 meses"
+//     2) ALL_TIME           -> "Todos los tiempos" (desde adquisición)
+//     3) YEAR               -> "Resumen {YYYY}"
+//
+// Orden con flechas (de más antiguo a más reciente):
+//   YEAR(minYear) ... YEAR(currentYear) -> ALL_TIME -> LAST_12
+//
+// Por tanto:
+// - Desde "Resumen 2026" puedes volver con flecha derecha a "Todos los tiempos" y "Últimos 12 meses".
+// - Y con flecha izquierda navegas a años anteriores.
+//
+// Backend requerido:
+// - analytics endpoints aceptan params: { year, mode } con mode = LAST_12 | ALL_TIME | YEAR
+// - Cálculo correcto por ultimo_pago_on/ultimo_ingreso_on + cuotas_pagadas/ingresos_cobrados
+
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   View,
@@ -79,6 +100,8 @@ type Props = {
   navigation?: any;
 };
 
+type PeriodMode = 'LAST_12' | 'ALL_TIME' | 'YEAR';
+
 function safeNum(n: any): number | null {
   const x = typeof n === 'number' ? n : n == null ? null : Number(n);
   return x == null || Number.isNaN(x) ? null : x;
@@ -111,7 +134,7 @@ const KPI_INFO: Record<string, { title: string; desc: string }> = {
   ocupacion_pct: {
     title: 'Ocupación',
     desc:
-      'Ocupación (%) = (Meses cobrados / Meses del año contados) × 100.\n\nAproximación basada en ingresos recurrentes registrados y su contador de cobros.',
+      'Ocupación (%) = (Meses cobrados / Meses del periodo) × 100.\n\nAproximación basada en ingresos recurrentes registrados.',
   },
   precio_m2: {
     title: 'Precio €/m²',
@@ -135,9 +158,18 @@ const KPI_INFO: Record<string, { title: string; desc: string }> = {
   },
 };
 
+function parseYearFromYYYYMMDD(s?: string | null): number | null {
+  if (!s || typeof s !== 'string') return null;
+  // "YYYY-MM-DD"
+  const y = Number(String(s).slice(0, 4));
+  return Number.isFinite(y) ? y : null;
+}
+
 export default function PropiedadDetalleScreen({ route, navigation }: Props) {
   const patrimonioId = route?.params?.patrimonioId as string;
-  const year = new Date().getFullYear();
+
+  const now = useMemo(() => new Date(), []);
+  const currentYear = useMemo(() => now.getFullYear(), [now]);
 
   const [loading, setLoading] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
@@ -155,6 +187,92 @@ export default function PropiedadDetalleScreen({ route, navigation }: Props) {
   const [kpiInfoOpen, setKpiInfoOpen] = useState(false);
   const [kpiInfoKey, setKpiInfoKey] = useState<string>('cap_rate_pct');
 
+  // -------------------------
+  // Period selector state
+  // -------------------------
+  const [periodMode, setPeriodMode] = useState<PeriodMode>('LAST_12'); // default requerido
+  const [selectedYear, setSelectedYear] = useState<number>(currentYear);
+
+  const adquisicionYear = useMemo(() => parseYearFromYYYYMMDD(base?.fecha_adquisicion) ?? null, [base?.fecha_adquisicion]);
+  const minYear = useMemo(() => {
+    // Si hay adquisición, ese será el mínimo año navegable.
+    // Si no, fallback conservador.
+    return adquisicionYear ?? (currentYear - 10);
+  }, [adquisicionYear, currentYear]);
+
+  // Garantía: no quedarnos con selectedYear fuera de rango tras cargar la vivienda
+  useEffect(() => {
+    setSelectedYear((y) => {
+      if (y < minYear) return minYear;
+      if (y > currentYear) return currentYear;
+      return y;
+    });
+  }, [minYear, currentYear]);
+
+  const periodTitle = useMemo(() => {
+    if (periodMode === 'LAST_12') return 'Últimos 12 meses';
+    if (periodMode === 'ALL_TIME') return 'Todos los tiempos';
+    return `Resumen ${selectedYear}`;
+  }, [periodMode, selectedYear]);
+
+  // Param year para backend:
+  // - En YEAR usamos selectedYear
+  // - En otros modos mandamos currentYear (backend lo ignora para LAST_12/ALL_TIME, pero el param sigue existiendo)
+  const analyticsYear = useMemo(() => {
+    return periodMode === 'YEAR' ? selectedYear : currentYear;
+  }, [periodMode, selectedYear, currentYear]);
+
+  const analyticsParams = useMemo(() => {
+    return { year: analyticsYear, mode: periodMode };
+  }, [analyticsYear, periodMode]);
+
+  const canGoLeft = useMemo(() => {
+    if (periodMode === 'LAST_12') return true;       // LAST_12 -> ALL_TIME
+    if (periodMode === 'ALL_TIME') return true;      // ALL_TIME -> YEAR(current)
+    // YEAR:
+    return selectedYear > minYear;                   // YEAR(y) -> YEAR(y-1)
+  }, [periodMode, selectedYear, minYear]);
+
+  const canGoRight = useMemo(() => {
+    if (periodMode === 'LAST_12') return false;      // tope (más reciente)
+    if (periodMode === 'ALL_TIME') return true;      // ALL_TIME -> LAST_12
+    // YEAR:
+    return true;                                    // YEAR(y) -> YEAR(y+1) o -> ALL_TIME si y==current
+  }, [periodMode]);
+
+  const goLeft = useCallback(() => {
+    if (periodMode === 'LAST_12') {
+      setPeriodMode('ALL_TIME');
+      return;
+    }
+    if (periodMode === 'ALL_TIME') {
+      setPeriodMode('YEAR');
+      setSelectedYear(currentYear);
+      return;
+    }
+    // YEAR
+    setSelectedYear((y) => Math.max(minYear, y - 1));
+  }, [periodMode, currentYear, minYear]);
+
+  const goRight = useCallback(() => {
+    if (periodMode === 'ALL_TIME') {
+      setPeriodMode('LAST_12');
+      return;
+    }
+    if (periodMode === 'YEAR') {
+      setSelectedYear((y) => {
+        if (y < currentYear) return y + 1;
+        // YEAR(current) -> ALL_TIME
+        setPeriodMode('ALL_TIME');
+        return y;
+      });
+      return;
+    }
+  }, [periodMode, currentYear]);
+
+  // -------------------------
+  // KPI info modal handlers
+  // -------------------------
   const openKpiInfo = (key: string) => {
     setKpiInfoKey(key);
     setKpiInfoOpen(true);
@@ -162,11 +280,11 @@ export default function PropiedadDetalleScreen({ route, navigation }: Props) {
 
   const headerTitle = useMemo(() => base?.referencia || base?.id || 'Propiedad', [base]);
 
-  const loadAnalytics = async () => {
+  const loadAnalytics = useCallback(async () => {
     try {
       const r1 = await api.get<ResumenYTD>(
         `/api/v1/analytics/patrimonios/${encodeURIComponent(patrimonioId)}/resumen`,
-        { params: { year } }
+        { params: analyticsParams }
       );
       setResumen(r1.data);
     } catch {
@@ -176,7 +294,7 @@ export default function PropiedadDetalleScreen({ route, navigation }: Props) {
     try {
       const r2 = await api.get<Breakdown>(
         `/api/v1/analytics/patrimonios/${encodeURIComponent(patrimonioId)}/gastos_breakdown`,
-        { params: { year } }
+        { params: analyticsParams }
       );
       setBreakdownG(r2.data);
     } catch {
@@ -186,7 +304,7 @@ export default function PropiedadDetalleScreen({ route, navigation }: Props) {
     try {
       const r3 = await api.get<Breakdown>(
         `/api/v1/analytics/patrimonios/${encodeURIComponent(patrimonioId)}/ingresos_breakdown`,
-        { params: { year } }
+        { params: analyticsParams }
       );
       setBreakdownI(r3.data);
     } catch {
@@ -196,13 +314,13 @@ export default function PropiedadDetalleScreen({ route, navigation }: Props) {
     try {
       const r4 = await api.get<Kpis>(
         `/api/v1/analytics/patrimonios/${encodeURIComponent(patrimonioId)}/kpis`,
-        { params: { year, basis: 'total', annualize: false } }
+        { params: { ...analyticsParams, basis: 'total', annualize: false } }
       );
       setKpi(r4.data);
     } catch {
       setKpi(null);
     }
-  };
+  }, [patrimonioId, analyticsParams]);
 
   const reload = useCallback(
     async (isPull = false) => {
@@ -227,12 +345,19 @@ export default function PropiedadDetalleScreen({ route, navigation }: Props) {
         if (isPull) setRefreshing(false);
       }
     },
-    [patrimonioId, year]
+    [patrimonioId, loadAnalytics]
   );
 
+  // Carga inicial
   useEffect(() => {
     reload(false);
   }, [reload]);
+
+  // Recarga analytics al cambiar el periodo (sin volver a pedir base/compra)
+  useEffect(() => {
+    if (!base) return; // evita llamar antes de tener propiedad
+    loadAnalytics();
+  }, [periodMode, selectedYear, base, loadAnalytics]);
 
   const goMasKpis = useCallback(() => {
     navigation?.navigate?.('PropiedadKpis', { patrimonioId });
@@ -244,7 +369,9 @@ export default function PropiedadDetalleScreen({ route, navigation }: Props) {
     navigation.navigate('PropiedadesRanking');
   };
 
+  // -------------------------
   // Componentes UI locales
+  // -------------------------
   const CardTitle: React.FC<{ icon: any; text: string; right?: React.ReactNode }> = ({
     icon,
     text,
@@ -259,28 +386,27 @@ export default function PropiedadDetalleScreen({ route, navigation }: Props) {
     </View>
   );
 
-  // --- NUEVO Row3: columnas alineadas (label | € | %)
+  // Row3: (label | € (+%))
   const Row3 = ({
-  label,
-  value,
-  pct,
-}: {
-  label: string;
-  value: string;
-  pct?: string;
-}) => (
-  <View style={styles.rowBetween3}>
-    <Text style={styles.rowLabel} numberOfLines={1}>
-      {label}
-    </Text>
+    label,
+    value,
+    pct,
+  }: {
+    label: string;
+    value: string;
+    pct?: string;
+  }) => (
+    <View style={styles.rowBetween3}>
+      <Text style={styles.rowLabel} numberOfLines={1}>
+        {label}
+      </Text>
 
-    <Text style={styles.rowValue} numberOfLines={1}>
-      {value}
-      {pct && pct !== '—' ? ` (${pct})` : ''}
-    </Text>
-  </View>
-);
-
+      <Text style={styles.rowValue} numberOfLines={1}>
+        {value}
+        {pct && pct !== '—' ? ` (${pct})` : ''}
+      </Text>
+    </View>
+  );
 
   const KpiTile = ({
     label,
@@ -304,6 +430,35 @@ export default function PropiedadDetalleScreen({ route, navigation }: Props) {
         </TouchableOpacity>
       </View>
       <Text style={styles.kpiValue}>{value}</Text>
+    </View>
+  );
+
+  const PeriodSelector = () => (
+    <View style={styles.periodRow}>
+      <TouchableOpacity
+        activeOpacity={0.85}
+        style={[styles.periodIconBtn, !canGoLeft && styles.periodBtnDisabled]}
+        disabled={!canGoLeft}
+        onPress={goLeft}
+      >
+        <Ionicons name="chevron-back" size={18} color={colors.textSecondary} />
+      </TouchableOpacity>
+
+      <View style={styles.periodCenter}>
+        <Text style={styles.periodTitle}>{periodTitle}</Text>
+        <Text style={styles.periodHint}>
+          Aplica a resumen, KPIs y detalle (ingresos/gastos).
+        </Text>
+      </View>
+
+      <TouchableOpacity
+        activeOpacity={0.85}
+        style={[styles.periodIconBtn, !canGoRight && styles.periodBtnDisabled]}
+        disabled={!canGoRight}
+        onPress={goRight}
+      >
+        <Ionicons name="chevron-forward" size={18} color={colors.textSecondary} />
+      </TouchableOpacity>
     </View>
   );
 
@@ -346,7 +501,7 @@ export default function PropiedadDetalleScreen({ route, navigation }: Props) {
             <Meta label="Trastero" value={base?.trastero ? 'Sí' : 'No'} />
           </View>
 
-          {/* Participación + Adquisición en misma línea */}
+          {/* Participación + Adquisición */}
           <View style={styles.metaRow2Cols}>
             <View style={styles.metaHalf}>
               <Text style={styles.metaLabel}>Participación</Text>
@@ -414,6 +569,12 @@ export default function PropiedadDetalleScreen({ route, navigation }: Props) {
           )}
         </View>
 
+        {/* PERIODO (selector global) */}
+        <View style={styles.card}>
+          <CardTitle icon="time-outline" text="Periodo" />
+          <PeriodSelector />
+        </View>
+
         {/* KPIs */}
         <View style={styles.card}>
           <CardTitle icon="analytics-outline" text="KPIs" />
@@ -446,17 +607,17 @@ export default function PropiedadDetalleScreen({ route, navigation }: Props) {
           )}
         </View>
 
-        {/* Resumen 2025 (NO quitar) */}
+        {/* Resumen */}
         <View style={styles.card}>
-          <CardTitle icon="calendar-number-outline" text={`Resumen ${resumen?.year ?? year}`} />
+          <CardTitle icon="calendar-number-outline" text={periodMode === 'YEAR' ? `Resumen ${selectedYear}` : 'Resumen'} />
 
           {resumen ? (
             <>
               <View style={styles.kpiGrid}>
-                <KpiTile label="Ingresos YTD" value={EuroformatEuro(resumen.ingresos_ytd)} infoKey="ingresos_ytd" />
-                <KpiTile label="Gastos YTD" value={EuroformatEuro(resumen.gastos_ytd)} infoKey="gastos_ytd" />
+                <KpiTile label="Ingresos" value={EuroformatEuro(resumen.ingresos_ytd)} infoKey="ingresos_ytd" />
+                <KpiTile label="Gastos" value={EuroformatEuro(resumen.gastos_ytd)} infoKey="gastos_ytd" />
                 <KpiTile label="Cash-flow" value={EuroformatEuro(resumen.cashflow_ytd)} infoKey="cashflow_ytd" />
-                <KpiTile label="Promedio mensual" value={EuroformatEuro(resumen.promedio_mensual)} infoKey="promedio_mensual" />
+                <KpiTile label="Promedio" value={EuroformatEuro(resumen.promedio_mensual)} infoKey="promedio_mensual" />
               </View>
               <Text style={styles.smallMuted}>Meses contados: {resumen.meses_contados}</Text>
             </>
@@ -527,7 +688,7 @@ function BreakdownTable({ rows, totalYtd }: { rows: BreakdownRow[]; totalYtd: nu
       ))}
 
       <View style={[styles.tableRow, styles.tableFooter]}>
-        <Text style={[styles.th, { flex: 0.44 }]}>Total YTD</Text>
+        <Text style={[styles.th, { flex: 0.44 }]}>Total</Text>
         <Text style={[styles.th, { flex: 0.22, textAlign: 'right' }]}>—</Text>
         <Text style={[styles.th, { flex: 0.10, textAlign: 'right' }]}>—</Text>
         <Text style={[styles.th, { flex: 0.24, textAlign: 'right' }]}>{EuroformatEuro(totalYtd ?? 0)}</Text>
@@ -591,11 +752,11 @@ const styles = StyleSheet.create({
     padding: spacing.sm,
   },
 
-  // --- NUEVO: fila adquisición alineada (label | [€ + %] con ancho fijo)
+  // fila adquisición alineada (label | [€ + %] con ancho fijo)
   rowBetween3: {
-  flexDirection: 'row',
-  alignItems: 'baseline',
-  paddingVertical: 4,
+    flexDirection: 'row',
+    alignItems: 'baseline',
+    paddingVertical: 4,
   },
   rowLabel: {
     flex: 1,
@@ -604,18 +765,11 @@ const styles = StyleSheet.create({
     paddingRight: 10,
   },
   rowValue: {
-    width: 170,            // ajusta 160–190 según tu fuente/pantallas
+    width: 170,
     textAlign: 'right',
     fontSize: 12,
     color: colors.textPrimary,
     fontWeight: '900',
-  },
-
-  rowPct: {
-    marginTop: 2,
-    fontSize: 11,
-    color: colors.textMuted,
-    fontWeight: '700',
   },
 
   sep: { height: 1, backgroundColor: colors.border, marginVertical: spacing.sm },
@@ -633,6 +787,7 @@ const styles = StyleSheet.create({
     textAlign: 'center',
   },
 
+  // KPIs
   kpiGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: spacing.sm },
   kpiBox: {
     width: '48%',
@@ -650,6 +805,45 @@ const styles = StyleSheet.create({
   kpiLabel: { fontSize: 11, color: colors.textSecondary, fontWeight: '800' },
   kpiValue: { marginTop: 4, fontSize: 14, color: colors.textPrimary, fontWeight: '900' },
 
+  // Period selector (flechas estilo DayToDay, sin mayúsculas obligatorias)
+  periodRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 10,
+  },
+  periodIconBtn: {
+    width: 42,
+    height: 42,
+    borderRadius: 12,
+    backgroundColor: colors.neutralSoft,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: colors.border,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  periodBtnDisabled: {
+    opacity: 0.45,
+  },
+  periodCenter: {
+    flex: 1,
+    alignItems: 'center',
+    paddingHorizontal: 6,
+  },
+  periodTitle: {
+    fontSize: 14,
+    fontWeight: '900',
+    color: colors.textPrimary,
+  },
+  periodHint: {
+    marginTop: 2,
+    fontSize: 11,
+    color: colors.textMuted,
+    textAlign: 'center',
+    fontWeight: '700',
+  },
+
+  // Tabla breakdown
   tableRow: { flexDirection: 'row', paddingVertical: 6, alignItems: 'flex-start' },
   tableHeader: { borderBottomWidth: 1, borderBottomColor: colors.border, marginBottom: 6 },
   tableFooter: { borderTopWidth: 1, borderTopColor: colors.border, marginTop: 6, paddingTop: 6 },
