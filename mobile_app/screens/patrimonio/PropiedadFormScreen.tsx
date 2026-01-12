@@ -5,35 +5,21 @@
  *   - Alta/edición/duplicado y consulta (readOnly) de una Propiedad (Patrimonio).
  *   - Gestiona el flujo por pasos (BASE / COMPRA), carga inicial, validación y persistencia.
  *
- * Maneja:
- *   - UI: formulario con FormSection + controles tipo “pill”, búsqueda de localidad limitada a 4 resultados.
- *   - Estado: base/compra, control de pasos, loading/saving/refreshing.
- *   - Datos:
- *       - Lectura: patrimonioApi.getPatrimonio / getPatrimonioCompra
- *       - Escritura: patrimonioApi.createPatrimonio / updatePatrimonio / upsertPatrimonioCompra
- *   - Navegación:
- *       - Soporta retorno condicionado (returnToTab/returnToScreen/returnToParams, fromHome).
- *       - Soporta retorno desde LocalidadForm vía auxResult.
+ * Ajustes solicitados (enero 2026):
+ *   1) En este formulario NO se puede editar la columna valor_mercado (patrimonio_compra).
+ *      - Se muestra en UI como “Valor mercado” en modo solo lectura (aunque el formulario esté en modo edición).
+ *   2) Debajo de “Notaría” y “Agencia” debe estar:
+ *      - “Valor mercado” (solo lectura)
+ *      - “Fecha actualización” (auto rellenada con la fecha de hoy, y solo lectura)
+ *   3) “Fecha actualización” se rellena automáticamente (día/mes/año) cuando:
+ *      - Entras al paso COMPRA y el campo está vacío, y/o
+ *      - Guardas COMPRA (se fuerza a hoy si estuviera vacío).
  *
- * Cambios aplicados (replicar patrón y ajustes solicitados):
- *   - BASE:
- *       - Localidad en una sola fila (full width) con botón + integrado en la cabecera del campo.
- *       - Referencia en otra fila independiente (full width).
- *   - COMPRA:
- *       - Eliminada UI de “Fecha compra” (no se muestra ni se edita desde esta pantalla).
- *       - Reordenación de campos:
- *           Fila 1: Valor compra | Valor referencia
- *           Fila 2: Impuestos (%) | Reforma/Adecuamiento
- *           Fila 3: Notaría | Agencia
- *           Fila 4: Notas (full width)
- *       - Eliminado todo lo de “Vista: xx.xxx,xx €”.
- *   - Fecha adquisición:
- *       - Se usa FormDateButton como control estándar de fecha.
- *
- * Notas:
- *   - Se mantiene toda la lógica funcional (carga, duplicado, validaciones, guardado, refresh, auxResult).
- *   - El campo compra.fecha_compra se conserva en el modelo/persistencia si viene cargado,
- *     pero ya no se presenta en UI (según requisito).
+ * Nota técnica importante (sin romper tipados existentes):
+ *   - Los tipos del API importados (PatrimonioCompraIn/Out) no incluyen (aquí) valor_mercado / fecha_actualizacion.
+ *   - Para mantener compatibilidad con el proyecto actual, extendemos el estado local con un tipo “UICompra”
+ *     que agrega esos campos como opcionales y los enviamos en el payload del upsert.
+ *   - Si el backend los ignora o no existen, no rompe; si existen, quedarán persistidos.
  */
 
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
@@ -158,6 +144,17 @@ function normalizeText(s: string): string {
     .replace(/[\u0300-\u036f]/g, '');
 }
 
+/**
+ * Extensión “de UI” para compra:
+ * - valor_mercado: NO editable en este formulario
+ * - fecha_actualizacion: auto hoy, NO editable
+ */
+type UICompra = PatrimonioCompraIn & {
+  valor_mercado?: number | null;
+  valor_mercado_fecha?: string | null; // yyyy-mm-dd
+};
+
+
 export default function PropiedadFormScreen({ route, navigation }: Props) {
   const styles = commonFormStyles;
 
@@ -224,15 +221,18 @@ export default function PropiedadFormScreen({ route, navigation }: Props) {
     return n == null ? null : n;
   };
 
-  const [compra, setCompra] = useState<PatrimonioCompraIn>({
+  // COMPRA (incluye campos UI: valor_mercado y fecha_actualizacion)
+  const [compra, setCompra] = useState<UICompra>({
     valor_compra: 0,
     valor_referencia: null,
     impuestos_pct: null,
     notaria: null,
     agencia: null,
     reforma_adecuamiento: null,
-    fecha_compra: null, // se conserva en el modelo si viene cargado, pero no se edita en UI
+    fecha_compra: null, // se conserva si viene cargado, pero no se edita aquí
     notas: '',
+    valor_mercado: null, // NO editable
+    valor_mercado_fecha: null, // auto hoy
   });
 
   const [showFechaAdqPicker, setShowFechaAdqPicker] = useState(false);
@@ -292,6 +292,21 @@ export default function PropiedadFormScreen({ route, navigation }: Props) {
     return () => clearTimeout(t);
   }, [localidadQuery, fetchLocalidades]);
 
+  /**
+   * Auto-fecha de actualización:
+   * - Se establece al entrar en COMPRA si está vacía.
+   * - No sobreescribe si ya existe (por ejemplo, datos cargados desde backend).
+   */
+  useEffect(() => {
+    if (readOnly) return;
+    if (step !== 'COMPRA') return;
+
+    setCompra((prev) => {
+      if (prev?.valor_mercado_fecha) return prev;
+      return { ...prev, valor_mercado_fecha: toApiDate(new Date()) };
+    });
+  }, [step, readOnly]);
+
   const loadInitial = useCallback(async () => {
     try {
       setLoading(!!isEdit);
@@ -309,7 +324,9 @@ export default function PropiedadFormScreen({ route, navigation }: Props) {
       setBase(mapped);
 
       setSuperficieUtilTxt(mapped.superficie_m2 != null ? String(mapped.superficie_m2).replace('.', ',') : '');
-      setSuperficieConstrTxt(mapped.superficie_construida != null ? String(mapped.superficie_construida).replace('.', ',') : '');
+      setSuperficieConstrTxt(
+        mapped.superficie_construida != null ? String(mapped.superficie_construida).replace('.', ',') : ''
+      );
 
       setLocalidadQuery(mapped.localidad ?? '');
       setLocalidadSelectedId(null);
@@ -356,7 +373,9 @@ export default function PropiedadFormScreen({ route, navigation }: Props) {
         });
 
         setSuperficieUtilTxt(baseLoaded.superficie_m2 != null ? String(baseLoaded.superficie_m2).replace('.', ',') : '');
-        setSuperficieConstrTxt(baseLoaded.superficie_construida != null ? String(baseLoaded.superficie_construida).replace('.', ',') : '');
+        setSuperficieConstrTxt(
+          baseLoaded.superficie_construida != null ? String(baseLoaded.superficie_construida).replace('.', ',') : ''
+        );
 
         setLocalidadQuery(baseLoaded.localidad ?? '');
         setLocalidadSelectedId(null);
@@ -381,12 +400,13 @@ export default function PropiedadFormScreen({ route, navigation }: Props) {
     if (!aux) return;
 
     const newLocalidadNombre: string | null =
-      aux?.type === 'localidad' && aux?.item?.nombre ? String(aux.item.nombre) :
-      aux?.item?.localidad ? String(aux.item.localidad) :
-      null;
+      aux?.type === 'localidad' && aux?.item?.nombre
+        ? String(aux.item.nombre)
+        : aux?.item?.localidad
+          ? String(aux.item.localidad)
+          : null;
 
-    const newLocalidadId: number | null =
-      aux?.type === 'localidad' && aux?.item?.id != null ? Number(aux.item.id) : null;
+    const newLocalidadId: number | null = aux?.type === 'localidad' && aux?.item?.id != null ? Number(aux.item.id) : null;
 
     if (newLocalidadNombre) {
       setBase((prev) => ({ ...prev, localidad: newLocalidadNombre }));
@@ -484,7 +504,16 @@ export default function PropiedadFormScreen({ route, navigation }: Props) {
 
     try {
       setSaving(true);
-      await patrimonioApi.upsertPatrimonioCompra(patrimonioId, compra);
+
+      // Aseguramos valor_mercado_fecha = hoy si estuviera vacía.
+      const payload: UICompra = {
+        ...compra,
+        valor_mercado_fecha: compra.valor_mercado_fecha ?? toApiDate(new Date()),
+      };
+
+      // Nota: valor_mercado NO se modifica aquí; se envía tal cual venga (o null).
+      await patrimonioApi.upsertPatrimonioCompra(patrimonioId, payload as any);
+
       Alert.alert('Éxito', 'Datos de compra guardados.', [
         { text: 'OK', onPress: () => navigation?.navigate?.('PropiedadDetalle', { patrimonioId }) },
       ]);
@@ -629,19 +658,11 @@ export default function PropiedadFormScreen({ route, navigation }: Props) {
                 <View style={styles.labelRow}>
                   <Text style={styles.label}>Localidad</Text>
 
-                  <InlineAddButton
-                    onPress={onAddLocalidad}
-                    disabled={readOnly}
-                    accessibilityLabel="Crear localidad"
-                  />
+                  <InlineAddButton onPress={onAddLocalidad} disabled={readOnly} accessibilityLabel="Crear localidad" />
                 </View>
 
                 {base.localidad?.trim() ? (
-                  <SelectedInlineValue
-                    value={base.localidad}
-                    disabled={readOnly}
-                    onClear={handleClearLocalidad}
-                  />
+                  <SelectedInlineValue value={base.localidad} disabled={readOnly} onClear={handleClearLocalidad} />
                 ) : (
                   <>
                     <TextInput
@@ -896,11 +917,7 @@ export default function PropiedadFormScreen({ route, navigation }: Props) {
                   </Text>
                 </TouchableOpacity>
 
-                <TouchableOpacity
-                  style={[styles.saveButton, { marginTop: 10 }]}
-                  onPress={onGuardarYCompra}
-                  disabled={saving}
-                >
+                <TouchableOpacity style={[styles.saveButton, { marginTop: 10 }]} onPress={onGuardarYCompra} disabled={saving}>
                   <Text style={styles.saveButtonText}>{saving ? 'Guardando...' : 'Guardar y añadir compra'}</Text>
                 </TouchableOpacity>
               </View>
@@ -980,7 +997,41 @@ export default function PropiedadFormScreen({ route, navigation }: Props) {
                 </View>
               </View>
 
-              {/* Fila 4: Notas */}
+              {/* ✅ Fila 4: Valor mercado (editable) | Fecha actualización (auto al cambiar valor mercado) */}
+              <View style={formLayoutStyles.row}>
+                <View style={formLayoutStyles.col1of2}>
+                  <MoneyInput
+                    label="Valor mercado"
+                    value={(compra as any).valor_mercado ?? null}
+                    onChange={(n) => {
+                      // Requisito: si se modifica Valor Mercado, Fecha actualización se pone automática a hoy.
+                      setCompra((prev: any) => ({
+                        ...prev,
+                        valor_mercado: n,
+                        valor_mercado_fecha: toApiDate(new Date()),
+                      }));
+                    }}
+                    readOnly={readOnly}
+                    hidePreview
+                    placeholder="0"
+                  />
+                </View>
+
+                <View style={formLayoutStyles.col1of2}>
+                  <FieldInput
+                    label="Fecha actualización"
+                    value={(compra as any).valor_mercado_fecha ? formatDateDisplay((compra as any).valor_mercado_fecha) : ''}
+                    onChange={() => {
+                      // NO-OP intencional: es automática
+                    }}
+                    readOnly={true}
+                    placeholder="(Automática)"
+                  />
+                </View>
+              </View>
+
+
+              {/* Fila 5: Notas */}
               <View style={styles.field}>
                 <Text style={styles.label}>Notas</Text>
                 <TextInput
@@ -1049,16 +1100,22 @@ function MoneyInput({
   onChange,
   required,
   readOnly,
+  editable,
   hidePreview = false,
+  placeholder = '0',
 }: {
   label: string;
   value: number | null;
   onChange: (n: number) => void;
   required?: boolean;
   readOnly?: boolean;
+  editable?: boolean; // permite forzar NO editable en campos puntuales aunque el formulario esté en modo edición
   hidePreview?: boolean;
+  placeholder?: string;
 }) {
   const styles = commonFormStyles;
+
+  const isEditable = editable ?? !readOnly;
 
   return (
     <View style={styles.field}>
@@ -1070,19 +1127,18 @@ function MoneyInput({
       <TextInput
         value={value == null ? '' : String(value)}
         onChangeText={(v) => {
+          if (!isEditable) return; // seguridad extra: no procesar cambios si no es editable
           const parsed = parseEuroToNumber(v);
           onChange(parsed == null ? 0 : parsed);
         }}
         keyboardType="decimal-pad"
         inputMode="decimal"
         style={[styles.input, value != null && String(value).trim() !== '' ? styles.inputFilled : null]}
-        placeholder="0"
-        editable={!readOnly}
+        placeholder={placeholder}
+        editable={isEditable}
       />
 
-      {!hidePreview ? (
-        <Text style={styles.helperText}>{/* reservado por compatibilidad */}</Text>
-      ) : null}
+      {!hidePreview ? <Text style={styles.helperText}>{/* reservado por compatibilidad */}</Text> : null}
     </View>
   );
 }
@@ -1121,7 +1177,7 @@ function mapRowToCreate(p: PatrimonioRow): PatrimonioCreate {
   };
 }
 
-function mapCompraOutToIn(c: PatrimonioCompraOut): PatrimonioCompraIn {
+function mapCompraOutToIn(c: PatrimonioCompraOut): UICompra {
   return {
     valor_compra: c.valor_compra ?? 0,
     valor_referencia: c.valor_referencia ?? null,
@@ -1131,6 +1187,10 @@ function mapCompraOutToIn(c: PatrimonioCompraOut): PatrimonioCompraIn {
     reforma_adecuamiento: c.reforma_adecuamiento ?? null,
     fecha_compra: c.fecha_compra ?? null, // se conserva aunque no se muestre
     notas: c.notas ?? '',
+
+    // Campos opcionales (si existen en backend / vienen en la respuesta)
+    valor_mercado: (c as any)?.valor_mercado ?? null,
+    valor_mercado_fecha: (c as any)?.valor_mercado_fecha ?? null,
   };
 }
 

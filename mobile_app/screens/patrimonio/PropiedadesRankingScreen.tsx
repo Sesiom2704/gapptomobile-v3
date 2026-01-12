@@ -6,10 +6,15 @@
  *   - Visualización “ranking” con tarjeta unificada (UnifiedAssetCard).
  *   - Acciones contextuales por propiedad mediante ActionSheet (ver detalle, editar, activar/inactivar, eliminar).
  *
- * Cambios (respecto a tu versión):
- *   - Reemplaza PropertyRankingCard por UnifiedAssetCard.
- *   - Mantiene ranking: activas primero, luego inactivas; dentro, KPI desc.
- *   - Mantiene: carga KPIs, carga compra (valor_mercado y fecha), refresco, navegación, ActionSheet.
+ * Cambio importante (por backend analytics v3):
+ *   - Bruto / Cap Rate / NOI para ranking se calculan sobre "Últimos 12 meses" (mode=LAST_12),
+ *     NO sobre el año actual.
+ *   - El backend sigue requiriendo query param "year", pero en mode=LAST_12 el cálculo
+ *     se basa en la ventana móvil 12 meses; "year" se mantiene por compatibilidad.
+ *
+ * Mantiene:
+ *   - ranking: activas primero, luego inactivas; dentro, KPI desc.
+ *   - carga KPIs, carga compra (valor_mercado y fecha), refresco, navegación, ActionSheet.
  */
 
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
@@ -86,19 +91,32 @@ function getDireccion(p: PatrimonioRow): string {
   return (p.direccion_completa || '').toString();
 }
 
+/**
+ * KPIs para ranking:
+ * - Se calculan en ventana móvil: Últimos 12 meses.
+ * - Por eso: mode=LAST_12.
+ * - annualize=false: queremos el valor del periodo, no extrapolado.
+ */
 async function fetchKpis(patrimonioId: string): Promise<Kpis | null> {
   try {
     const year = new Date().getFullYear();
+
     const resp = await api.get<Kpis>(
       `/api/v1/analytics/patrimonios/${encodeURIComponent(patrimonioId)}/kpis`,
       {
         params: {
+          // requerido por backend (aunque LAST_12 no use el año como "año natural")
           year,
+          // ✅ CAMBIO: ranking sobre últimos 12 meses
+          mode: 'LAST_12',
+          // sin extrapolar
           annualize: false,
+          // mismo criterio de base que ya tenías
           basis: 'total',
         },
       }
     );
+
     return resp.data ?? null;
   } catch {
     return null;
@@ -366,7 +384,7 @@ export const PropiedadesRankingScreen: React.FC<Props> = ({ navigation }) => {
                   valorMercadoFecha ? ` a fecha: ${valorMercadoFecha}` : ''
                 }`;
 
-          // ✅ CIFRA del filtro (sin mostrar el tipo)
+          // ✅ CIFRA del filtro (ranking sobre últimos 12 meses, ya viene en __kpis)
           const headerValue =
             metric === 'noi'
               ? fmtEur(p.__kpis?.noi ?? null)
@@ -434,6 +452,7 @@ export const PropiedadesRankingScreen: React.FC<Props> = ({ navigation }) => {
           </FilterRow>
 
           <Text style={screenStyles.helperText}>Ordenado por {metricLabel}</Text>
+          {/* Si quieres, aquí podemos añadir un subtítulo fijo: "Periodo: últimos 12 meses" */}
         </View>
 
         <View style={screenStyles.bottomArea}>{renderContenido()}</View>

@@ -34,6 +34,7 @@ from typing import List, Optional, Tuple
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session
+from datetime import date  # asegúrate de tenerlo arriba
 
 from backend.app.db.session import get_db
 from backend.app.db import models
@@ -657,6 +658,7 @@ def crear_o_actualizar_compra(
     row = db.get(models.PatrimonioCompra, patrimonio_id)  # PK = patrimonio_id
     imp_eur, total = _compute_financials(payload)
 
+    today = date.today()
     if row is None:
         row = models.PatrimonioCompra(
             patrimonio_id=patrimonio_id,
@@ -670,7 +672,16 @@ def crear_o_actualizar_compra(
             total_inversion=total,
             notas=payload.notas,
         )
+
+        # ✅ Valor de mercado (si existe columna)
+        if hasattr(row, "valor_mercado"):
+            row.valor_mercado = payload.valor_mercado
+            # Si se ha informado valor_mercado, la fecha se fija hoy
+            if payload.valor_mercado is not None and hasattr(row, "valor_mercado_fecha"):
+                row.valor_mercado_fecha = today
+
         db.add(row)
+
     else:
         row.valor_compra = payload.valor_compra
         row.valor_referencia = payload.valor_referencia
@@ -681,6 +692,17 @@ def crear_o_actualizar_compra(
         row.reforma_adecuamiento = payload.reforma_adecuamiento
         row.total_inversion = total
         row.notas = payload.notas
+
+        # ✅ Valor de mercado + fecha automática si cambia
+        if hasattr(row, "valor_mercado"):
+            prev_vm = getattr(row, "valor_mercado", None)
+            new_vm = payload.valor_mercado
+
+            row.valor_mercado = new_vm
+
+            # Fecha: solo si cambia el valor (y existe columna fecha)
+            if hasattr(row, "valor_mercado_fecha") and (new_vm != prev_vm) and (new_vm is not None):
+                row.valor_mercado_fecha = today
 
     db.commit()
     db.refresh(row)

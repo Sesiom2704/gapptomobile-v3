@@ -155,6 +155,10 @@ class PatrimonioCompraIn(BaseModel):
     - impuestos_pct: porcentaje de impuestos (ITP/IVA).
     - notaria, agencia, reforma_adecuamiento: costes adicionales.
     - notas: texto libre (NO se fuerza a mayúsculas).
+
+    NUEVO (v3):
+    - valor_mercado: editable desde app
+    - valor_mercado_fecha: NO se envía normalmente; lo fija el backend cuando cambia valor_mercado
     """
     valor_compra: float
     valor_referencia: Optional[float] = None
@@ -164,6 +168,9 @@ class PatrimonioCompraIn(BaseModel):
     reforma_adecuamiento: Optional[float] = None
     notas: Optional[str] = None
 
+    # ✅ Editable
+    valor_mercado: Optional[float] = None
+
 
 class PatrimonioCompraOut(PatrimonioCompraIn):
     """
@@ -172,11 +179,12 @@ class PatrimonioCompraOut(PatrimonioCompraIn):
     - impuestos_eur: importe de impuestos calculado.
     - total_inversion: suma de todos los conceptos.
     - created_at / updated_at: trazabilidad.
-    - activo: si existe la columna en la BD.
     """
     patrimonio_id: str
-    valor_mercado: Optional[float]
-    valor_mercado: Optional[float]
+
+    # ✅ Fecha auto cuando cambia valor_mercado
+    valor_mercado_fecha: Optional[date] = None
+
     impuestos_eur: Optional[float] = None
     total_inversion: Optional[float] = None
     created_at: Optional[datetime] = None
@@ -184,3 +192,4 @@ class PatrimonioCompraOut(PatrimonioCompraIn):
     activo: Optional[bool] = None
 
     model_config = ConfigDict(from_attributes=True)
+

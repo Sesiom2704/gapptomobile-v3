@@ -1,53 +1,21 @@
 /**
- * Archivo: mobile_app/screens/patrimonio/PropiedadFormScreen.tsx
+ * Archivo: mobile_app/screens/patrimonio/PropiedadKpisScreen.tsx
  *
  * Responsabilidad:
- *   - Alta, edición, duplicado y consulta (readOnly) de una Propiedad (Patrimonio).
- *   - Orquesta un flujo por pasos (BASE / COMPRA), incluyendo carga inicial, validación y persistencia.
+ *   - Pantalla de KPIs de una Propiedad (Patrimonio) con cálculo configurable.
  *
- * Maneja:
- *   - UI:
- *       - Formulario basado en Screen + Header + FormSection.
- *       - Controles de selección tipo “pill” (segmentos/booleanos) con PillButton.
- *       - Búsqueda/selección de Localidad con sugerencias server-side y límite de 4 resultados.
- *       - Selectores de fecha para adquisición (control estándar FormDateButton).
- *   - Estado:
- *       - base (datos principales) y compra (datos de compra).
- *       - step (BASE/COMPRA) y flags de loading/saving/refreshing.
- *       - localidadQuery + localidadSelectedId para selección robusta (por ID y fallback por nombre normalizado).
- *   - Datos:
- *       - Lectura:
- *           - patrimonioApi.getPatrimonio(patrimonioId)
- *           - patrimonioApi.getPatrimonioCompra(patrimonioId)
- *           - listLocalidades({ search, limit: 4 })
- *       - Escritura:
- *           - patrimonioApi.createPatrimonio(payload)
- *           - patrimonioApi.updatePatrimonio(patrimonioId, payload)
- *           - patrimonioApi.upsertPatrimonioCompra(patrimonioId, compra)
- *   - Navegación:
- *       - Retorno condicionado: returnToTab / returnToScreen / returnToParams y fromHome.
- *       - Integración de retorno desde LocalidadForm (AuxEntityForm) vía route.params.auxResult con limpieza posterior.
- *       - Acción “+” para crear Localidad desde el propio campo (InlineAddButton).
+ * Periodos (nuevo router analytics):
+ *   - LAST_12  -> Últimos 12 meses (por defecto)
+ *   - ALL_TIME -> Todos los tiempos (desde adquisición)
+ *   - YEAR     -> Resumen por año (2026, 2025, etc.)
  *
- * Cambios aplicados (patrón replicable):
- *   - BASE:
- *       - Campo Localidad en una sola fila (full width) con botón “+” integrado en la cabecera del campo.
- *       - Campo Referencia movido a una fila independiente (full width) para mejorar legibilidad.
- *       - Selección de Localidad con estado por ID (localidadSelectedId) y fallback por nombre normalizado.
- *   - COMPRA:
- *       - Eliminada la UI de “Fecha compra” (no se muestra ni se edita desde esta pantalla).
- *       - Reordenación de campos:
- *           - Fila 1: Valor compra | Valor referencia
- *           - Fila 2: Impuestos (%) | Reforma/Adecuamiento
- *           - Fila 3: Notaría | Agencia
- *           - Fila 4: Notas (full width)
- *       - Eliminados textos auxiliares tipo “Vista: xx.xxx,xx €”.
- *   - Fecha adquisición:
- *       - Estandarizada usando FormDateButton como control de fecha (consistencia con el resto de formularios).
+ * Navegación de periodos:
+ *   LAST_12 <-> ALL_TIME <-> YEAR(current) <-> YEAR(current-1) <-> ...
  *
- * Notas:
- *   - Se preserva la lógica funcional existente (carga inicial, duplicado, validaciones, guardado, pull-to-refresh, auxResult).
- *   - compra.fecha_compra se mantiene en el modelo/persistencia si llega desde backend, pero no se expone en la UI.
+ * Regla de "Anualizar":
+ *   - Solo aparece cuando: mode === 'YEAR' && year === currentYear
+ *   - Si está activo, backend multiplica por factor = 12 / meses_contados (YTD -> 12m extrapolado).
+ *   - En cualquier otro modo/año: annualize se fuerza a false (y se resetea el estado para evitar errores UX).
  */
 
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
@@ -72,91 +40,184 @@ import { radius } from '../../theme/radius';
 import { api } from '../../services/api';
 import { EuroformatEuro } from '../../utils/format';
 
+// ✅ Reutiliza el componente de flechas (no incluimos su código aquí)
+import PeriodNavigator from '../../components/ui/PeriodNavigator';
+
 type Basis = 'total' | 'compra' | 'referencia' | 'max';
+type PeriodMode = 'LAST_12' | 'ALL_TIME' | 'YEAR';
 
 type KpiResponse = {
   year: number;
   basis_used: Basis;
   valor_base: number;
   meses_contados: number;
+
   ingresos_anuales: number;
   gastos_operativos_anuales: number;
   noi: number;
+
   cap_rate_pct: number | null;
   rendimiento_bruto_pct: number | null;
+
   cashflow_anual: number;
   cashflow_mensual: number;
+
   payback_anios: number | null;
+
   precio_m2: number | null;
   referencia_m2: number | null;
   renta_m2_anual: number | null;
   inversion_m2: number | null;
   rentab_m2_total_pct: number | null;
+
   deuda_anual: number;
   dscr: number | null;
   ocupacion_pct: number | null;
+
   info: Record<string, string>;
 };
 
 type Props = {
-  route?: { params?: { patrimonioId: string; returnToTab?: string; returnToScreen?: string; returnToParams?: any } };
+  route?: {
+    params?: {
+      patrimonioId: string;
+      returnToTab?: string;
+      returnToScreen?: string;
+      returnToParams?: any;
+    };
+  };
   navigation?: any;
 };
 
 type SegOption<T extends string> = { label: string; value: T };
 
+function clampYear(y: number, minYear: number, maxYear: number) {
+  if (y < minYear) return minYear;
+  if (y > maxYear) return maxYear;
+  return y;
+}
+
+function periodLabel(mode: PeriodMode, year: number) {
+  if (mode === 'LAST_12') return 'Últimos 12 meses';
+  if (mode === 'ALL_TIME') return 'Todos los tiempos';
+  return `Resumen ${year}`;
+}
+
 export default function PropiedadKpisScreen({ route, navigation }: Props) {
   const patrimonioId = route?.params?.patrimonioId as string;
 
-  // 1) Header back to DetallePropiedad (prioridad: returnTo* si existe)
+  // Back: prioridad returnTo* si existe
   const returnToTab = route?.params?.returnToTab;
   const returnToScreen = route?.params?.returnToScreen;
   const returnToParams = route?.params?.returnToParams;
 
-  const handleBack = () => {
+  const handleBack = useCallback(() => {
     if (returnToTab) {
       if (returnToScreen) {
-        navigation?.navigate(returnToTab, { screen: returnToScreen, params: returnToParams });
+        navigation?.navigate?.(returnToTab, { screen: returnToScreen, params: returnToParams });
       } else {
-        navigation?.navigate(returnToTab);
+        navigation?.navigate?.(returnToTab);
       }
       return;
     }
+    navigation?.navigate?.('PropiedadDetalle', { patrimonioId });
+  }, [navigation, patrimonioId, returnToTab, returnToScreen, returnToParams]);
 
-    // Fallback “detalle propiedad”
-    // Ajusta el nombre exacto si tu screen se llama diferente.
-    if (navigation?.navigate) {
-      navigation.navigate('PropiedadDetalle', { patrimonioId });
-      return;
-    }
-  };
+  // ----------------------------
+  // Periodo
+  // ----------------------------
+  const currentYear = useMemo(() => new Date().getFullYear(), []);
+  const [mode, setMode] = useState<PeriodMode>('LAST_12');
+  const [year, setYear] = useState<number>(currentYear);
 
-  const [year, setYear] = useState<number>(new Date().getFullYear());
+  // Nota: si no tenemos fecha adquisición aquí, dejamos un mínimo razonable.
+  const minYear = useMemo(() => 2000, []);
+  const maxYear = currentYear;
+
+  // ----------------------------
+  // Parámetros KPI
+  // ----------------------------
   const [basis, setBasis] = useState<Basis>('total');
-  const [annualize, setAnnualize] = useState<boolean>(true);
+
+  /**
+   * annualizeState:
+   * - Solo se usa cuando (mode === 'YEAR' && year === currentYear)
+   * - En el resto de casos, se fuerza a false (y además reseteamos el estado cuando deja de aplicar)
+   */
+  const [annualize, setAnnualize] = useState<boolean>(false);
+
+  /**
+   * Solo gastos KPI:
+   * - Mantengo el switch porque tú lo pediste como posible utilidad.
+   * - Si lo quieres ocultar también por periodo, se puede hacer similar a anualize.
+   */
   const [onlyKpiExpenses, setOnlyKpiExpenses] = useState<boolean>(false);
 
+  // ✅ Regla: anualizar solo en YEAR del año actual
+  const canAnnualize = mode === 'YEAR' && year === currentYear;
+  const effectiveAnnualize = canAnnualize ? annualize : false;
+
+  // Cuando deja de aplicar, reseteamos el estado para evitar “quedarse en true” sin verse.
+  useEffect(() => {
+    if (!canAnnualize && annualize) {
+      setAnnualize(false);
+    }
+  }, [canAnnualize, annualize]);
+
+  // ----------------------------
+  // Estado de carga
+  // ----------------------------
   const [loading, setLoading] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const [kpi, setKpi] = useState<KpiResponse | null>(null);
 
+  // ----------------------------
+  // Modal info
+  // ----------------------------
   const [infoOpen, setInfoOpen] = useState(false);
   const [infoTitle, setInfoTitle] = useState('');
   const [infoText, setInfoText] = useState('');
 
+  const openInfo = useCallback(
+    (title: string, key: string) => {
+      const txt = kpi?.info?.[key] ?? '—';
+      setInfoTitle(title);
+      setInfoText(txt);
+      setInfoOpen(true);
+    },
+    [kpi]
+  );
+
+  // ----------------------------
+  // Carga KPI (router v3: mode)
+  // ----------------------------
   const load = useCallback(async () => {
     setErr(null);
+
+    const safeYear = clampYear(year, minYear, maxYear);
+
     try {
-      const r = await api.get<KpiResponse>(`/api/v1/analytics/patrimonios/${patrimonioId}/kpis`, {
-        params: { year, basis, annualize, only_kpi_expenses: onlyKpiExpenses },
-      });
-      setKpi(r.data);
+      const r = await api.get<KpiResponse>(
+        `/api/v1/analytics/patrimonios/${encodeURIComponent(patrimonioId)}/kpis`,
+        {
+          params: {
+            year: safeYear,
+            mode,
+            basis,
+            // ✅ anualize solo si YEAR del año actual y el usuario lo activó
+            annualize: effectiveAnnualize,
+            only_kpi_expenses: onlyKpiExpenses,
+          },
+        }
+      );
+
+      setKpi(r.data ?? null);
     } catch {
-      setErr('No se pudieron cargar los KPIs (pendiente analytics v3).');
+      setErr('No se pudieron cargar los KPIs.');
       setKpi(null);
     }
-  }, [patrimonioId, year, basis, annualize, onlyKpiExpenses]);
+  }, [patrimonioId, year, minYear, maxYear, mode, basis, effectiveAnnualize, onlyKpiExpenses]);
 
   useEffect(() => {
     setLoading(true);
@@ -169,13 +230,53 @@ export default function PropiedadKpisScreen({ route, navigation }: Props) {
     setRefreshing(false);
   }, [load]);
 
-  const openInfo = (title: string, key: string) => {
-    const txt = kpi?.info?.[key] ?? '—';
-    setInfoTitle(title);
-    setInfoText(txt);
-    setInfoOpen(true);
-  };
+  // ----------------------------
+  // PeriodNavigator: lógica de flechas
+  //
+  // Secuencia:
+  //   LAST_12 <-> ALL_TIME <-> YEAR(current) <-> YEAR(current-1) <-> ...
+  // ----------------------------
+  const onPrevPeriod = useCallback(() => {
+    if (mode === 'LAST_12') {
+      setMode('ALL_TIME');
+      return;
+    }
+    if (mode === 'ALL_TIME') {
+      setMode('YEAR');
+      setYear(maxYear);
+      return;
+    }
+    setMode('YEAR');
+    setYear((y) => clampYear(y - 1, minYear, maxYear));
+  }, [mode, minYear, maxYear]);
 
+  const onNextPeriod = useCallback(() => {
+    if (mode === 'LAST_12') return;
+
+    if (mode === 'YEAR') {
+      if (year < maxYear) {
+        setYear((y) => clampYear(y + 1, minYear, maxYear));
+      } else {
+        setMode('ALL_TIME');
+      }
+      return;
+    }
+
+    if (mode === 'ALL_TIME') {
+      setMode('LAST_12');
+    }
+  }, [mode, year, minYear, maxYear]);
+
+  // Si el usuario cambia a YEAR y el year quedó fuera, lo corregimos.
+  useEffect(() => {
+    if (mode === 'YEAR') {
+      setYear((y) => clampYear(y, minYear, maxYear));
+    }
+  }, [mode, minYear, maxYear]);
+
+  // ----------------------------
+  // UI: opciones basis
+  // ----------------------------
   const basisOptions: SegOption<Basis>[] = useMemo(
     () => [
       { label: 'Total', value: 'total' },
@@ -186,9 +287,10 @@ export default function PropiedadKpisScreen({ route, navigation }: Props) {
     []
   );
 
+  const subtitleText = useMemo(() => `Periodo: ${periodLabel(mode, year)}`, [mode, year]);
+
   return (
     <>
-      {/* 6) Encabezado tipo (title/subtitle + back) */}
       <Header title="KPIs" subtitle="Ratios y rentabilidad" showBack onBackPress={handleBack} />
 
       <ScrollView
@@ -196,20 +298,43 @@ export default function PropiedadKpisScreen({ route, navigation }: Props) {
         contentContainerStyle={{ padding: spacing.md, paddingBottom: spacing.xxl }}
         refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} />}
       >
-        {/* 6) Bloque encabezado (card “Parámetros”) */}
+        {/* Parámetros */}
         <View style={styles.card}>
           <View style={styles.blockHeader}>
             <View>
               <Text style={styles.blockTitle}>Parámetros</Text>
-              <Text style={styles.blockSubtitle}>Configura el cálculo para {year}</Text>
+              <Text style={styles.blockSubtitle}>{subtitleText}</Text>
             </View>
           </View>
 
-          {/* 3) Botones de parámetros con componente */}
+          {/* Flechas periodo */}
+          <View style={{ marginTop: spacing.sm }}>
+            <PeriodNavigator label={periodLabel(mode, year)} onPrev={onPrevPeriod} onNext={onNextPeriod} />
+            <Text style={styles.hintText}>
+              {mode === 'LAST_12'
+                ? 'Cálculo en ventana móvil de 12 meses.'
+                : mode === 'ALL_TIME'
+                  ? 'Cálculo desde adquisición hasta hoy.'
+                  : year === currentYear
+                    ? 'Cálculo año actual (YTD). Puedes extrapolar a 12 meses con "Anualizar".'
+                    : 'Cálculo por año natural (enero-diciembre).'}
+            </Text>
+          </View>
+
+          {/* Basis */}
           <SegmentedControl<Basis> options={basisOptions} value={basis} onChange={setBasis} />
 
+          {/* Switches */}
           <View style={styles.switchRow}>
-            <SwitchPill label="Anualizar" value={annualize} onToggle={() => setAnnualize((v) => !v)} />
+            {/* ✅ Anualizar SOLO visible si YEAR del año actual */}
+            {canAnnualize ? (
+              <SwitchPill
+                label="Anualizar"
+                value={annualize}
+                onToggle={() => setAnnualize((v) => !v)}
+              />
+            ) : null}
+
             <SwitchPill
               label="Solo gastos KPI"
               value={onlyKpiExpenses}
@@ -217,15 +342,13 @@ export default function PropiedadKpisScreen({ route, navigation }: Props) {
             />
           </View>
 
-          <YearStepper year={year} onPrev={() => setYear((y) => y - 1)} onNext={() => setYear((y) => y + 1)} />
-
-          {/* 2) Botón actualizar eliminado: pull-to-refresh */}
           <Text style={styles.hintText}>Desliza hacia abajo para actualizar.</Text>
         </View>
 
         {err ? <Text style={{ color: colors.danger, marginBottom: spacing.sm }}>{err}</Text> : null}
         {loading && !kpi ? <ActivityIndicator style={{ marginVertical: spacing.md }} /> : null}
 
+        {/* KPIs */}
         {kpi ? (
           <View style={styles.grid}>
             <KpiCard title="Valor base" value={EuroformatEuro(kpi.valor_base)} onInfo={() => openInfo('Valor base', 'valor_base')} />
@@ -258,13 +381,8 @@ export default function PropiedadKpisScreen({ route, navigation }: Props) {
           </View>
         ) : null}
 
-        {/* 4) Modal info sin “Entendido”: X o pulsar fuera */}
-        <Modal
-          visible={infoOpen}
-          transparent
-          animationType="fade"
-          onRequestClose={() => setInfoOpen(false)}
-        >
+        {/* Modal info */}
+        <Modal visible={infoOpen} transparent animationType="fade" onRequestClose={() => setInfoOpen(false)}>
           <Pressable style={styles.modalBackdrop} onPress={() => setInfoOpen(false)}>
             <Pressable style={styles.modalCard} onPress={() => null}>
               <View style={styles.modalHeader}>
@@ -283,7 +401,7 @@ export default function PropiedadKpisScreen({ route, navigation }: Props) {
 }
 
 /* =========================
-   Components (puedes extraer a /components/ui)
+   Components locales
    ========================= */
 
 function SegmentedControl<T extends string>({
@@ -309,6 +427,7 @@ function SegmentedControl<T extends string>({
                 ? { backgroundColor: colors.primarySoft, borderColor: colors.primary }
                 : { backgroundColor: colors.surface, borderColor: colors.borderColor },
             ]}
+            activeOpacity={0.9}
           >
             <Text style={[styles.segLabel, active ? { color: colors.primary } : { color: colors.textPrimary }]}>
               {opt.label}
@@ -330,46 +449,28 @@ function SwitchPill({
   onToggle: () => void;
 }) {
   return (
-    <TouchableOpacity onPress={onToggle} style={styles.switchBtn}>
-      <View style={[styles.switchDot, value ? { backgroundColor: colors.primary } : { backgroundColor: colors.surface }]} />
+    <TouchableOpacity onPress={onToggle} style={styles.switchBtn} activeOpacity={0.9}>
+      <View
+        style={[
+          styles.switchDot,
+          value ? { backgroundColor: colors.primary } : { backgroundColor: colors.surface },
+        ]}
+      />
       <Text style={styles.switchLabel}>{label}</Text>
     </TouchableOpacity>
   );
 }
 
-function YearStepper({
-  year,
-  onPrev,
-  onNext,
-}: {
-  year: number;
-  onPrev: () => void;
-  onNext: () => void;
-}) {
-  return (
-    <View style={styles.yearRow}>
-      <TouchableOpacity style={styles.yearBtn} onPress={onPrev}>
-        <Ionicons name="chevron-back" size={18} color={colors.primary} />
-      </TouchableOpacity>
-      <Text style={styles.yearText}>{year}</Text>
-      <TouchableOpacity style={styles.yearBtn} onPress={onNext}>
-        <Ionicons name="chevron-forward" size={18} color={colors.primary} />
-      </TouchableOpacity>
-    </View>
-  );
-}
 
 function KpiCard({ title, value, onInfo }: { title: string; value: string; onInfo: () => void }) {
   return (
     <View style={styles.kpiCard}>
       <View style={styles.kpiHeader}>
         <Text style={styles.kpiTitle}>{title}</Text>
-        <TouchableOpacity onPress={onInfo} hitSlop={6}>
+        <TouchableOpacity onPress={onInfo} hitSlop={6} activeOpacity={0.9}>
           <Ionicons name="information-circle-outline" size={18} color={colors.textSecondary} />
         </TouchableOpacity>
       </View>
-
-      {/* 5) Valor: +1 size y sin negrita */}
       <Text style={styles.kpiValue}>{value}</Text>
     </View>
   );
@@ -395,7 +496,7 @@ const styles = StyleSheet.create({
   segBtn: { flex: 1, borderWidth: 1, borderRadius: radius.pill, paddingVertical: 10, alignItems: 'center' },
   segLabel: { fontWeight: '900', fontSize: 12 },
 
-  switchRow: { flexDirection: 'row', gap: spacing.sm, marginTop: spacing.sm },
+  switchRow: { flexDirection: 'row', gap: spacing.sm, marginTop: spacing.sm, flexWrap: 'wrap' },
   switchBtn: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -405,25 +506,46 @@ const styles = StyleSheet.create({
     paddingVertical: 8,
     paddingHorizontal: spacing.md,
     flex: 1,
+    gap: 10,
+    minWidth: '48%',
   },
-  switchDot: { width: 14, height: 14, borderRadius: 7, borderWidth: 1, borderColor: colors.borderColor, marginRight: 8 },
+  switchDot: {
+    width: 14,
+    height: 14,
+    borderRadius: 7,
+    borderWidth: 1,
+    borderColor: colors.borderColor,
+  },
   switchLabel: { fontWeight: '800', color: colors.textPrimary, fontSize: 12 },
-
-  yearRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: spacing.sm, marginTop: spacing.sm },
-  yearBtn: { width: 36, height: 36, borderRadius: 18, borderWidth: 1, borderColor: colors.borderColor, alignItems: 'center', justifyContent: 'center' },
-  yearText: { fontSize: 16, fontWeight: '900', color: colors.textPrimary, minWidth: 70, textAlign: 'center' },
+  switchHelper: { marginTop: 2, fontSize: 11, color: colors.textSecondary },
 
   grid: { flexDirection: 'row', flexWrap: 'wrap', gap: spacing.sm },
-  kpiCard: { width: '48%', backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.borderColor, borderRadius: radius.lg, padding: spacing.md },
+  kpiCard: {
+    width: '48%',
+    backgroundColor: colors.surface,
+    borderWidth: 1,
+    borderColor: colors.borderColor,
+    borderRadius: radius.lg,
+    padding: spacing.md,
+  },
   kpiHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
   kpiTitle: { fontWeight: '900', color: colors.textPrimary, fontSize: 12 },
-
-  // 5) valores: sin negrita y +1 tamaño
   kpiValue: { marginTop: 6, fontSize: 15, fontWeight: '400', color: colors.textPrimary },
 
-  // 4) modal: cerrar con X o fuera
-  modalBackdrop: { flex: 1, backgroundColor: '#0007', alignItems: 'center', justifyContent: 'center', padding: spacing.md },
-  modalCard: { width: '100%', maxWidth: 420, backgroundColor: colors.surface, borderRadius: radius.lg, padding: spacing.md },
+  modalBackdrop: {
+    flex: 1,
+    backgroundColor: '#0007',
+    alignItems: 'center',
+    justifyContent: 'center',
+    padding: spacing.md,
+  },
+  modalCard: {
+    width: '100%',
+    maxWidth: 420,
+    backgroundColor: colors.surface,
+    borderRadius: radius.lg,
+    padding: spacing.md,
+  },
   modalHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: spacing.sm },
   modalTitle: { fontSize: 16, fontWeight: '900', color: colors.textPrimary },
   modalText: { fontSize: 13, color: colors.textPrimary },
