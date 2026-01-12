@@ -30,6 +30,7 @@
  *   - searchText (búsqueda)
  *   - periodicidad distinta de 'todos'
  *   - tipo distinto de 'todos'
+ *   - cuenta bancaria distinta de 'todos'  ✅ NUEVO (usuario)
  *
  * NUEVO (requisito "OMITIR ingreso"):
  * - En el ActionSheet:
@@ -40,6 +41,14 @@
  *     * En "Pendientes" el backend debería excluir omitidos; por UX, el filtro se muestra deshabilitado.
  * - Visual:
  *     * Si está omitido, añadimos etiqueta ligera en category/date para evidenciarlo sin tocar ExpenseCard.
+ *
+ * NUEVO (usuario):
+ * - Buscador avanzado: filtro "Por cuenta bancaria" (botones por cada cuenta).
+ * - En el botón SOLO se muestra cuentas_bancarias_anagrama (fallback defensivo si no viene).
+ * - Botones compactos con 2 líneas sin aumentar tamaño (TwoLineCompactPill).
+ *
+ * NUEVO (usuario):
+ * - Al pulsar fuera del buscador avanzado (lista / scroll), se pliega.
  */
 
 import React, { useEffect, useState, useMemo, useCallback } from 'react';
@@ -52,6 +61,7 @@ import {
   Alert,
   TextInput,
   TouchableOpacity,
+  Keyboard,
 } from 'react-native';
 import { useFocusEffect, useRoute } from '@react-navigation/native';
 import Ionicons from '@expo/vector-icons/Ionicons';
@@ -59,6 +69,7 @@ import Ionicons from '@expo/vector-icons/Ionicons';
 import Header from '../../components/layout/Header';
 import { Chip } from '../../components/ui/Chip';
 import { FilterPill } from '../../components/ui/FilterPill';
+import { TwoLineCompactPill } from '../../components/ui/TwoLineCompactPill';
 import { ExpenseCard } from '../../components/cards/ExpenseCard';
 import FilterRow from '../../components/ui/FilterRow';
 
@@ -100,8 +111,12 @@ type Ingreso = {
   tipo_id?: string | null;
   tipo_nombre?: string | null;
   referencia_vivienda_id?: string | null;
+
+  // ⚠️ Nota: en tu modelo actual tienes cuenta_id/cuenta_nombre, pero el requisito
+  // pide mostrar anagrama. Lo extraemos de forma defensiva si viene en el payload.
   cuenta_id?: string | null;
   cuenta_nombre?: string | null;
+
   activo?: boolean | null;
   cobrado?: boolean | null;
   kpi?: boolean | null;
@@ -111,6 +126,9 @@ type Ingreso = {
 
   // ✅ NUEVO: omisión mensual (igual patrón que gastos)
   omitido_este_mes?: boolean | null;
+
+  // ✅ (posibles campos si el backend los envía)
+  // cuentas_bancarias_anagrama?: string | null;  // no tipamos para no obligar
 };
 
 type Filtro = 'pendientes' | 'todos';
@@ -128,19 +146,18 @@ type KpiFiltro = 'todos' | 'kpi_si' | 'kpi_no';
 // ✅ NUEVO: filtro omisión
 type FiltroOmitido = 'todos' | 'omitidos' | 'no_omitidos';
 
+// ✅ NUEVO (usuario): filtro cuenta bancaria
+type FiltroCuentaBancaria = 'todos' | string;
+
 function getNombreTipoIngreso(ing: Ingreso, catalogoTipos: TipoIngreso[]): string {
-  // 1) Si el backend ya trae el nombre, lo usamos
   const directo = (ing.tipo_nombre ?? '').trim();
   if (directo) return directo;
 
-  // 2) Si no, resolvemos por catálogo (id -> nombre)
   const id = (ing.tipo_id ?? '').trim();
   if (id) {
     const found = (catalogoTipos ?? []).find((t) => (t.id ?? '').trim() === id);
     const nombre = (found?.nombre ?? '').trim();
     if (nombre) return nombre;
-
-    // 3) Fallback: si no existe en catálogo, al menos mostramos el id
     return id;
   }
 
@@ -153,6 +170,46 @@ function formatRangoCobroLabel(ing: Ingreso): string {
   const [desdeRaw, hastaRaw] = rc.split('-').map((p) => p.trim());
   if (!desdeRaw || !hastaRaw) return '';
   return `Ingreso previsto del ${desdeRaw} al ${hastaRaw}`;
+}
+
+/**
+ * ✅ NUEVO (usuario): extracción defensiva de cuenta bancaria desde un Ingreso.
+ * - El label del botón debe ser SOLO el anagrama (cuentas_bancarias_anagrama).
+ * - Si no llega, fallback defensivo para no dejar el botón vacío.
+ *
+ * Ajuste único si tu backend usa otros nombres.
+ */
+function getCuentaBancariaFromIngreso(ing: Ingreso): { id: string; anagrama: string } | null {
+  const anyIng: any = ing as any;
+
+  // IDs más habituales (en tu modelo existe cuenta_id; mantenemos compatibilidad)
+  const rawId =
+    anyIng.cuenta_bancaria_id ??
+    anyIng.cuenta_id ??
+    anyIng.bank_account_id ??
+    anyIng.bankAccountId ??
+    anyIng.cuentaBancariaId;
+
+  if (rawId === null || rawId === undefined) return null;
+
+  const id = String(rawId).trim();
+  if (!id) return null;
+
+  // ✅ Requisito: SOLO anagrama
+  const rawAnagrama =
+    anyIng.cuentas_bancarias_anagrama ??
+    anyIng.cuenta_bancaria_anagrama ??
+    anyIng.cuenta_anagrama ??
+    anyIng.bank_account_anagram ??
+    anyIng.bankAccountAnagram ??
+    anyIng.cuentaBancariaAnagrama;
+
+  const anagrama = (rawAnagrama ? String(rawAnagrama) : '').trim();
+
+  // Fallback defensivo: si no hay anagrama, mostramos algo utilizable
+  const safeLabel = anagrama || (anyIng.cuenta_nombre ? String(anyIng.cuenta_nombre).trim() : '') || `Cuenta ${id}`;
+
+  return { id, anagrama: safeLabel };
 }
 
 export const IngresoListScreen: React.FC<Props> = ({ navigation }) => {
@@ -189,14 +246,25 @@ export const IngresoListScreen: React.FC<Props> = ({ navigation }) => {
   // ✅ NUEVO: filtro omisión
   const [filtroOmitido, setFiltroOmitido] = useState<FiltroOmitido>('todos');
 
+  // ✅ NUEVO (usuario): filtro cuenta bancaria
+  const [filtroCuentaBancaria, setFiltroCuentaBancaria] =
+    useState<FiltroCuentaBancaria>('todos');
+
   // Bloques plegables
   const [showPeriodicidadFilter, setShowPeriodicidadFilter] = useState(false);
   const [showTipoFilter, setShowTipoFilter] = useState(false);
   const [showEstadoFilter, setShowEstadoFilter] = useState(false);
   const [showPagadoFilter, setShowPagadoFilter] = useState(false);
   const [showKpiFilter, setShowKpiFilter] = useState(false);
-  // ✅ NUEVO
   const [showOmitidoFilter, setShowOmitidoFilter] = useState(false);
+
+  // ✅ NUEVO (usuario)
+  const [showCuentaBancariaFilter, setShowCuentaBancariaFilter] = useState(false);
+
+  const closeBuscador = useCallback(() => {
+    Keyboard.dismiss();
+    setBuscadorAbierto(false);
+  }, []);
 
   const handleAddIngreso = () => {
     navigation.navigate('NuevoIngreso');
@@ -293,15 +361,18 @@ export const IngresoListScreen: React.FC<Props> = ({ navigation }) => {
       setFiltroPagado('no_pagado');
       setFiltroKpi('kpi_si');
 
-      // ✅ NUEVO: en pendientes no tiene sentido filtrar omitidos (backend debería excluirlos)
+      // ✅ en pendientes no tiene sentido filtrar omitidos (backend debería excluirlos)
       setFiltroOmitido('no_omitidos');
+
+      // ✅ cuenta bancaria por defecto (no filtramos)
+      setFiltroCuentaBancaria('todos');
     } else {
       setFiltroEstado('todos');
       setFiltroPagado('todos');
       setFiltroKpi('todos');
 
-      // ✅ NUEVO
       setFiltroOmitido('todos');
+      setFiltroCuentaBancaria('todos');
     }
   }, [isPendientes]);
 
@@ -318,6 +389,7 @@ export const IngresoListScreen: React.FC<Props> = ({ navigation }) => {
         setFiltroPagado('todos');
         setFiltroKpi('todos');
         setFiltroOmitido('todos');
+        setFiltroCuentaBancaria('todos');
       };
     }, [fetchIngresosPendientesCount])
   );
@@ -335,7 +407,6 @@ export const IngresoListScreen: React.FC<Props> = ({ navigation }) => {
       await api.put(`/api/v1/ingresos/${ingreso.id}/cobrar`);
       await cargarIngresos();
 
-      // ✅ tras cambios: refrescamos eligibility
       await Promise.all([reloadGastosPendientes(), fetchIngresosPendientesCount()]);
     } catch (err) {
       console.error('[IngresoList] Error al cobrar ingreso', err);
@@ -355,7 +426,7 @@ export const IngresoListScreen: React.FC<Props> = ({ navigation }) => {
   };
 
   // ============================
-  // ✅ NUEVO: Omisión (ingresos) con confirmación
+  // ✅ Omisión (ingresos) con confirmación
   // ============================
   const handleOmitirIngreso = async (ingreso: Ingreso) => {
     try {
@@ -415,8 +486,6 @@ export const IngresoListScreen: React.FC<Props> = ({ navigation }) => {
           try {
             await api.delete(`/api/v1/ingresos/${ingreso.id}`);
             await cargarIngresos();
-
-            // ✅ tras cambios: refrescamos eligibility
             await Promise.all([reloadGastosPendientes(), fetchIngresosPendientesCount()]);
           } catch (err) {
             console.error('[IngresoList] Error al eliminar ingreso', err);
@@ -443,7 +512,6 @@ export const IngresoListScreen: React.FC<Props> = ({ navigation }) => {
     const gris = colors.actionNeutral ?? '#4b5563';
     const azul = colors.actionInfo ?? '#2563eb';
 
-    // ✅ COBRAR
     if (!ingreso.cobrado) {
       acciones.push({
         label: 'Marcar como cobrado',
@@ -459,7 +527,7 @@ export const IngresoListScreen: React.FC<Props> = ({ navigation }) => {
       });
     }
 
-    // ✅ NUEVO: OMITIR / DESHACER OMISIÓN (solo si NO está cobrado)
+    // ✅ OMITIR / DESHACER OMISIÓN (solo si NO está cobrado)
     if (!ingreso.cobrado) {
       if (ingreso.omitido_este_mes === true) {
         acciones.push({
@@ -530,6 +598,26 @@ export const IngresoListScreen: React.FC<Props> = ({ navigation }) => {
 
   const accionesSheet = getActionsForIngreso(selectedIngreso);
 
+  // ============================
+  // ✅ NUEVO (usuario): cuentas bancarias disponibles (desde los ingresos cargados)
+  // ============================
+  const cuentasBancariasDisponibles = useMemo(() => {
+    const map = new Map<string, string>();
+
+    ingresos.forEach((ing) => {
+      const cuenta = getCuentaBancariaFromIngreso(ing);
+      if (!cuenta) return;
+
+      const key = String(cuenta.id).trim();
+      const value = (cuenta.anagrama ?? '').trim() || `Cuenta ${key}`;
+      if (key) map.set(key, value);
+    });
+
+    return Array.from(map.entries())
+      .map(([id, anagrama]) => ({ id, anagrama }))
+      .sort((a, b) => a.anagrama.localeCompare(b.anagrama, 'es'));
+  }, [ingresos]);
+
   // Stats periodicidad (para deshabilitar pills sin datos)
   const periodicidadStats = useMemo<Record<PeriodicidadFiltro, number>>(() => {
     const stats: Record<PeriodicidadFiltro, number> = {
@@ -557,7 +645,7 @@ export const IngresoListScreen: React.FC<Props> = ({ navigation }) => {
     return stats;
   }, [ingresos]);
 
-  // ✅ NUEVO: stats omisión (para deshabilitar pills)
+  // ✅ stats omisión (para deshabilitar pills)
   const statsOmitido = useMemo(() => {
     let omitidos = 0;
     let no_omitidos = 0;
@@ -635,11 +723,18 @@ export const IngresoListScreen: React.FC<Props> = ({ navigation }) => {
       if (filtroKpi === 'kpi_si' && !ing.kpi) return false;
       if (filtroKpi === 'kpi_no' && ing.kpi) return false;
 
-      // ✅ NUEVO: filtro de omisión
+      // ✅ filtro omisión
       if (filtroOmitido !== 'todos') {
         const isOmitido = ing.omitido_este_mes === true;
         if (filtroOmitido === 'omitidos' && !isOmitido) return false;
         if (filtroOmitido === 'no_omitidos' && isOmitido) return false;
+      }
+
+      // ✅ NUEVO (usuario): filtro cuenta bancaria
+      if (filtroCuentaBancaria !== 'todos') {
+        const cuenta = getCuentaBancariaFromIngreso(ing);
+        if (!cuenta) return false;
+        if (String(cuenta.id).trim() !== String(filtroCuentaBancaria).trim()) return false;
       }
 
       return true;
@@ -653,11 +748,12 @@ export const IngresoListScreen: React.FC<Props> = ({ navigation }) => {
     filtroPagado,
     filtroKpi,
     filtroOmitido,
+    filtroCuentaBancaria,
     catalogoTipos,
   ]);
 
   // =========================================================
-  // ✅ VACÍO INTELIGENTE (helpers únicos - sin duplicados)
+  // ✅ VACÍO INTELIGENTE (helpers)
   // =========================================================
 
   // "Filtros activos reales" para Pendientes (excluye estado/pagado/kpi porque están forzados)
@@ -666,8 +762,9 @@ export const IngresoListScreen: React.FC<Props> = ({ navigation }) => {
     const hasSearch = searchText.trim().length > 0;
     const hasPeriodicidad = filtroPeriodicidad !== 'todos';
     const hasTipo = filtroTipo !== 'todos';
-    return !(hasSearch || hasPeriodicidad || hasTipo);
-  }, [searchText, filtroPeriodicidad, filtroTipo]);
+    const hasCuenta = filtroCuentaBancaria !== 'todos';
+    return !(hasSearch || hasPeriodicidad || hasTipo || hasCuenta);
+  }, [searchText, filtroPeriodicidad, filtroTipo, filtroCuentaBancaria]);
 
   // Navegación a Gastos pendientes (ajusta aquí si tu ruta difiere)
   const goToGastosPendientes = useCallback(() => {
@@ -717,7 +814,6 @@ export const IngresoListScreen: React.FC<Props> = ({ navigation }) => {
   // =========================================================
   // Buscador avanzado
   // =========================================================
-
   const renderBuscador = () => {
     const canChangeFixedFilters = !isPendientes;
 
@@ -726,10 +822,11 @@ export const IngresoListScreen: React.FC<Props> = ({ navigation }) => {
       return (periodicidadStats[p] ?? 0) > 0;
     };
 
-    // ✅ NUEVO: stats omisión para deshabilitar pills sin datos
     const hasOmitidosData = statsOmitido.omitidos > 0;
     const hasNoOmitidosData = statsOmitido.no_omitidos > 0;
     const hasAnyOmitidoData = statsOmitido.todos > 0;
+
+    const hasAnyCuentaBancaria = cuentasBancariasDisponibles.length > 0;
 
     return (
       <View style={styles.searchPanel}>
@@ -750,6 +847,63 @@ export const IngresoListScreen: React.FC<Props> = ({ navigation }) => {
             style={styles.searchInput}
           />
         </View>
+
+        {/* ✅ NUEVO (usuario): CUENTA BANCARIA (PLEGABLE) */}
+        {hasAnyCuentaBancaria && (
+          <>
+            <View
+              style={{
+                flexDirection: 'row',
+                alignItems: 'center',
+                justifyContent: 'space-between',
+                marginTop: 16,
+              }}
+            >
+              <Text style={styles.searchLabel}>Cuenta bancaria</Text>
+              <TouchableOpacity
+                onPress={() => setShowCuentaBancariaFilter((prev) => !prev)}
+                style={{ flexDirection: 'row', alignItems: 'center' }}
+              >
+                <Ionicons
+                  name={showCuentaBancariaFilter ? 'remove-circle-outline' : 'add-circle-outline'}
+                  size={16}
+                  color={colors.textSecondary}
+                  style={{ marginRight: 4 }}
+                />
+                <Text style={{ color: colors.textSecondary, fontSize: 12 }}>
+                  {showCuentaBancariaFilter ? 'Ocultar' : 'Mostrar'}
+                </Text>
+              </TouchableOpacity>
+            </View>
+
+            {showCuentaBancariaFilter && (
+              <View style={styles.pillsRowWrap}>
+                <View style={styles.pillWrapper}>
+                  <TwoLineCompactPill
+                    label="Todas"
+                    selected={filtroCuentaBancaria === 'todos'}
+                    onPress={() => setFiltroCuentaBancaria('todos')}
+                    style={styles.filterPill}
+                  />
+                </View>
+
+                {cuentasBancariasDisponibles.map((c) => {
+                  const selected = filtroCuentaBancaria === c.id;
+                  return (
+                    <View style={styles.pillWrapper} key={c.id}>
+                      <TwoLineCompactPill
+                        label={c.anagrama} // ✅ SOLO anagrama
+                        selected={selected}
+                        onPress={() => setFiltroCuentaBancaria(selected ? 'todos' : c.id)}
+                        style={styles.filterPill}
+                      />
+                    </View>
+                  );
+                })}
+              </View>
+            )}
+          </>
+        )}
 
         {/* PERIODICIDAD (PLEGABLE) */}
         <View style={{ marginTop: 16 }}>
@@ -867,7 +1021,7 @@ export const IngresoListScreen: React.FC<Props> = ({ navigation }) => {
           )}
         </View>
 
-        {/* ✅ NUEVO: OMISIÓN (PLEGABLE) */}
+        {/* OMISIÓN (PLEGABLE) */}
         <View style={{ marginTop: 16 }}>
           <View
             style={{
@@ -1118,10 +1272,7 @@ export const IngresoListScreen: React.FC<Props> = ({ navigation }) => {
   // ✅ Regla final: Reiniciar mes
   // ============================
   const effectiveIngresosPendientesCount = useMemo(() => {
-    // Si estás en "pendientes", ya estás viendo EXACTAMENTE los pendientes.
     if (isPendientes) return ingresos.length;
-
-    // Si estás en "todos", dependemos del count via API.
     return ingresosPendientesCountApi;
   }, [isPendientes, ingresos.length, ingresosPendientesCountApi]);
 
@@ -1168,14 +1319,11 @@ export const IngresoListScreen: React.FC<Props> = ({ navigation }) => {
       const isPendientesView = filtro === 'pendientes';
 
       if (isPendientesView) {
-        // En pendientes: ingresos === pendientes
         const noHayIngresosPendientes = ingresos.length === 0;
 
-        // Solo si el vacío NO es por búsqueda/filtros reales
         if (isDefaultPendientesIngresosFilters && noHayIngresosPendientes) {
           const gastosPend = gastosPendientesCount;
 
-          // Caso 2: no hay ingresos pendientes, pero sí gastos pendientes
           if (gastosPend > 0) {
             return renderEmptyOkState({
               showButton: true,
@@ -1184,12 +1332,10 @@ export const IngresoListScreen: React.FC<Props> = ({ navigation }) => {
             });
           }
 
-          // Caso 1: no hay ingresos pendientes ni gastos pendientes
           return renderEmptyOkState({ showButton: false });
         }
       }
 
-      // Vacío por filtros (o no estamos en Pendientes): mantenemos mensaje legacy
       return (
         <View style={styles.centered}>
           <Text style={styles.emptyText}>No hay ingresos que coincidan con el filtro.</Text>
@@ -1203,11 +1349,15 @@ export const IngresoListScreen: React.FC<Props> = ({ navigation }) => {
         contentContainerStyle={styles.listContent}
         showsVerticalScrollIndicator={false}
         refreshControl={<RefreshControl refreshing={refreshing} onRefresh={handleRefresh} />}
+        // ✅ NUEVO (usuario): tocar o hacer scroll fuera cierra buscador
+        onScrollBeginDrag={closeBuscador}
+        onTouchStart={() => {
+          if (buscadorAbierto) closeBuscador();
+        }}
       >
         {ingresosFiltrados.map((ing) => {
           const titulo = ing.concepto || 'SIN CONCEPTO';
 
-          // ✅ NUEVO: etiqueta visual de omisión sin tocar ExpenseCard
           const categoryBase = getNombreTipoIngreso(ing, catalogoTipos);
           const category = ing.omitido_este_mes ? `${categoryBase} · OMITIDO` : categoryBase;
 
@@ -1240,11 +1390,6 @@ export const IngresoListScreen: React.FC<Props> = ({ navigation }) => {
         subtitle="Muestra todos tus ingresos gestionables asi como los extraordinarios."
         showBack
         onBackPress={handleBack}
-        /**
-         * ✅ Header:
-         * - Si se cumplen requisitos: icono de reinicio (calendar-outline).
-         * - Si no: mantenemos el "+" legacy.
-         */
         rightIconName={!eligibilityLoading && canReiniciarMes ? 'calendar-outline' : undefined}
         onRightPress={!eligibilityLoading && canReiniciarMes ? goReiniciarMes : undefined}
         onAddPress={!eligibilityLoading && canReiniciarMes ? undefined : handleAddIngreso}
