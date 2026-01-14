@@ -186,12 +186,17 @@ async function fetchPatrimonioSummaryForHome(year: number): Promise<{
 
       const kpisPromise = api
         .get<PatrimonioKpisOut>(`/api/v1/analytics/patrimonios/${pid}/kpis`, {
-          params: { year, annualize: false, basis: 'total' },
+          params: {
+            year,                // el backend lo sigue requiriendo
+            mode: 'LAST_12',     // ✅ CLAVE: ventana móvil 12 meses
+            annualize: false,    // ✅ no anualizar en L12 (ya son 12 meses)
+            basis: 'total',
+          },
         })
         .then((x) => x.data)
         .catch(() => null);
 
-      const [compra, kpis] = await Promise.all([compraPromise, kpisPromise]);
+        const [compra, kpis] = await Promise.all([compraPromise, kpisPromise]);
       return { compra, kpis };
     })
   );
