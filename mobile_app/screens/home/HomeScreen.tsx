@@ -8,8 +8,9 @@
 // - Mostrar "Cumplimiento de movimientos %" en el texto de cada barra.
 // - Corregir typing TS para width: "xx%" (DimensionValue).
 // - Mantener tarjetas, navegación e InfoModal sin pérdidas.
-// - ✅ NUEVO: Tarjeta Endeudamiento debajo de Patrimonio.
+// - ✅ Endeudamiento debajo de Patrimonio.
 // - ✅ Fix layout chip endeudamiento (no overflow).
+// - ✅ NUEVO: "Ver préstamos >" desde Endeudamiento -> PrestamosStack (activos).
 // -----------------------------------------------------------------------------
 
 import React, { useMemo, useState } from 'react';
@@ -60,11 +61,6 @@ function getMonthLabelES(month: number, year: number) {
   return `${name} ${year}`;
 }
 
-function safeRatio(n: number, d: number) {
-  if (!d || d <= 0) return 0;
-  return Math.min(1, Math.max(0, n / d));
-}
-
 function formatMovDateTime(raw: string): string {
   if (!raw) return '—';
 
@@ -85,10 +81,9 @@ function formatMovDateTime(raw: string): string {
     const yyyy = String(d.getFullYear());
     const hh = String(d.getHours()).padStart(2, '0');
     const mi = String(d.getMinutes()).padStart(2, '0');
-    const ss = String(d.getSeconds()).padStart(2, '0');
 
     const date = `${dd}-${mm}-${yyyy}`;
-    if (hh === '00' && mi === '00' && ss === '00') return date;
+    if (hh === '00' && mi === '00') return date;
     return `${date} ${hh}:${mi}`;
   }
 
@@ -126,15 +121,12 @@ const HOME_INFO: Record<string, string> = {
   liquidez_total:
     'Liquidez total: saldo actual agregado de cuentas. Pulsar te lleva a Balance para ver el detalle.',
   total_gasto: 'Total gasto: barra agregada del gasto del mes. Pulsar te lleva a Análisis día a día.',
-
   noi_vm:
     'NOI/VM: se calcula como (NOI anual) / (Valor de mercado). Refleja la rentabilidad anual aproximada sobre el valor actual.',
   ltv_aprox:
     'LTV aprox: se estima como (Inversión total) / (Valor de mercado). Es una aproximación del nivel de apalancamiento.',
-
   cotidianos_consumidos_mes:
     'Gastos cotidianos consumidos este mes: suma de los movimientos clasificados como gasto cotidiano dentro del mes actual. Pulsando la tarjeta accedes a "Día a día análisis".',
-
   endeudamiento:
     'Endeudamiento: total deuda es la suma del capital pendiente de préstamos activos. El porcentaje se calcula como (Total deuda / Valor mercado total) * 100. Si no hay patrimonio (VM=0), el porcentaje se muestra como “—”.',
 };
@@ -281,10 +273,8 @@ const HomeScreen: React.FC = () => {
   const { year, month, data, loading, refreshing, error, refresh } = useHomeDashboard();
 
   const monthLabel = useMemo(() => getMonthLabelES(month, year), [month, year]);
-
   const [hideAmounts, setHideAmounts] = useState(false);
   const masked = '***********';
-
   const info = useInfoModal();
 
   const fmtMoney = (value: number | null | undefined, mode: any) => {
@@ -297,7 +287,10 @@ const HomeScreen: React.FC = () => {
     return hideAmounts ? masked : `${value.toFixed(2)}%`;
   };
 
+  // --------------------
   // Navegación (igual que tenías)
+  // --------------------
+
   const goGastoExtra = () => {
     navigation.navigate('DayToDayTab', {
       screen: 'GastoGestionableForm',
@@ -390,7 +383,20 @@ const HomeScreen: React.FC = () => {
     });
   };
 
+  // ✅ NUEVO: ir a préstamos activos (desde Endeudamiento)
+  const goPrestamosActivos = () => {
+    // Navegamos al tab de patrimonio y entramos al stack de préstamos.
+    // Pasamos un param opcional "initialFiltro: 'activos'" por si el stack lo soporta.
+    navigation.navigate('PatrimonyTab', {
+      screen: 'PrestamosStack',
+      params: { initialFiltro: 'activos' },
+    });
+  };
+
+  // --------------------
   // Datos
+  // --------------------
+
   const liquidezTotal = data?.liquidezTotal ?? null;
   const ingresosMes = data?.ingresosMes ?? null;
   const gastosGestionablesMes = data?.gestionablesReal ?? null;
@@ -452,7 +458,6 @@ const HomeScreen: React.FC = () => {
     return `${realLabel} / ${planLabel} · Cumplimiento mov. ${movPctLabel}`;
   };
 
-  // Texto chip endeudamiento (evita overflow y respeta hideAmounts)
   const chipEndText = hideAmounts
     ? masked
     : endeudamientoPct == null
@@ -643,7 +648,12 @@ const HomeScreen: React.FC = () => {
                   <View style={styles.budgetRowHeader}>
                     <Text style={styles.budgetRowLabel}>Total gasto</Text>
                     <Text style={styles.budgetRowValue}>
-                      {formatBudgetValue({ real: totalGastoActual, planned: totalGastoPlanOriginal, omitted: totalGastoOmitido, mode: 'minus' })}
+                      {formatBudgetValue({
+                        real: totalGastoActual,
+                        planned: totalGastoPlanOriginal,
+                        omitted: totalGastoOmitido,
+                        mode: 'minus',
+                      })}
                     </Text>
                   </View>
 
@@ -669,7 +679,12 @@ const HomeScreen: React.FC = () => {
                   <View style={styles.budgetRowHeader}>
                     <Text style={styles.budgetRowLabel}>Ingresos</Text>
                     <Text style={styles.budgetRowValue}>
-                      {formatBudgetValue({ real: ingresosRecibidos, planned: ingresosPlanOriginal, omitted: ingresosOmitidos, mode: 'plus' })}
+                      {formatBudgetValue({
+                        real: ingresosRecibidos,
+                        planned: ingresosPlanOriginal,
+                        omitted: ingresosOmitidos,
+                        mode: 'plus',
+                      })}
                     </Text>
                   </View>
 
@@ -695,7 +710,12 @@ const HomeScreen: React.FC = () => {
                   <View style={styles.budgetRowHeader}>
                     <Text style={styles.budgetRowLabel}>Gestionables</Text>
                     <Text style={styles.budgetRowValue}>
-                      {formatBudgetValue({ real: gestionablesPagados, planned: gestionablesPlanOriginal, omitted: gestionablesOmitidos, mode: 'minus' })}
+                      {formatBudgetValue({
+                        real: gestionablesPagados,
+                        planned: gestionablesPlanOriginal,
+                        omitted: gestionablesOmitidos,
+                        mode: 'minus',
+                      })}
                     </Text>
                   </View>
 
@@ -721,7 +741,12 @@ const HomeScreen: React.FC = () => {
                   <View style={styles.budgetRowHeader}>
                     <Text style={styles.budgetRowLabel}>Cotidianos</Text>
                     <Text style={styles.budgetRowValue}>
-                      {formatBudgetValue({ real: cotidianosConsumidos, planned: cotidianosPlanOriginal, omitted: cotidianosOmitidos, mode: 'minus' })}
+                      {formatBudgetValue({
+                        real: cotidianosConsumidos,
+                        planned: cotidianosPlanOriginal,
+                        omitted: cotidianosOmitidos,
+                        mode: 'minus',
+                      })}
                     </Text>
                   </View>
 
@@ -940,6 +965,17 @@ const HomeScreen: React.FC = () => {
                   Base: Patrimonio bruto (VM total) {fmtMoney(patValorMercadoTotal, 'normal')}
                 </Text>
               </View>
+
+              {/* ✅ NUEVO: CTA dentro de la tarjeta */}
+              <TouchableOpacity
+                style={panelStyles.cardButton}
+                onPress={goPrestamosActivos}
+                accessibilityRole="button"
+                accessibilityLabel="Ver préstamos activos"
+              >
+                <Text style={panelStyles.cardButtonText}>Ver préstamos</Text>
+                <Ionicons name="chevron-forward" size={16} color={colors.primary} />
+              </TouchableOpacity>
             </View>
           </View>
         </ScrollView>
@@ -1120,8 +1156,6 @@ const styles = StyleSheet.create({
   activityAmountPositive: { fontSize: 13, fontWeight: '700', color: colors.success, marginLeft: 8 },
 
   cardHeaderRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 6 },
-
-  // ✅ Header centrado para endeudamiento: evita overflow y alinea el chip correctamente
   cardHeaderRowCentered: {
     flexDirection: 'row',
     justifyContent: 'space-between',
@@ -1139,7 +1173,6 @@ const styles = StyleSheet.create({
     borderRadius: 999,
   },
 
-  // ✅ Chip endeudamiento: con límites para que no se salga
   cardChipDebt: {
     fontSize: 11,
     fontWeight: '700',
@@ -1148,13 +1181,11 @@ const styles = StyleSheet.create({
     paddingHorizontal: 8,
     paddingVertical: 3,
     borderRadius: 999,
-
     maxWidth: 120,
     flexShrink: 1,
     textAlign: 'right',
   },
 
-  // Endeudamiento
   debtGrid: { flexDirection: 'row', justifyContent: 'space-between', marginTop: 8, gap: 12 },
   debtCell: { flex: 1 },
   debtCellRight: { flex: 1, alignItems: 'flex-end' },
