@@ -5,6 +5,7 @@
 // - Añadir soporte robusto para barras 3 estados (Real/Pagado, Omitido, Pendiente) en Home.
 // - Mantener aliases legacy para no romper navegación ni pantallas previas.
 // - Mantener bloque Patrimonio.
+// - ✅ Añadir bloque Endeudamiento (Total deuda + % sobre Patrimonio Bruto/VM)
 
 import { getMonthlySummary } from './analyticsApi';
 import { fetchBalanceMes } from './balanceApi';
@@ -86,6 +87,10 @@ export type HomeDashboardResponse = {
   patrimonioNoiSobreVmPct: number | null;
   patrimonioLtvAproxPct: number | null;
   patrimonioNoiMensual: number;
+
+  // ✅ Endeudamiento
+  endeudamientoTotalDeuda: number;
+  endeudamientoPct: number | null;
 };
 
 function n(v: unknown): number {
@@ -187,16 +192,16 @@ async function fetchPatrimonioSummaryForHome(year: number): Promise<{
       const kpisPromise = api
         .get<PatrimonioKpisOut>(`/api/v1/analytics/patrimonios/${pid}/kpis`, {
           params: {
-            year,                // el backend lo sigue requiriendo
-            mode: 'LAST_12',     // ✅ CLAVE: ventana móvil 12 meses
-            annualize: false,    // ✅ no anualizar en L12 (ya son 12 meses)
+            year,
+            mode: 'LAST_12',
+            annualize: false,
             basis: 'total',
           },
         })
         .then((x) => x.data)
         .catch(() => null);
 
-        const [compra, kpis] = await Promise.all([compraPromise, kpisPromise]);
+      const [compra, kpis] = await Promise.all([compraPromise, kpisPromise]);
       return { compra, kpis };
     })
   );
@@ -246,10 +251,27 @@ async function fetchPatrimonioSummaryForHome(year: number): Promise<{
   };
 }
 
+// -----------------------
+// ✅ Endeudamiento (robusto)
+// -----------------------
+// Backend esperado:
+// GET /api/v1/analytics/endeudamiento/summary
+// Respuestas toleradas:
+// - { total_deuda: 116440.64 }
+// - { totalDeuda: 116440.64 }
+// - valores como string: "116440.64"
+type EndeudamientoSummaryOut = { total_deuda?: number | string | null; totalDeuda?: number | string | null };
+
+async function fetchEndeudamientoSummaryForHome(): Promise<{ totalDeuda: number }> {
+  const r = await api.get<EndeudamientoSummaryOut>(`/api/v1/analytics/endeudamiento/summary`);
+  const total = pickNumber(r.data, ['total_deuda', 'totalDeuda'], 0);
+  return { totalDeuda: total };
+}
+
 export async function fetchHomeDashboard(params: { year: number; month: number }): Promise<HomeDashboardResponse> {
   const { year, month } = params;
 
-  const [summary, balance, totalCotidianos, movimientosMes, patrimonioSummary] = await Promise.all([
+  const [summary, balance, totalCotidianos, movimientosMes, patrimonioSummary, endeudamientoSummary] = await Promise.all([
     getMonthlySummary({ year, month }),
     fetchBalanceMes({ year, month }),
     sumGastosCotidianosMes(year, month),
@@ -264,6 +286,7 @@ export async function fetchHomeDashboard(params: { year: number; month: number }
       ltvAproxPct: null,
       noiMensual: 0,
     })),
+    fetchEndeudamientoSummaryForHome().catch(() => ({ totalDeuda: 0 })),
   ]);
 
   // -----------------------
@@ -343,14 +366,8 @@ export async function fetchHomeDashboard(params: { year: number; month: number }
   // -----------------------
   const cuentas = (balance as any)?.saldos_cuentas ?? [];
 
-  const gastosGestionablesPendientesTotal = cuentas.reduce(
-    (acc: number, c: any) => acc + n(c.gastos_gestionables_pendientes),
-    0
-  );
-  const gastosCotidianosPendientesTotal = cuentas.reduce(
-    (acc: number, c: any) => acc + n(c.gastos_cotidianos_pendientes),
-    0
-  );
+  const gastosGestionablesPendientesTotal = cuentas.reduce((acc: number, c: any) => acc + n(c.gastos_gestionables_pendientes), 0);
+  const gastosCotidianosPendientesTotal = cuentas.reduce((acc: number, c: any) => acc + n(c.gastos_cotidianos_pendientes), 0);
 
   const ingresosPendientesTotal = n((balance as any)?.ingresos_pendientes_total);
   const gastosPendientesTotal = n((balance as any)?.gastos_pendientes_total);
@@ -375,6 +392,18 @@ export async function fetchHomeDashboard(params: { year: number; month: number }
 
   const gestionablesPresupuestado = gestionablesPresupuestados;
   const cotidianosPresupuestado = cotidianosPresupuestados;
+
+  // -----------------------
+  // ✅ Endeudamiento
+  // -----------------------
+  const endeudamientoTotalDeuda = n(endeudamientoSummary?.totalDeuda);
+
+  // Patrimonio bruto = Valor Mercado Total (Home)
+  const patrimonioBruto = n(patrimonioSummary?.valorMercadoTotal);
+
+  // Si no hay patrimonio, devolvemos null para UI "—"
+  const endeudamientoPct =
+    patrimonioBruto > 0 ? Number(((endeudamientoTotalDeuda / patrimonioBruto) * 100).toFixed(2)) : null;
 
   return {
     year,
@@ -432,5 +461,8 @@ export async function fetchHomeDashboard(params: { year: number; month: number }
     patrimonioNoiSobreVmPct: patrimonioSummary.noiSobreVmPct,
     patrimonioLtvAproxPct: patrimonioSummary.ltvAproxPct,
     patrimonioNoiMensual: patrimonioSummary.noiMensual,
+
+    endeudamientoTotalDeuda,
+    endeudamientoPct,
   };
 }

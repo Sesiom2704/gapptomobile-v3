@@ -1,5 +1,3 @@
-# backend/app/main.py
-
 """
 Punto de entrada principal del backend de GapptoMobile v3.
 
@@ -230,7 +228,8 @@ from backend.app.api.v1 import (
     cierre_mensual_router,
     db_router,
     reinicio_router,
-    inversiones_router
+    inversiones_router,
+    endeudamiento_router,  # ✅ NUEVO
 )
 
 API_V1 = "/api/v1"
@@ -260,9 +259,14 @@ app.include_router(analytics_router.router, prefix=API_V1)
 app.include_router(cierre_mensual_router.router, prefix=API_V1)
 app.include_router(reinicio_router.router, prefix=API_V1)
 app.include_router(inversiones_router.router, prefix=API_V1)
+
+# ✅ NUEVO: endeudamiento
+app.include_router(endeudamiento_router.router, prefix=API_V1)
+
 # Router técnico BD: /api/db/*
 # OJO: db_router.router ya tiene prefix="/db"
 # Al montarlo con prefix="/api" queda: /api/db/...
 app.include_router(db_router.router, prefix="/api")
+
 # Mantengo tu debug_router (si lo usas)
 app.include_router(debug_router.router)
