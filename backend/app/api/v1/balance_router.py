@@ -11,12 +11,18 @@ Principios:
     - Gasto: pagado=True y ultimo_pago_on dentro del mes.
     - Ingreso: cobrado=True y ultimo_ingreso_on dentro del mes.
     - Cotidianos: líneas en gastos_cotidianos pagado=True dentro del mes.
-- Estados operativos "omitido_este_mes" (gestionables) o "cerrado_este_mes" (presupuestos COT)
-  NO se reflejan aquí por diseño, ya que no representan movimiento bancario.
 
 Rangos de fecha:
 - Filtros half-open: [start, end)
   fecha >= start AND fecha < end
+
+NUEVO (requisito mobile):
+- En /balance/mes-cuentas añadimos:
+    - gastos_ahorro_total
+    - ingresos_reintegro_ahorro_total (tipo_id=TING-2IB5N9 en ingresos)
+  para que el móvil calcule:
+    Ahorrado = gastos_ahorro_total - ingresos_reintegro_ahorro_total
+  sin romper el campo legacy ahorro_mes_total.
 """
 
 from __future__ import annotations
@@ -40,6 +46,10 @@ from backend.app.schemas.balance import (
 )
 
 router = APIRouter(prefix="/balance", tags=["balance"])
+
+# Constantes de negocio (alineadas con tu criterio actual)
+AHO_SEGMENTO_ID = "AHO-12345"
+REINTEGRO_AHORRO_TIPO_ID = "TING-2IB5N9"
 
 
 def _get_month_range(year: Optional[int], month: Optional[int]) -> Tuple[date, date]:
@@ -278,8 +288,6 @@ def get_balance_cuentas_mes(
     Adicional:
     - Pendientes por cuenta (ingresos, gestionables, cotidianos) para tarjetas de pendientes.
       Nota: aquí se mantiene la definición anterior (activo+kpi+no pagado/cobrado).
-      La lógica omitido_este_mes se incorpora en routers de gastos/ingresos y en reinicio,
-      no en caja.
     """
     start, end = _get_month_range(year, month)
 
@@ -293,6 +301,7 @@ def get_balance_cuentas_mes(
     )
 
     if not cuentas:
+        # Importante: devolvemos también los nuevos campos a 0.0 para consistencia.
         return BalanceMesResponse(
             year=start.year,
             month=start.month,
@@ -303,6 +312,8 @@ def get_balance_cuentas_mes(
             ingresos_pendientes_total=0.0,
             gastos_pendientes_total=0.0,
             ahorro_mes_total=0.0,
+            gastos_ahorro_total=0.0,
+            ingresos_reintegro_ahorro_total=0.0,
         )
 
     cuenta_ids = [c.id for c in cuentas]
@@ -364,7 +375,9 @@ def get_balance_cuentas_mes(
     # SALIDAS TOTALES DEL MES POR CUENTA
     salidas_mes_por_cuenta: dict[str, float] = {}
     for cid in cuenta_ids:
-        salidas_mes_por_cuenta[cid] = salidas_gastos_por_cuenta.get(cid, 0.0) + salidas_cotidianos_por_cuenta.get(cid, 0.0)
+        salidas_mes_por_cuenta[cid] = (
+            salidas_gastos_por_cuenta.get(cid, 0.0) + salidas_cotidianos_por_cuenta.get(cid, 0.0)
+        )
 
     # 5) PENDIENTES POR CUENTA (ingresos, gestionables, cotidianos)
     ingresos_pendientes_q = (
@@ -410,13 +423,10 @@ def get_balance_cuentas_mes(
         salidas_totales = salidas_mes_por_cuenta.get(c.id, 0.0)
         saldo_actual = float(getattr(c, "liquidez", 0.0) or 0.0)
 
-        # Pendientes por cuenta (mantenemos esquema actual)
         ingresos_pend = ingresos_pendientes_por_cuenta.get(c.id, 0.0)
         gastos_pend = gastos_pendientes_por_cuenta.get(c.id, 0.0)
 
-        # Si tu schema separa gestionables vs cotidianos pendientes, conserva tus campos:
-        # - Aquí seguimos con los campos existentes en tu snippet (gestionables y cotidianos).
-        #   Si tu SaldoCuentaItem exige ambos, rellena con 0 el que no tengas calculado.
+        # Mantienes esquema actual: gestionables/cotidianos pendientes
         saldos_cuentas.append(
             SaldoCuentaItem(
                 cuenta_id=c.id,
@@ -440,13 +450,65 @@ def get_balance_cuentas_mes(
     )
     liquidez_prevista_total = liquidez_actual_total - gastos_pendientes_total + ingresos_pendientes_total
 
-    # KPI de ahorro del mes (segmento AHO) -> solo pagos reales
+    # ------------------------------------------------------------
+    # KPI Ahorro (legacy) + nuevos totales para "Ahorrado neto"
+    #
+    # Legacy:
+    # - ahorro_mes_total: lo mantenemos tal como estaba para no alterar resultados en v2.
+    #
+    # Nuevo:
+    # - gastos_ahorro_total: gastos AHO pagados en el mes (importe_cuota fallback importe)
+    # - ingresos_reintegro_ahorro_total: ingresos cobrados tipo_id=TING-2IB5N9
+    # ------------------------------------------------------------
+
+    # NUEVO: total gastos ahorro (importe real)
+    gastos_ahorro_q = (
+        db.query(
+            func.coalesce(
+                func.sum(func.coalesce(models.Gasto.importe_cuota, models.Gasto.importe)),
+                0.0,
+            ).label("total_gastos_ahorro")
+        )
+        .filter(
+            models.Gasto.user_id == current_user.id,
+            models.Gasto.pagado.is_(True),
+            models.Gasto.segmento_id == AHO_SEGMENTO_ID,
+            models.Gasto.ultimo_pago_on >= start,
+            models.Gasto.ultimo_pago_on < end,
+        )
+        .first()
+    )
+    gastos_ahorro_total = (
+        float(getattr(gastos_ahorro_q, "total_gastos_ahorro", 0.0) or 0.0) if gastos_ahorro_q else 0.0
+    )
+
+    # NUEVO: total ingresos reintegro ahorro
+    ingresos_reintegro_ahorro_q = (
+        db.query(
+            func.coalesce(func.sum(models.Ingreso.importe), 0.0).label("total_ingresos_reintegro_ahorro")
+        )
+        .filter(
+            models.Ingreso.user_id == current_user.id,
+            models.Ingreso.cobrado.is_(True),
+            models.Ingreso.tipo_id == REINTEGRO_AHORRO_TIPO_ID,
+            models.Ingreso.ultimo_ingreso_on >= start,
+            models.Ingreso.ultimo_ingreso_on < end,
+        )
+        .first()
+    )
+    ingresos_reintegro_ahorro_total = (
+        float(getattr(ingresos_reintegro_ahorro_q, "total_ingresos_reintegro_ahorro", 0.0) or 0.0)
+        if ingresos_reintegro_ahorro_q
+        else 0.0
+    )
+
+    # LEGACY: tu cálculo anterior (lo dejo intacto)
     ahorro_mes_q = (
         db.query(func.coalesce(func.sum(models.Gasto.importe), 0.0).label("total_ahorro"))
         .filter(
             models.Gasto.user_id == current_user.id,
             models.Gasto.pagado.is_(True),
-            models.Gasto.segmento_id == "AHO-12345",
+            models.Gasto.segmento_id == AHO_SEGMENTO_ID,
             models.Gasto.ultimo_pago_on >= start,
             models.Gasto.ultimo_pago_on < end,
         )
@@ -464,4 +526,6 @@ def get_balance_cuentas_mes(
         ingresos_pendientes_total=float(round(ingresos_pendientes_total, 2)),
         gastos_pendientes_total=float(round(gastos_pendientes_total, 2)),
         ahorro_mes_total=float(round(ahorro_mes_total, 2)),
+        gastos_ahorro_total=float(round(gastos_ahorro_total, 2)),
+        ingresos_reintegro_ahorro_total=float(round(ingresos_reintegro_ahorro_total, 2)),
     )

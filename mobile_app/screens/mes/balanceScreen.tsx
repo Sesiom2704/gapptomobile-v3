@@ -1,25 +1,28 @@
-// screens/balance/BalanceScreen.tsx
+// mobile_app/screens/mes/BalanceScreen.tsx
 /**
  * RESPONSABILIDAD (sin romper nada):
  * - Mostrar balance del mes, saldos por cuentas, pendientes, últimos movimientos y KPIs de liquidez.
- * - Permitir "Nuevo movimiento entre cuentas" (ahora en MODAL con overlay, cerrable tocando fuera).
+ * - Permitir "Nuevo movimiento entre cuentas" (modal con overlay, cerrable tocando fuera).
  * - Permitir "Info/Ajuste liquidez" por cuenta (modal).
  *
- * CAMBIOS (requisitos):
- * 1) Al ajustar liquidez: en comentarios guardar "Ajuste de liquidez manual".
- * 2) En "Pendiente de cobro/pago":
- *    - Impacto Neto: si es negativo en rojo; si es positivo en verde (0 neutro).
- *    - Quitar el texto "(si se cobra todo y se ...)" y poner un botón de info a la derecha
- *      que al pulsar muestre ese mensaje (usando InfoModal global).
- * 3) "Nuevo movimiento entre cuentas":
- *    - Pasar a Modal con overlay. Si pulsas fuera del formulario, cierra igual que la "X".
+ * CAMBIOS (requisitos previos):
+ * 1) Ajuste liquidez: comentarios = "Ajuste de liquidez manual".
+ * 2) Pendiente cobro/pago:
+ *    - Impacto Neto: <0 rojo, >0 verde, =0 neutro.
+ *    - Botón de info a la derecha que muestra "Si se cobra todo y se pagan todos".
+ * 3) Nuevo movimiento entre cuentas:
+ *    - Modal con overlay. Tocar fuera cierra.
  *
- * NOTAS:
- * - No se toca lógica de negocio (APIs, cálculos, navegación), salvo el comentario del ajuste (requisito 1).
- * - Se reutiliza InfoModal global ya existente para el botón de info del Impacto neto.
+ * CORRECCIÓN NUEVA (Ahorrado):
+ * - Ahorrado = SUM(gastos AHO pagados) - SUM(ingresos tipo REINTEGRO AHORRO cobrados)
+ *   - Gastos AHO: segmento_id = "AHO-12345" (ya existe en backend)
+ *   - Reintegro: ingresos.tipo_id = "TING-2IB5N9"
+ *
+ * Implementación segura:
+ * - Si backend envía gastos_ahorro_total e ingresos_reintegro_ahorro_total => usamos fórmula.
+ * - Si no (backend antiguo) => fallback a ahorro_mes_total (comportamiento anterior).
  */
 
-// mobile_app/screens/mes/BalanceScreen.tsx
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   View,
@@ -98,7 +101,7 @@ const BalanceScreen: React.FC = () => {
   const info = useInfoModal();
 
   // -------------------------
-  // Estado "Nuevo movimiento" (ahora modal)
+  // Estado "Nuevo movimiento" (modal)
   // -------------------------
   const [showTransferBox, setShowTransferBox] = useState(false);
   const [origenId, setOrigenId] = useState<string | null>(null);
@@ -140,11 +143,29 @@ const BalanceScreen: React.FC = () => {
     const salidasTotales = cuentas.reduce((acc, c) => acc + (c.salidas ?? 0), 0);
     const resultadoMes = entradasTotales - salidasTotales;
 
+    /**
+     * ✅ Corrección Ahorrado (con compatibilidad):
+     * Si backend devuelve:
+     *  - gastos_ahorro_total
+     *  - ingresos_reintegro_ahorro_total
+     * entonces:
+     *  Ahorrado = gastos_ahorro_total - ingresos_reintegro_ahorro_total
+     *
+     * Si no están (backend antiguo), se usa ahorro_mes_total.
+     */
+    const b = balance as any; // acceso defensivo: no rompe aunque el type aún no tenga los campos
+    const gastosAhorro = b?.gastos_ahorro_total;
+    const reintegroAhorro = b?.ingresos_reintegro_ahorro_total;
+
+    const hasAhorroNeto = typeof gastosAhorro === 'number' && typeof reintegroAhorro === 'number';
+
+    const ahorroMes = hasAhorroNeto ? gastosAhorro - reintegroAhorro : balance.ahorro_mes_total ?? 0;
+
     return {
       liquidezActual: balance.liquidez_actual_total,
       liquidezInicio: balance.liquidez_inicio_mes_total,
       liquidezPrevista: balance.liquidez_prevista_total,
-      ahorroMes: balance.ahorro_mes_total ?? 0,
+      ahorroMes,
       entradas: entradasTotales,
       salidas: salidasTotales,
       resultadoMes,
@@ -156,11 +177,7 @@ const BalanceScreen: React.FC = () => {
   const impactoNetoPendiente = ingresosPendientesTotal - gastosPendientesTotal;
 
   /**
-   * ✅ Requisito (2):
-   * Color del Impacto Neto según signo:
-   * - < 0: rojo (danger)
-   * - > 0: verde (success)
-   * - = 0: neutro (textPrimary)
+   * ✅ Requisito (2): color por signo
    */
   const impactoNetoColor =
     impactoNetoPendiente < 0
@@ -311,7 +328,7 @@ const BalanceScreen: React.FC = () => {
         fecha,
         cuentaId: cuentaSeleccionadaId,
         nuevoSaldo,
-        // ✅ Requisito (1): comentario “limpio” y consistente
+        // ✅ Requisito (1): comentario fijo y consistente
         comentarios: 'Ajuste de liquidez manual',
       });
 
@@ -495,7 +512,6 @@ const BalanceScreen: React.FC = () => {
                     {EuroformatEuro(impactoNetoPendiente, 'signed')}
                   </Text>
 
-                  {/* Botón de info alineado a la derecha (muestra el mensaje solicitado) */}
                   <TouchableOpacity
                     style={styles.pendienteInfoButton}
                     hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
@@ -608,25 +624,13 @@ const BalanceScreen: React.FC = () => {
 
         {/* =========================================
             ✅ Requisito (3): Modal "Nuevo movimiento"
-            - Tocar fuera cierra igual que la X
-            - Misma UI y validaciones de antes
            ========================================= */}
-        <Modal
-          visible={showTransferBox}
-          transparent
-          animationType="fade"
-          onRequestClose={handleCancelTransfer}
-        >
-          {/* Overlay: cualquier toque fuera del formulario cancela */}
+        <Modal visible={showTransferBox} transparent animationType="fade" onRequestClose={handleCancelTransfer}>
           <TouchableWithoutFeedback onPress={handleCancelTransfer}>
             <View style={styles.transferOverlay}>
-              {/* Contenedor interno: evita que el toque “atraviese” y cierre */}
               <TouchableWithoutFeedback onPress={() => {}}>
                 <View style={styles.transferModalCardWrapper}>
-                  <ScrollView
-                    keyboardShouldPersistTaps="handled"
-                    contentContainerStyle={styles.transferModalScrollContent}
-                  >
+                  <ScrollView keyboardShouldPersistTaps="handled" contentContainerStyle={styles.transferModalScrollContent}>
                     <View style={panelStyles.section}>
                       <View style={styles.sectionTitleRow}>
                         <View style={styles.titleWithInfo}>
@@ -660,10 +664,7 @@ const BalanceScreen: React.FC = () => {
                               const bloqueada = destinoId === cta.cuenta_id;
 
                               return (
-                                <View
-                                  key={cta.cuenta_id}
-                                  style={[styles.accountPillWrapper, bloqueada && { opacity: 0.3 }]}
-                                >
+                                <View key={cta.cuenta_id} style={[styles.accountPillWrapper, bloqueada && { opacity: 0.3 }]}>
                                   <AccountPill
                                     label={cta.anagrama ?? cta.cuenta_id}
                                     subLabel={EuroformatEuro(cta.fin, 'normal')}
@@ -688,10 +689,7 @@ const BalanceScreen: React.FC = () => {
                               const bloqueada = origenId === cta.cuenta_id;
 
                               return (
-                                <View
-                                  key={cta.cuenta_id}
-                                  style={[styles.accountPillWrapper, bloqueada && { opacity: 0.3 }]}
-                                >
+                                <View key={cta.cuenta_id} style={[styles.accountPillWrapper, bloqueada && { opacity: 0.3 }]}>
                                   <AccountPill
                                     label={cta.anagrama ?? cta.cuenta_id}
                                     subLabel={EuroformatEuro(cta.fin, 'normal')}
@@ -892,7 +890,6 @@ const BalanceScreen: React.FC = () => {
 export default BalanceScreen;
 
 const styles = StyleSheet.create({
-  // Header por sección: título a la izquierda, "i" al final a la derecha
   sectionHeaderRow: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -1038,10 +1035,6 @@ const styles = StyleSheet.create({
     marginBottom: 2,
   },
 
-  /**
-   * ✅ “Impacto neto”: ahora el valor y el botón de info comparten “lado derecho”.
-   * Mantiene diseño compacto, y el icono queda visualmente alineado a la derecha.
-   */
   pendienteResumenRow: {
     marginTop: 8,
     paddingTop: 8,
@@ -1164,9 +1157,6 @@ const styles = StyleSheet.create({
   },
   botonNuevoSaldoText: { fontSize: 12, fontWeight: '600', color: '#fff' },
 
-  // -------------------------
-  // Overlay Modal Ajuste
-  // -------------------------
   adjustOverlay: {
     flex: 1,
     backgroundColor: 'rgba(0,0,0,0.4)',
@@ -1177,9 +1167,6 @@ const styles = StyleSheet.create({
   adjustModalCardWrapper: { width: '100%', maxWidth: 420 },
   adjustModalScrollContent: { flexGrow: 0 },
 
-  // -------------------------
-  // Overlay Modal Transfer (requisito 3)
-  // -------------------------
   transferOverlay: {
     flex: 1,
     backgroundColor: 'rgba(0,0,0,0.4)',

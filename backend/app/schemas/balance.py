@@ -1,8 +1,22 @@
 # schemas/balance.py
+"""
+Schemas (Pydantic) para Balance (visión caja / movimientos reales).
+
+Objetivo:
+- Mantener compatibilidad hacia atrás (clientes antiguos).
+- Permitir ampliar el endpoint /balance/mes-cuentas con nuevos campos sin romper.
+
+NUEVO:
+- gastos_ahorro_total: suma de gastos pagados del segmento AHO (AHO-12345) en el mes.
+- ingresos_reintegro_ahorro_total: suma de ingresos cobrados tipo REINTEGRO AHORRO (tipo_id=TING-2IB5N9) en el mes.
+  Estos campos permiten calcular en frontend:
+      Ahorrado neto = gastos_ahorro_total - ingresos_reintegro_ahorro_total
+"""
+
 from datetime import datetime
 from decimal import Decimal
 from typing import Literal, List
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 MovementKind = Literal["GASTO_GESTIONABLE", "GASTO_COTIDIANO", "INGRESO"]
 
@@ -56,5 +70,12 @@ class BalanceMesResponse(BaseModel):
     ingresos_pendientes_total: float
     gastos_pendientes_total: float
     
-    # 👉 NUEVO KPI: ahorro del mes (gasto con segmento ahorro)
     ahorro_mes_total: float
+
+    # ✅ NUEVO (para cálculo Ahorrado neto en frontend)
+    # Defaults para compatibilidad (si por cualquier razón no se calculan, no rompen).
+    gastos_ahorro_total: float = Field(0.0, description="Total gastos del segmento AHO pagados en el mes.")
+    ingresos_reintegro_ahorro_total: float = Field(
+        0.0,
+        description="Total ingresos REINTEGRO AHORRO cobrados en el mes (tipo_id=TING-2IB5N9).",
+    )
