@@ -21,11 +21,6 @@ CAMBIO CLAVE (v3):
     * Ingresos: ultimo_ingreso_on + ingresos_cobrados
   Es decir: se cuenta lo efectivamente pagado/cobrado, y se intersecta con el rango.
 
-POR QUÉ:
-- Antes se infería “meses/ocurrencias” con fecha_inicio/fecha y fin de año.
-- Eso provoca errores como: Resumen 2026 (enero) mostrando 12 meses.
-- Con este cambio, Resumen 2026 (enero) mostrará 1 mes si el último cobro/pago es enero.
-
 Notas:
 - Normalización de periodicidad tolerante a:
     - PAGO_UNICO / PAGO UNICO
@@ -318,6 +313,100 @@ def _valor_base_from_compra(compra: Optional[models.PatrimonioCompra], basis: st
 
 
 # =========================================================
+# Helpers: superficie (m²)
+# =========================================================
+
+def _get_superficie_m2(patr: models.Patrimonio) -> Tuple[Optional[float], str]:
+    """
+    Devuelve (superficie_usada, fuente) con prioridad:
+    1) superficie_m2 (habitable)
+    2) superficie_construida
+
+    Motivo:
+    - Para KPIs tipo €/m² y renta €/m²/año suele ser más representativo el área habitable.
+    """
+    s1 = _f(getattr(patr, "superficie_m2", None), 0.0)
+    if s1 > 0:
+        return float(s1), "superficie_m2"
+
+    s2 = _f(getattr(patr, "superficie_construida", None), 0.0)
+    if s2 > 0:
+        return float(s2), "superficie_construida"
+
+    return None, "none"
+
+
+# =========================================================
+# Helpers: deuda (PrestamoCuota) por rango
+# =========================================================
+
+def _deuda_ytd_from_prestamos(
+    *,
+    db: Session,
+    current_user: models.User,
+    patrimonio_id: str,
+    range_start_month: date,
+    range_end_month: date,
+) -> Tuple[float, str]:
+    """
+    Calcula deuda efectivamente pagada en el rango (YTD/rango) sumando PrestamoCuota.pagada.
+
+    - Se usa fecha_pago si existe; si no, se usa fecha_vencimiento como fallback (si está marcada pagada).
+    - Se filtra por Prestamo.referencia_vivienda_id == patrimonio_id.
+    """
+    # 1) prestamos del patrimonio
+    prestamos = (
+        db.query(models.Prestamo)
+        .filter(
+            models.Prestamo.user_id == current_user.id,
+            models.Prestamo.referencia_vivienda_id == patrimonio_id,
+            models.Prestamo.activo == True,
+        )
+        .all()
+    )
+
+    if not prestamos:
+        return 0.0, "No hay préstamos activos asociados a esta propiedad."
+
+    prestamo_ids = [p.id for p in prestamos]
+
+    # 2) cuotas pagadas (detalle)
+    cuotas = (
+        db.query(models.PrestamoCuota)
+        .filter(
+            models.PrestamoCuota.prestamo_id.in_(prestamo_ids),
+            models.PrestamoCuota.pagada == True,
+        )
+        .all()
+    )
+
+    if not cuotas:
+        return 0.0, "No hay cuotas pagadas registradas en prestamo_cuota (pagada=true)."
+
+    si = _month_index(range_start_month)
+    ei = _month_index(range_end_month)
+
+    total = 0.0
+    counted = 0
+
+    for c in cuotas:
+        d = getattr(c, "fecha_pago", None) or getattr(c, "fecha_vencimiento", None)
+        d = _as_date(d)
+        if d is None:
+            continue
+
+        mi = _month_index(_month_start(d))
+        if si <= mi <= ei:
+            total += _f(getattr(c, "importe_cuota", 0.0), 0.0)
+            counted += 1
+
+    if counted == 0:
+        return 0.0, "Hay cuotas pagadas, pero ninguna cae dentro del rango seleccionado."
+
+    return float(total), f"Deuda calculada sumando {counted} cuotas pagadas (prestamo_cuota) dentro del rango."
+
+
+# =========================================================
 # ENDPOINTS
 # =========================================================
 
@@ -525,6 +614,17 @@ def kpis_patrimonio(
     if not patr or patr.user_id != current_user.id:
         raise HTTPException(status_code=404, detail="Patrimonio no encontrado")
 
+    as_of_date = as_of or date.today()
+    adq = _as_date(getattr(patr, "fecha_adquisicion", None))
+
+    # Rango real usado por los breakdowns (y útil para deuda)
+    range_start_m, range_end_m, _meses_contados = _range_window(
+        mode=mode,
+        year=year,
+        as_of=as_of_date,
+        adquisicion=adq,
+    )
+
     # Reutilizamos breakdowns (ya incluyen meses_contados del modo)
     ing_bd = ingresos_breakdown(patrimonio_id, year, mode, as_of, db, current_user)
     gas_bd = gastos_breakdown(patrimonio_id, year, mode, as_of, only_kpi_expenses, db, current_user)
@@ -563,9 +663,51 @@ def kpis_patrimonio(
     cap_rate = (noi / valor_base) * 100.0 if valor_base > 0 else None
     rend_bruto = (ingresos_anuales / valor_base) * 100.0 if valor_base > 0 else None
 
+    # NUEVO: Rend. Neto (definición operativa consistente con basis)
+    rendimiento_neto_pct = (noi / valor_base) * 100.0 if valor_base > 0 else None
+
     cashflow_anual = noi
     cashflow_mensual = cashflow_anual / 12.0
 
+    # -------------------------
+    # KPIs adicionales (m², inversión, payback)
+    # -------------------------
+    superficie_usada, sup_source = _get_superficie_m2(patr)
+
+    vc = _f(getattr(compra, "valor_compra", 0.0), 0.0) if compra else 0.0
+    vr = _f(getattr(compra, "valor_referencia", 0.0), 0.0) if compra else 0.0
+    ti = _f(getattr(compra, "total_inversion", 0.0), 0.0) if compra else 0.0
+
+    precio_m2 = (vc / superficie_usada) if (superficie_usada and vc > 0) else None
+    referencia_m2 = (vr / superficie_usada) if (superficie_usada and vr > 0) else None
+    renta_m2_anual = (ingresos_anuales / superficie_usada) if (superficie_usada and ingresos_anuales > 0) else None
+    inversion_m2 = (ti / superficie_usada) if (superficie_usada and ti > 0) else None
+
+    # % bruta sobre inversión total (equivalente a “por m²” si ambas usan los mismos m²)
+    rentab_m2_total_pct = ((ingresos_anuales / ti) * 100.0) if (ti > 0 and ingresos_anuales > 0) else None
+
+    # Payback: inversión total / cashflow anual (si cashflow anual > 0)
+    payback_anios = (ti / cashflow_anual) if (ti > 0 and cashflow_anual > 0) else None
+
+    # -------------------------
+    # Deuda anual y DSCR (desde PrestamoCuota pagada)
+    # -------------------------
+    deuda_ytd, deuda_msg = _deuda_ytd_from_prestamos(
+        db=db,
+        current_user=current_user,
+        patrimonio_id=patrimonio_id,
+        range_start_month=range_start_m,
+        range_end_month=range_end_m,
+    )
+
+    # Si annualize=True, escalamos igual que ingresos/gastos (misma lógica temporal)
+    deuda_anual = deuda_ytd * factor
+
+    dscr = (noi / deuda_anual) if (deuda_anual > 0 and noi > 0) else None
+
+    # -------------------------
+    # Info (para modal “i”)
+    # -------------------------
     info: Dict[str, str] = {
         "mode": "Selector de periodo: LAST_12 (últimos 12 meses), ALL_TIME (desde adquisición), YEAR (año calendario / YTD).",
         "meses_contados": "Meses del rango (denominador para promedios y annualize).",
@@ -574,9 +716,44 @@ def kpis_patrimonio(
         "noi": "NOI = ingresos anuales − gastos operativos anuales.",
         "cap_rate_pct": "Cap rate = (NOI / valor_base) × 100.",
         "rendimiento_bruto_pct": "Rend. bruto = (ingresos anuales / valor_base) × 100.",
+        "rendimiento_neto_pct": "Rend. neto = (NOI / valor_base) × 100.",
         "ocupacion_pct": "Ocupación aproximada = meses cobrados (mensual) / meses_contados × 100.",
         "data_model": "Ingresos/gastos se calculan por ultimo_* + *_cobrados/pagadas (efectivo), no por fecha_inicio->fin_año.",
     }
+
+    # Explicaciones específicas de KPIs que suelen quedar en null
+    if superficie_usada is None:
+        info["m2"] = (
+            "Faltan m²: superficie_m2 (habitable) y superficie_construida están vacíos o 0. "
+            "Por eso no se calculan KPIs €/m² y renta €/m²."
+        )
+    else:
+        info["m2"] = f"Se usan m² desde '{sup_source}' = {round(float(superficie_usada), 2)}."
+
+    if compra is None:
+        info["compra"] = "No existe PatrimonioCompra para esta propiedad. Sin compra no se calculan KPIs de inversión/compra."
+    else:
+        if ti <= 0:
+            info["total_inversion"] = "total_inversion está vacío o 0. Payback e inversión €/m² pueden quedar en null."
+        if vc <= 0:
+            info["valor_compra"] = "valor_compra está vacío o 0. €/m² (compra) puede quedar en null."
+
+    if cashflow_anual <= 0:
+        info["payback_anios"] = "Payback requiere cashflow anual positivo. Si NOI<=0, Payback se deja en null."
+    else:
+        info["payback_anios"] = "Payback = total_inversion / cashflow_anual (si cashflow_anual>0)."
+
+    info["precio_m2"] = "€/m² (compra) = valor_compra / m²."
+    info["renta_m2_anual"] = "Renta €/m²/año = ingresos anuales / m²."
+    info["inversion_m2"] = "€/m² (inv. total) = total_inversion / m²."
+    info["rentab_m2_total_pct"] = "Rentab % (bruta) sobre inversión total = ingresos anuales / total_inversion × 100."
+
+    info["deuda_anual"] = (
+        "Deuda anual = suma de cuotas pagadas (prestamo_cuota.pagada=true) dentro del rango, "
+        "y si annualize=True se escala con 12/meses_contados. "
+        f"Detalle: {deuda_msg}"
+    )
+    info["dscr"] = "DSCR = NOI / deuda_anual (si deuda_anual>0)."
 
     return KpisOut(
         year=year,
@@ -595,8 +772,20 @@ def kpis_patrimonio(
         cashflow_anual=float(round(cashflow_anual, 2)),
         cashflow_mensual=float(round(cashflow_mensual, 2)),
 
-        dscr=None,
+        payback_anios=(float(round(payback_anios, 2)) if payback_anios is not None else None),
+
+        precio_m2=(float(round(precio_m2, 2)) if precio_m2 is not None else None),
+        referencia_m2=(float(round(referencia_m2, 2)) if referencia_m2 is not None else None),
+        renta_m2_anual=(float(round(renta_m2_anual, 2)) if renta_m2_anual is not None else None),
+        inversion_m2=(float(round(inversion_m2, 2)) if inversion_m2 is not None else None),
+        rentab_m2_total_pct=(float(round(rentab_m2_total_pct, 2)) if rentab_m2_total_pct is not None else None),
+
+        deuda_anual=float(round(deuda_anual, 2)),
+        dscr=(float(round(dscr, 2)) if dscr is not None else None),
+
         ocupacion_pct=float(round(ocupacion_pct, 1)),
+
+        rendimiento_neto_pct=(float(round(rendimiento_neto_pct, 2)) if rendimiento_neto_pct is not None else None),
 
         info=info,
     )

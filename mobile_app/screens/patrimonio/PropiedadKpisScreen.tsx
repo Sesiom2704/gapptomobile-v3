@@ -59,6 +59,9 @@ type KpiResponse = {
   cap_rate_pct: number | null;
   rendimiento_bruto_pct: number | null;
 
+  // ✅ NUEVO: Rend. Neto (NOI / valor_base)
+  rendimiento_neto_pct: number | null;
+
   cashflow_anual: number;
   cashflow_mensual: number;
 
@@ -361,13 +364,22 @@ export default function PropiedadKpisScreen({ route, navigation }: Props) {
             <KpiCard title="Cap rate" value={kpi.cap_rate_pct != null ? `${kpi.cap_rate_pct.toFixed(2)} %` : '—'} onInfo={() => openInfo('Cap rate', 'cap_rate_pct')} />
 
             <KpiCard title="Rend. bruto" value={kpi.rendimiento_bruto_pct != null ? `${kpi.rendimiento_bruto_pct.toFixed(2)} %` : '—'} onInfo={() => openInfo('Rend. bruto', 'rendimiento_bruto_pct')} />
-            <KpiCard title="Cash-flow anual" value={EuroformatEuro(kpi.cashflow_anual)} onInfo={() => openInfo('Cash-flow anual', 'cashflow_anual')} />
 
+            {/* ✅ NUEVO: Rend. Neto */}
+            <KpiCard
+              title="Rend. neto"
+              value={kpi.rendimiento_neto_pct != null ? `${kpi.rendimiento_neto_pct.toFixed(2)} %` : '—'}
+              onInfo={() => openInfo('Rend. neto', 'rendimiento_neto_pct')}
+            />
+
+            <KpiCard title="Cash-flow anual" value={EuroformatEuro(kpi.cashflow_anual)} onInfo={() => openInfo('Cash-flow anual', 'cashflow_anual')} />
             <KpiCard title="Cash-flow mensual" value={EuroformatEuro(kpi.cashflow_mensual)} onInfo={() => openInfo('Cash-flow mensual', 'cashflow_mensual')} />
+
             <KpiCard title="Payback" value={kpi.payback_anios != null ? `${kpi.payback_anios.toFixed(2)} años` : '—'} onInfo={() => openInfo('Payback', 'payback_anios')} />
 
             <KpiCard title="€/m² (compra)" value={kpi.precio_m2 != null ? EuroformatEuro(kpi.precio_m2) : '—'} onInfo={() => openInfo('€/m² (compra)', 'precio_m2')} />
-            <KpiCard title="€/m² (ref.)" value={kpi.referencia_m2 != null ? EuroformatEuro(kpi.referencia_m2) : '—'} onInfo={() => openInfo('€/m² (ref.)', 'referencia_m2')} />
+
+            {/* ❌ Eliminado: €/m² (ref.) */}
 
             <KpiCard title="Renta €/m²/año" value={kpi.renta_m2_anual != null ? EuroformatEuro(kpi.renta_m2_anual) : '—'} onInfo={() => openInfo('Renta €/m²/año', 'renta_m2_anual')} />
             <KpiCard title="€/m² (inv. total)" value={kpi.inversion_m2 != null ? EuroformatEuro(kpi.inversion_m2) : '—'} onInfo={() => openInfo('€/m² (inv. total)', 'inversion_m2')} />
@@ -460,7 +472,6 @@ function SwitchPill({
     </TouchableOpacity>
   );
 }
-
 
 function KpiCard({ title, value, onInfo }: { title: string; value: string; onInfo: () => void }) {
   return (

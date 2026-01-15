@@ -45,6 +45,14 @@ class BreakdownOut(BaseModel):
 
 
 class KpisOut(BaseModel):
+    """
+    KPIs por patrimonio según selector de periodo.
+
+    Nota:
+    - V3: el front (PropiedadKpisScreen.tsx) espera varios campos adicionales.
+    - Mantengo compatibilidad con lo ya existente y amplío para cubrir KPIs visibles.
+    """
+
     year: int
     meses_contados: int
 
@@ -62,8 +70,27 @@ class KpisOut(BaseModel):
     cashflow_anual: float
     cashflow_mensual: float
 
+    # -------------------------
+    # KPIs adicionales (Pantalla Propiedad KPIs)
+    # -------------------------
+    payback_anios: Optional[float] = None
+
+    # €/m² y derivados
+    precio_m2: Optional[float] = None           # €/m² compra
+    referencia_m2: Optional[float] = None       # €/m² referencia (si se usa)
+    renta_m2_anual: Optional[float] = None      # €/m²/año (renta)
+    inversion_m2: Optional[float] = None        # €/m² inversión total
+    rentab_m2_total_pct: Optional[float] = None # % rentab (bruta) sobre inversión total
+
+    # Deuda / cobertura
+    deuda_anual: float = 0.0
     dscr: Optional[float] = None
+
+    # Ocupación
     ocupacion_pct: Optional[float] = None
+
+    # NUEVO: KPI solicitado para sustituir “€/m² (ref.)”
+    rendimiento_neto_pct: Optional[float] = None
 
     # Diccionario de explicaciones “human friendly”
     info: Dict[str, str] = Field(default_factory=dict)
