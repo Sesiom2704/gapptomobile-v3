@@ -23,6 +23,19 @@
 // - Se intenta localizar por tipo_detalle (o alias) incluyendo: "AHORRO" y "AHO-12345".
 // - Se muestra como valor positivo (plus) en tooltip (puedes cambiarlo si tu backend lo define distinto).
 // -----------------------------------------------------------------------------
+//
+// ✅ CAMBIO SOLICITADO (InfoButton + InfoModal):
+// - Se añade el botón de información (icono "i") en cada sección principal:
+//   * Resumen
+//   * Tendencia
+//   * Ingresos vs Gastos
+//   * Por segmentos
+// - Cada "i" abre un modal con una descripción breve y clara de la sección.
+// - No se modifica lógica de negocio ni se elimina ninguna funcionalidad.
+//
+// Nota de UX:
+// - Se usa el componente reutilizable InfoModal ya existente (mismo patrón que el ejemplo).
+// -----------------------------------------------------------------------------
 
 import React, { useCallback, useMemo, useState } from 'react';
 import {
@@ -45,6 +58,9 @@ import { colors } from '../../theme/colors';
 
 import { cierreMensualApi, CierreMensual, CierreMensualDetalle } from '../../services/cierreMensualApi';
 import { EuroformatEuro } from '../../utils/format';
+
+// ✅ Info (botón i + modal reutilizable)
+import { InfoButton, InfoModal, useInfoModal } from '../../components/ui/InfoModal';
 
 // --------------------
 // Tipos locales
@@ -292,6 +308,9 @@ const CierreKpiScreen: React.FC = () => {
   const [loading, setLoading] = useState(false);
   const [resp, setResp] = useState<CierreMensualKpisResponse | null>(null);
 
+  // ✅ Info modal (patrón reutilizable como en el ejemplo)
+  const info = useInfoModal();
+
   // Filtro para tendencia
   const [trendMetric, setTrendMetric] = useState<TrendMetric>('resultado');
 
@@ -365,7 +384,8 @@ const CierreKpiScreen: React.FC = () => {
     const resultadoMedio = n ? resultado / n : 0;
     const desvMedia = n ? desv / n : 0;
 
-    const trendResultado = n >= 2 ? safeNum((cierres[n - 1] as any).resultado_real) - safeNum((cierres[0] as any).resultado_real) : 0;
+    const trendResultado =
+      n >= 2 ? safeNum((cierres[n - 1] as any).resultado_real) - safeNum((cierres[0] as any).resultado_real) : 0;
 
     return { n, ingresos, gastos, resultado, desv, resultadoMedio, desvMedia, trendResultado };
   }, [cierresAsc]);
@@ -441,6 +461,22 @@ const CierreKpiScreen: React.FC = () => {
     return 'Cotidianos';
   }
 
+  // --------------------
+  // Header de sección con InfoButton (mismo patrón que el ejemplo)
+  // --------------------
+  const SectionHeader = ({
+    title,
+    onInfo,
+  }: {
+    title: string;
+    onInfo: () => void;
+  }) => (
+    <View style={styles.sectionHeaderRow}>
+      <Text style={panelStyles.sectionTitle}>{title}</Text>
+      <InfoButton align="title" onPress={onInfo} />
+    </View>
+  );
+
   return (
     <>
       <Header title="KPIs de cierres" subtitle={subtitle} showBack />
@@ -448,7 +484,15 @@ const CierreKpiScreen: React.FC = () => {
       <View style={panelStyles.screen}>
         <ScrollView contentContainerStyle={panelStyles.scrollContent}>
           <View style={panelStyles.section}>
-            <Text style={panelStyles.sectionTitle}>Resumen</Text>
+            <SectionHeader
+              title="Resumen"
+              onInfo={() =>
+                info.open(
+                  'Resumen',
+                  'Vista rápida de los KPIs agregados de los últimos cierres (máximo 12): ingresos, gastos, resultado y desviación. Incluye una lectura rápida de la tendencia del resultado.'
+                )
+              }
+            />
 
             {loading && (
               <View style={{ paddingVertical: 14 }}>
@@ -537,7 +581,15 @@ const CierreKpiScreen: React.FC = () => {
           {/* Tendencia (LineChart) con tooltip */}
           {!loading && hasData && (
             <View style={panelStyles.section}>
-              <Text style={panelStyles.sectionTitle}>Tendencia</Text>
+              <SectionHeader
+                title="Tendencia"
+                onInfo={() =>
+                  info.open(
+                    'Tendencia',
+                    'Evolución mensual (línea) del indicador seleccionado: Resultado, Ingresos o Gastos. Puedes tocar un punto para ver el mes y el importe exacto.'
+                  )
+                }
+              />
 
               <View style={panelStyles.card}>
                 <Text style={panelStyles.cardTitle}>{metricTitle(trendMetric)}</Text>
@@ -626,7 +678,15 @@ const CierreKpiScreen: React.FC = () => {
           {/* Comparativa (Barras tappable) */}
           {!loading && hasData && (
             <View style={panelStyles.section}>
-              <Text style={panelStyles.sectionTitle}>Ingresos vs Gastos</Text>
+              <SectionHeader
+                title="Ingresos vs Gastos"
+                onInfo={() =>
+                  info.open(
+                    'Ingresos vs Gastos',
+                    'Comparativa mensual con dos barras por mes: ingresos (barra principal) y gastos (barra secundaria, en valor absoluto). Toca una barra para ver el importe exacto.'
+                  )
+                }
+              />
 
               <View style={panelStyles.card}>
                 <Text style={panelStyles.cardTitle}>Comparativa mensual</Text>
@@ -634,12 +694,7 @@ const CierreKpiScreen: React.FC = () => {
                   Dos barras por mes. Toca una barra para ver la cifra.
                 </Text>
 
-                <TappableBarsComparativa
-                  labels={labels}
-                  ingresos={serieIngresos}
-                  gastosAbs={serieGastosAbs}
-                  maxWidth={chartWidth}
-                />
+                <TappableBarsComparativa labels={labels} ingresos={serieIngresos} gastosAbs={serieGastosAbs} maxWidth={chartWidth} />
               </View>
             </View>
           )}
@@ -647,7 +702,15 @@ const CierreKpiScreen: React.FC = () => {
           {/* Segmentos (LineChart) con tooltip */}
           {!loading && hasData && (
             <View style={[panelStyles.section, { marginBottom: 24 }]}>
-              <Text style={panelStyles.sectionTitle}>Por segmentos</Text>
+              <SectionHeader
+                title="Por segmentos"
+                onInfo={() =>
+                  info.open(
+                    'Por segmentos',
+                    'Desglose del gasto real por segmento (Cotidianos, Viviendas, Gestionables y Ahorro). Se muestra en valor absoluto para una lectura uniforme. Toca un punto para ver el importe y el segmento.'
+                  )
+                }
+              />
 
               <View style={panelStyles.card}>
                 <Text style={panelStyles.cardTitle}>Gasto real por segmento</Text>
@@ -768,6 +831,9 @@ const CierreKpiScreen: React.FC = () => {
             </View>
           )}
         </ScrollView>
+
+        {/* ✅ Modal global (misma integración que el ejemplo) */}
+        <InfoModal visible={info.visible} title={info.title} text={info.text} onClose={info.close} />
       </View>
     </>
   );
@@ -779,6 +845,13 @@ export default CierreKpiScreen;
 // Estilos
 // --------------------
 const styles = StyleSheet.create({
+  // ✅ Header row para título + botón info
+  sectionHeaderRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
+
   // Mini-cards estilo Home
   summaryRowTop: {
     flexDirection: 'row',
