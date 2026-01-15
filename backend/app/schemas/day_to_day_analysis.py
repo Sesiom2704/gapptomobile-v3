@@ -22,8 +22,25 @@ class WeekSummary(BaseModel):
 
 
 class MonthSummary(BaseModel):
+    """
+    Resumen mensual.
+
+    Compatibilidad:
+    - Se mantienen 'presupuesto_mes' y 'gastado_mes' tal como existían.
+      'gastado_mes' sigue representando el gasto del mes RESPETANDO el filtro 'pago'
+      (YO/OTRO/TODOS) para no cambiar semántica del endpoint.
+    - Se añaden nuevos campos para el split real (sin depender de 'pago'):
+        * total_mes: total sin filtrar por pagado
+        * pagado_mes: pagado=True
+        * invitado_mes: pagado=False
+    """
     presupuesto_mes: float
     gastado_mes: float
+
+    # ✅ NUEVO split real (no rompe a clientes existentes)
+    total_mes: float = 0.0
+    pagado_mes: float = 0.0
+    invitado_mes: float = 0.0
 
 
 class CategoryMonth(BaseModel):

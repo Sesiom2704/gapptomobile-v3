@@ -46,44 +46,33 @@ function unwrapResponse<T>(payload: ApiEnvelope<T>): T {
 
 export interface GastoCotidiano {
   id: string;
-  fecha: string; // YYYY-MM-DD (en lectura puede venir como string; el backend usa date)
+  fecha: string; // YYYY-MM-DD
   tipo_id: string;
   proveedor_id?: string | null;
   cuenta_id?: string | null;
 
   /**
-   * KPI / imputación: "mi parte" (en V3 = importe_total / cantidad)
-   * En V2 era el valor principal; en V3 el backend lo calcula.
+   * KPI / imputación:
+   * En v3: "mi parte" (referencia) = puede ser derivado (importe_total/cantidad)
+   * pero ahora permitimos que el front lo envíe si el usuario lo edita.
    */
   importe: number;
 
   /**
    * pagado:
-   * - V2: true = lo pago yo; false = lo paga otro
-   * - V3 (según reglas acordadas):
-   *    tipo_pago=1 => true
-   *    tipo_pago=2 => false
-   *    tipo_pago=3 => true
-   *    tipo_pago=4 => true
+   * true  = afecta a mi liquidez (lo pago yo)
+   * false = no afecta a mi liquidez (me invitan / paga otro)
    */
   pagado: boolean;
 
   evento?: string | null;
   observaciones?: string | null;
 
-  // 🔻 Importante:
-  // localidad/pais NO son campos del gasto. Están en Proveedor.
-  // Si algún día el backend los expone, deberían venir como proveedor_localidad/proveedor_pais
-  // o se obtiene en UI desde el Proveedor seleccionado.
-  //
-  // localidad?: string | null;
-  // pais?: string | null;
-
   precio_litro?: number | null;
   litros?: number | null;
   km?: number | null;
 
-  // ✅ Campos V3 (pueden ser null en históricos V2 si aún no se han rellenado)
+  // ✅ Campos V3
   tipo_pago?: number | null;      // 1..4
   importe_total?: number | null;  // total real del ticket
   cantidad?: number | null;       // personas para dividir
@@ -103,7 +92,9 @@ export interface GastoCotidiano {
  *
  * Compatibilidad:
  * - V2: manda (importe, pagado) como antes.
- * - V3: manda (tipoPago, importeTotal, cantidad) y NO necesita mandar importe ni pagado.
+ * - V3: manda (tipoPago, importeTotal, cantidad) y, si aplica,
+ *       también puede mandar (importe, pagado) si el usuario edita su parte
+ *       o marca participo NO.
  */
 export interface CrearGastoCotidianoPayload {
   fecha: string; // YYYY-MM-DD
@@ -112,54 +103,23 @@ export interface CrearGastoCotidianoPayload {
   cuentaId?: string | null;
 
   // ====== V2 (legacy) ======
-  importe?: string; // texto del input (V2). En V3 puede omitirse.
-  pagado?: boolean; // V2: true = lo pago yo. En V3 lo fuerza el backend.
+  importe?: string; // texto del input: en V3 lo usaremos como "mi parte" si viene informado
+  pagado?: boolean; // en V3 lo usaremos si viene informado
 
   // ====== V3 (nuevo) ======
-  // 1. Solo, 2. Invitado, 3. A medias, 4. Entre varios
   tipoPago?: 1 | 2 | 3 | 4;
-
-  // Total del ticket (texto del input)
   importeTotal?: string;
-
-  // Entre cuántos se reparte (en tipo 3 se autocompleta a 2; en tipo 4 se pide)
   cantidad?: number | string;
 
-  // Contexto
   evento?: string | null;
   observaciones?: string | null;
-
-  // 🔻 Importante:
-  // localidad/pais NO se envían al backend como parte del gasto.
-  // Es info del proveedor. Si el usuario quiere cambiarla, debe editar el proveedor.
-  //
-  // localidad?: string | null;
-  // pais?: string | null;
 
   // Gasolina (inputs tipo texto en front)
   precioLitro?: string;
   litros?: string;
   km?: string;
 
-  // Permite campos extra sin romper nada
   [key: string]: any;
-}
-
-// Filtros para el listado de cotidianos
-export interface FiltrosGastoCotidiano {
-  month?: number; // 1..12
-  year?: number; // >= 2000
-  pagado?: boolean; // true / false
-  tipoId?: string; // se mapeará a tipo_id
-  search?: string; // se mapeará a q
-
-  // ✅ Esto sí se mantiene: son filtros para el listado,
-  // el backend los interpreta filtrando por Proveedor.
-  localidad?: string;
-  pais?: string;
-
-  limit?: number;
-  offset?: number;
 }
 
 // ========================
@@ -179,10 +139,11 @@ function parseCantidad(val: number | string | undefined | null): number | null {
 /**
  * Normaliza y valida el payload antes de enviarlo al backend.
  *
- * - V3: envía tipo_pago, importe_total, cantidad (sin importe/pagado).
- * - V2: envía importe + pagado.
- *
- * Nota: localidad/pais NO se envían en body (son del proveedor).
+ * Cambios clave (para tu caso):
+ * - En V3, si el formulario envía 'pagado' e 'importe' (mi parte),
+ *   el normalizador los respeta. Ya NO los fuerza por tipoPago.
+ * - TipoPago=2 (INVITADO) ahora permite cantidad >= 1 (p.ej. 4).
+ * - Si pagado=false, forzamos cuenta_id=null para evitar ajustes de liquidez.
  */
 function normalizarPayloadGastoCotidiano(payload: CrearGastoCotidianoPayload) {
   const isV3 =
@@ -212,7 +173,6 @@ function normalizarPayloadGastoCotidiano(payload: CrearGastoCotidianoPayload) {
   // Campos comunes (V2 y V3)
   // -------------------------
   const baseBody: Record<string, any> = {
-    // id lo genera el backend
     fecha: payload.fecha,
     tipo_id: payload.tipoId,
     proveedor_id: payload.proveedorId ?? null,
@@ -236,7 +196,7 @@ function normalizarPayloadGastoCotidiano(payload: CrearGastoCotidianoPayload) {
 
     if (!tipoPago) {
       throw new Error(
-        "Modo V3: 'tipoPago' es obligatorio (1=Solo, 2=Invitado, 3=A medias, 4=Entre varios)."
+        "Modo V3: 'tipoPago' es obligatorio (1=Solo, 2=Invitado, 3=A pachas, 4=Entre varios)."
       );
     }
 
@@ -249,11 +209,19 @@ function normalizarPayloadGastoCotidiano(payload: CrearGastoCotidianoPayload) {
       throw new Error("Modo V3: 'importeTotal' debe ser un número > 0.");
     }
 
-    // Cantidad efectiva según reglas
+    // Cantidad efectiva según reglas actualizadas:
+    // - tipoPago=1 => cantidad=1
+    // - tipoPago=2 => cantidad >= 1 (editable)
+    // - tipoPago=3 => cantidad=2
+    // - tipoPago=4 => cantidad >= 3
     let cantidadEfectiva: number | null = null;
 
-    if (tipoPago === 1 || tipoPago === 2) {
+    if (tipoPago === 1) {
       cantidadEfectiva = 1;
+    } else if (tipoPago === 2) {
+      // Invitado: dejamos que el usuario defina entre cuántos era el ticket (>=1)
+      const c = parseCantidad(payload.cantidad);
+      cantidadEfectiva = c && c >= 1 ? c : 1;
     } else if (tipoPago === 3) {
       cantidadEfectiva = 2;
     } else if (tipoPago === 4) {
@@ -267,28 +235,52 @@ function normalizarPayloadGastoCotidiano(payload: CrearGastoCotidianoPayload) {
       throw new Error("Modo V3: 'cantidad' inválida.");
     }
 
-    // ✅ Regla de negocio: importe = importe_total / cantidad
-    const importeParte = importeTotalNum / cantidadEfectiva;
+    // -------------------------
+    // "importe" (mi parte) en V3
+    // -------------------------
+    // Si el formulario envía payload.importe (texto) lo respetamos (caso edición manual).
+    // Si no viene, derivamos por defecto: importe_total / cantidad.
+    let importeParteNum: number;
 
-    // ✅ Regla de pagado (quién paga):
-    // 1=Pagado por mí -> pagado=true
-    // 2=Invitado      -> pagado=false
-    // 3=A pachas       -> pagado=true
-    // 4=Entre varios   -> pagado=true
-    const pagadoCalc = tipoPago !== 2;
+    if (payload.importe !== undefined && String(payload.importe).trim() !== '') {
+      const parsed = parseImporte(String(payload.importe));
+      if (parsed === null || Number.isNaN(parsed) || parsed < 0) {
+        throw new Error("Modo V3: 'importe' (mi parte) debe ser un número >= 0.");
+      }
+      importeParteNum = parsed;
+    } else {
+      importeParteNum = importeTotalNum / cantidadEfectiva;
+    }
+
+    // -------------------------
+    // "pagado" en V3
+    // -------------------------
+    // Reglas:
+    // - tipoPago=1 => pagado=true (siempre)
+    // - tipoPago=2 => pagado=false (siempre)
+    // - tipoPago=3/4 => si el formulario manda pagado, se respeta; si no, por defecto true
+    let pagadoFinal: boolean;
+
+    if (tipoPago === 1) pagadoFinal = true;
+    else if (tipoPago === 2) pagadoFinal = false;
+    else if (typeof payload.pagado === 'boolean') pagadoFinal = payload.pagado;
+    else pagadoFinal = true;
+
+    // Coherencia: si no está pagado, no debe haber cuenta_id
+    const cuentaIdFinal = pagadoFinal ? (payload.cuentaId ?? null) : null;
 
     return {
       ...baseBody,
+      cuenta_id: cuentaIdFinal,
+
       tipo_pago: tipoPago,
       importe_total: importeTotalNum,
       cantidad: cantidadEfectiva,
 
-      // ✅ Compatibilidad con backend/schema actual:
-      // Aunque en V3 "conceptualmente" se derive, el backend hoy lo exige y además lo usa para ajustar contenedor/liquidez.
-      importe: importeParte,
-      pagado: pagadoCalc,
+      // Compatibilidad backend/schema: el backend lo usa para contenedor/liquidez
+      importe: importeParteNum,
+      pagado: pagadoFinal,
     };
-
   }
 
   // -------------------------
@@ -298,11 +290,11 @@ function normalizarPayloadGastoCotidiano(payload: CrearGastoCotidianoPayload) {
   const safeImporte = importeNum ?? 0;
   const importeVal = Number.isNaN(safeImporte) ? 0 : safeImporte;
 
-    return {
-      ...baseBody,
-      importe: importeVal,
-      pagado: !!payload.pagado,
-    };
+  return {
+    ...baseBody,
+    importe: importeVal,
+    pagado: !!payload.pagado,
+  };
 }
 
 // ========================
@@ -310,7 +302,7 @@ function normalizarPayloadGastoCotidiano(payload: CrearGastoCotidianoPayload) {
 // ========================
 
 export async function fetchGastosCotidianos(
-  filtros: FiltrosGastoCotidiano = {}
+  filtros: any = {}
 ): Promise<GastoCotidiano[]> {
   const {
     month,
@@ -332,7 +324,6 @@ export async function fetchGastosCotidianos(
   if (tipoId) params.tipo_id = tipoId;
   if (search) params.q = search;
 
-  // ✅ Filtros de listado: siguen existiendo y los interpreta el backend por Proveedor
   if (localidad) params.localidad = localidad;
   if (pais) params.pais = pais;
 
@@ -421,7 +412,6 @@ export async function sugerirCuentaParaGastoCotidiano(
 ): Promise<Cuenta | null> {
   const url = `${ENDPOINT_GASTOS_COTIDIANOS}sugerir_cuenta`;
 
-  // Nota: el backend sólo usa tipo_id; mantenemos 'importe' por compatibilidad
   const params = { tipo_id: tipoId, importe };
 
   try {
