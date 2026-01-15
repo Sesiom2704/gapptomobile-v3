@@ -493,7 +493,19 @@ def create_gasto_cotidiano(
     current_user: models.User = Depends(require_user),
 ):
     payload = gasto_in.model_dump()
-    payload["pagado"] = bool(payload.get("pagado"))
+
+    # --- Robustez v3/v2: si "pagado" no llega en la request, lo inferimos de cuenta_id ---
+    # - Si hay cuenta_id => pagado=True
+    # - Si cuenta_id es None => pagado=False
+    # Esto evita que defaults del schema o clients que omiten falsy te metan pagado=True por accidente.
+    if "pagado" not in payload or payload.get("pagado") is None:
+        payload["pagado"] = bool(payload.get("cuenta_id"))
+    else:
+        payload["pagado"] = bool(payload.get("pagado"))
+
+    # Coherencia: si NO está pagado (no participo), nunca debe haber cuenta_id
+    if not payload["pagado"]:
+        payload["cuenta_id"] = None
 
     if payload.get("tipo_id") is not None:
         payload["tipo_id"] = normalize_upper(payload["tipo_id"])
