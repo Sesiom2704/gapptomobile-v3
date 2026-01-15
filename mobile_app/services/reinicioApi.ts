@@ -19,7 +19,7 @@
 
 
 import { api } from './api';
-import { cierreMensualApi, type CierreMensual } from './cierreMensualApi';
+import { generarCierreMensual, type CierreMensual } from './cierreCore';
 
 // -----------------------------
 // Tipos (alineados con backend mostrado)
@@ -237,7 +237,7 @@ export const reinicioApi = {
   //
   // Lo mantenemos para no romper otras pantallas.
   async postGenerarCierre(payload?: GenerarCierreRequest): Promise<CierreMensual> {
-    const res = await cierreMensualApi.generar({
+    const res = await generarCierreMensual({
       force: !!payload?.force,
       userId: payload?.user_id,
     });

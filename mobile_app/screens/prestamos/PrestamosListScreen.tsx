@@ -5,10 +5,9 @@
  *   - Listar préstamos con búsqueda y filtros (estado / vencen mes).
  *   - Permitir navegación a detalle y a alta (form).
  *
- * Cambios (respecto a tu versión):
- *   - Reemplaza el render basado en ListRow por UnifiedAssetCard.
- *   - Mantiene: búsqueda, filtros, refresco, navegación, formato de importes.
- *   - No se añade ActionSheet aquí para no introducir endpoints no confirmados (no se pierde funcionalidad).
+ * ✅ Mejora:
+ *   - Back inteligente: si vienes desde Home (returnToTab/HomeTab), vuelve a Home.
+ *   - Soporta initialFiltro (por ejemplo, entrar directo en "Activos").
  */
 
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
@@ -22,7 +21,7 @@ import {
   StyleSheet,
   Alert,
 } from 'react-native';
-import { useNavigation } from '@react-navigation/native';
+import { useNavigation, useRoute } from '@react-navigation/native';
 
 import { Screen } from '../../components/layout/Screen';
 import { Header } from '../../components/layout/Header';
@@ -34,7 +33,11 @@ import { prestamosApi } from '../../services/prestamosApi';
 
 import UnifiedAssetCard from '../../components/cards/UnifiedAssetCard';
 
-type EstadoFiltro = 'ACTIVOS' | 'VENCEN_MES' | 'CANCELADOS' | 'INACTIVOS';
+// Tipos del stack
+import type { PrestamosStackParamList, EstadoFiltro } from '../../navigation/PrestamosStacks';
+import type { RouteProp } from '@react-navigation/native';
+
+type PrestamosListRoute = RouteProp<PrestamosStackParamList, 'PrestamosList'>;
 
 type PrestamoItem = {
   id: string;
@@ -64,11 +67,6 @@ const FILTROS: { key: EstadoFiltro; label: string }[] = [
 
 const n = (v: any) => (v == null || v === '' ? 0 : Number(v));
 
-/**
- * Formatea importes usando utils/format.ts:
- * - admite number|string|null
- * - soporta "1.234,56" / "1234.56" / etc.
- */
 const fmtEur = (v: number | string | null | undefined) => {
   const num = parseEuroToNumber(v ?? null);
   if (num == null || !Number.isFinite(num)) return '—';
@@ -77,6 +75,12 @@ const fmtEur = (v: number | string | null | undefined) => {
 
 export default function PrestamosListScreen() {
   const navigation = useNavigation<any>();
+  const route = useRoute<PrestamosListRoute>();
+
+  // Params opcionales (pueden venir undefined)
+  const initialFiltro = route.params?.initialFiltro;
+  const returnToTab = route.params?.returnToTab;
+  const returnToScreen = route.params?.returnToScreen;
 
   const [q, setQ] = useState('');
   const [filtro, setFiltro] = useState<EstadoFiltro>('ACTIVOS');
@@ -86,6 +90,14 @@ export default function PrestamosListScreen() {
 
   const [items, setItems] = useState<PrestamoItem[]>([]);
 
+  // ✅ Aplica filtro inicial solo al entrar (sin interferir con el uso normal)
+  useEffect(() => {
+    if (initialFiltro && initialFiltro !== filtro) {
+      setFiltro(initialFiltro);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [initialFiltro]);
+
   const title = useMemo(() => {
     if (filtro === 'ACTIVOS') return 'Préstamos · Activos';
     if (filtro === 'CANCELADOS') return 'Préstamos · Cancelados';
@@ -93,10 +105,18 @@ export default function PrestamosListScreen() {
     return 'Préstamos · Vencen mes';
   }, [filtro]);
 
-  // ✅ Volver atrás: siempre a Patrimonio
+  /**
+   * ✅ Back inteligente:
+   * - Si tenemos returnToTab + returnToScreen, volvemos al origen (ej: Home).
+   * - Si no, mantenemos el comportamiento histórico: volver a Patrimonio.
+   */
   const handleBack = useCallback(() => {
+    if (returnToTab && returnToScreen) {
+      navigation.navigate(returnToTab, { screen: returnToScreen });
+      return;
+    }
     navigation.navigate('PatrimonyTab', { screen: 'PatrimonyHomeScreen' });
-  }, [navigation]);
+  }, [navigation, returnToTab, returnToScreen]);
 
   const load = useCallback(
     async (showSpinner: boolean) => {
@@ -221,8 +241,6 @@ export default function PrestamosListScreen() {
                   title={String(item.nombre ?? '—')}
                   subtitle={String(item.estado ?? '—')}
                   active={active}
-                  // En préstamos no hay "cifra del filtro" en el header actualmente.
-                  // Si quisieras, podríamos poner TIN como headerValue, pero mantengo UI conservadora.
                   headerValue={undefined}
                   rows={cardRows}
                   onPress={() => goDetalle(item.id)}

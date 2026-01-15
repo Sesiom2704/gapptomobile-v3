@@ -73,6 +73,23 @@
  * NUEVO (usuario):
  * - Al pulsar fuera del buscador avanzado (lista / scroll), se pliega.
  *   * Implementado al interactuar con la lista (touch/scroll) en gestionables y cotidianos.
+ *
+ * NUEVO (usuario - COLORES TARJETAS):
+ * - Las tarjetas de listados cambian el fondo según estado/segmento:
+ *   - Gestionables:
+ *       * Pendientes: blanco (por defecto)
+ *       * Pendientes + segmento COTI-12345: color suave alternativo
+ *       * Omitido: color suave
+ *       * Inactivo: letras rojas + fondo rojo claro
+ *       * Activo y pagado (filtro "Todos"): color suave (ej. verde claro)
+ *   - Cotidianos:
+ *       * Estándar: blanco
+ *       * Invitado (pagado=false): naranjita suave
+ *
+ * NOTA IMPORTANTE:
+ * - Para que esto funcione, ExpenseCard debe aceptar prop backgroundColor.
+ * - Y theme/colors.ts debe incluir tokens: colors.cardBgDefault, cardBgOmitted, cardBgInactive,
+ *   cardBgPaid, cardBgPendingAlt, cardBgGuest (propuesto anteriormente).
  */
 
 import React, { useMemo, useState, useEffect, useCallback, useRef } from 'react';
@@ -107,7 +124,7 @@ import {
   TipoGasto,
   Proveedor,
   fetchProveedores,
-  // ✅ NUEVO: omisión mensual (gestionables)
+  // ✅ omisión mensual (gestionables)
   omitirGastoEsteMes,
   deshacerOmisionGastoEsteMes,
 } from '../../services/gastosApi';
@@ -127,7 +144,7 @@ import { useGastos } from '../../hooks/useGastos';
 import { listStyles as styles } from '../../components/list/listStyles';
 import screenStyles from '../styles/screenStyles';
 
-// ✅ NUEVO: API para comprobar ingresos pendientes (misma base que IngresoListScreen)
+// ✅ API para comprobar ingresos pendientes (misma base que IngresoListScreen)
 import { api } from '../../services/api';
 
 // Tipo local que amplía FiltroGastos con 'cotidiano'
@@ -144,10 +161,9 @@ type KpiFiltro = 'todos' | 'si' | 'no';
 type FiltroPagado = 'todos' | 'pagado' | 'no_pagado';
 type FiltroSegmento = 'todos' | string;
 type FiltroTipoGasto = 'todos' | string;
-// ✅ NUEVO: filtro de omisión (gestionables)
 type FiltroOmitido = 'todos' | 'omitidos' | 'no_omitidos';
 
-// ✅ NUEVO (usuario): filtro cuenta bancaria (gestionables)
+// ✅ filtro cuenta bancaria (gestionables)
 type FiltroCuentaBancaria = 'todos' | string;
 
 // filtro de quién paga en cotidianos
@@ -244,6 +260,16 @@ function normalizarPagadoComoQuienPaga(g: GastoCotidiano): boolean | null {
 }
 
 /**
+ * ✅ NUEVO: Normalizador de texto para búsquedas (acentos/diacríticos).
+ * Motivo: "Málaga" debe coincidir si el usuario escribe "malaga".
+ */
+function normalizeText(v: unknown): string {
+  const s = (v ?? '').toString().trim().toLowerCase();
+  // NFD separa letras/acentos y luego se eliminan los diacríticos
+  return s.normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+}
+
+/**
  * ✅ NUEVO (usuario): extracción defensiva de cuenta bancaria desde un Gasto.
  * - El label (texto de botón) debe ser SOLO el anagrama: cuentas_bancarias_anagrama.
  * - Fallback defensivo para evitar botones vacíos si no llega el campo.
@@ -251,7 +277,6 @@ function normalizarPagadoComoQuienPaga(g: GastoCotidiano): boolean | null {
 function getCuentaBancariaFromGasto(g: Gasto): { id: string; anagrama: string } | null {
   const anyG: any = g as any;
 
-  // IDs más habituales
   const rawId =
     anyG.cuenta_bancaria_id ??
     anyG.cuenta_id ??
@@ -274,11 +299,45 @@ function getCuentaBancariaFromGasto(g: Gasto): { id: string; anagrama: string } 
     anyG.cuentaBancariaAnagrama;
 
   const anagrama = (rawAnagrama ? String(rawAnagrama) : '').trim();
-
-  // Fallback defensivo (si quieres que NO se muestre sin anagrama, lo cambiamos)
   const safeLabel = anagrama || `Cuenta ${id}`;
 
   return { id, anagrama: safeLabel };
+}
+
+/**
+ * ✅ NUEVO (usuario): reglas de color de tarjeta para gestionables.
+ * Prioridades (para evitar inconsistencias):
+ * 1) Inactivo
+ * 2) Omitido
+ * 3) Pagado (solo en "Todos")
+ * 4) Pendiente + segmento COTI
+ * 5) Default
+ */
+function getGestionableCardBg(g: Gasto, filtro: FiltroLista): string {
+  if (g.activo === false) return colors.cardBgInactive;
+  if (g.omitido_este_mes === true) return colors.cardBgOmitted;
+
+  // En "Todos" queremos destacar el "pagado/activo"
+  if (filtro === 'todos' && g.pagado === true) return colors.cardBgPaid;
+
+  // Pendientes: blanco, excepto COTI-12345 (o variantes)
+  const cotiIds = new Set(['COTI-12345', 'COT-12345']);
+  if (filtro === 'pendientes' && g.segmento_id && cotiIds.has(String(g.segmento_id).trim())) {
+    return colors.cardBgPendingAlt;
+  }
+
+  return colors.cardBgDefault;
+}
+
+/**
+ * ✅ NUEVO (usuario): reglas de color para cotidianos.
+ * - Estándar: blanco
+ * - Invitado (pagado=false): naranjita suave
+ */
+function getCotidianoCardBg(g: GastoCotidiano): string {
+  const pagado = normalizarPagadoComoQuienPaga(g);
+  if (pagado === false) return colors.cardBgGuest;
+  return colors.cardBgDefault;
 }
 
 export const GastosListScreen: React.FC<{ navigation: any; route: any }> = ({
@@ -332,10 +391,10 @@ export const GastosListScreen: React.FC<{ navigation: any; route: any }> = ({
   const [filtroPeriodicidad, setFiltroPeriodicidad] =
     useState<PeriodicidadFiltro>('todos');
 
-  // ✅ NUEVO: filtro de omisión (gestionables)
+  // ✅ filtro de omisión (gestionables)
   const [filtroOmitido, setFiltroOmitido] = useState<FiltroOmitido>('todos');
 
-  // ✅ NUEVO (usuario): filtro por cuenta bancaria (gestionables)
+  // ✅ filtro por cuenta bancaria (gestionables)
   const [filtroCuentaBancaria, setFiltroCuentaBancaria] =
     useState<FiltroCuentaBancaria>('todos');
 
@@ -346,10 +405,7 @@ export const GastosListScreen: React.FC<{ navigation: any; route: any }> = ({
   const [showEstadoFilter, setShowEstadoFilter] = useState(false);
   const [showActivoFilter, setShowActivoFilter] = useState(false);
   const [showKpiFilter, setShowKpiFilter] = useState(false);
-  // ✅ NUEVO
   const [showOmitidoFilter, setShowOmitidoFilter] = useState(false);
-
-  // ✅ NUEVO (usuario)
   const [showCuentaBancariaFilter, setShowCuentaBancariaFilter] = useState(false);
 
   const [tiposGasto, setTiposGasto] = useState<TipoGasto[]>([]);
@@ -373,7 +429,7 @@ export const GastosListScreen: React.FC<{ navigation: any; route: any }> = ({
   );
 
   /**
-   * ✅ NUEVO: Hook de gastos PENDIENTES (siempre), para poder habilitar Reiniciar mes
+   * ✅ Hook de gastos PENDIENTES (siempre), para poder habilitar Reiniciar mes
    * aunque estemos viendo "Todos" o "Cotidianos".
    */
   const {
@@ -412,7 +468,7 @@ export const GastosListScreen: React.FC<{ navigation: any; route: any }> = ({
   >(null);
 
   // ============================
-  // ✅ NUEVO: ingresos pendientes (para habilitar Reiniciar mes y estado vacío inteligente)
+  // ✅ ingresos pendientes (para habilitar Reiniciar mes y estado vacío inteligente)
   // ============================
   const [ingresosPendientesCount, setIngresosPendientesCount] = useState<number | null>(
     null
@@ -436,7 +492,7 @@ export const GastosListScreen: React.FC<{ navigation: any; route: any }> = ({
   }, []);
 
   // ============================
-  // ✅ NUEVO: eligibility "Reiniciar mes"
+  // ✅ eligibility "Reiniciar mes"
   // ============================
   const gastosPendientesCount = gastosPendientes?.length ?? 0;
 
@@ -530,7 +586,7 @@ export const GastosListScreen: React.FC<{ navigation: any; route: any }> = ({
     return Array.from(map.entries()).map(([id, nombre]) => ({ id, nombre }));
   }, [gastos]);
 
-  // ✅ NUEVO (usuario): cuentas bancarias disponibles detectadas desde los propios gastos
+  // ✅ cuentas bancarias disponibles detectadas desde los propios gastos
   const cuentasBancariasDisponibles = useMemo(() => {
     const map = new Map<string, string>();
 
@@ -699,7 +755,7 @@ export const GastosListScreen: React.FC<{ navigation: any; route: any }> = ({
         if (filtroOmitido === 'no_omitidos' && isOmitido) return false;
       }
 
-      // ✅ NUEVO (usuario): filtro por cuenta bancaria
+      // ✅ filtro por cuenta bancaria
       if (filtroCuentaBancaria !== 'todos') {
         const cuenta = getCuentaBancariaFromGasto(g);
         if (!cuenta) return false;
@@ -767,22 +823,39 @@ export const GastosListScreen: React.FC<{ navigation: any; route: any }> = ({
   // ======= Filtros LOCALES para cotidianos =======
   const aplicarFiltrosCotidianos = useMemo(() => {
     return (lista: GastoCotidiano[]): GastoCotidiano[] => {
-      const term = searchText.trim().toLowerCase();
+      const term = searchText.trim();
 
       return lista.filter((g) => {
+        // ✅ FIX: búsqueda robusta por localidad (y otros campos) con normalización (acentos)
         if (term.length > 0) {
+          const termN = normalizeText(term);
+
           const proveedorNombre =
             (g as any).proveedor_nombre ??
             (g.proveedor_id
               ? mapaProveedoresPorId.get(String(g.proveedor_id).trim().toUpperCase()) ?? ''
               : '');
+
           const tipoNombre = getTipoCotidianoNombre(g);
 
+          // Localidad defensiva: cubrimos posibles keys según backend/datos
+          const localidad =
+            (g as any).localidad ??
+            (g as any).ciudad ??
+            (g as any).municipio ??
+            (g as any).poblacion ??
+            (g as any).localidad_nombre ??
+            (g as any).direccion ??
+            '';
+
           const hayCoincidencia =
-            proveedorNombre.toLowerCase().includes(term) ||
-            tipoNombre.toLowerCase().includes(term) ||
-            (g.observaciones ?? '').toLowerCase().includes(term) ||
-            (g.localidad ?? '').toLowerCase().includes(term);
+            normalizeText(proveedorNombre).includes(termN) ||
+            normalizeText(tipoNombre).includes(termN) ||
+            normalizeText(g.observaciones).includes(termN) ||
+            normalizeText((g as any).localidad).includes(termN) ||
+            normalizeText(localidad).includes(termN) ||
+            normalizeText((g as any).localidad ?? '').includes(termN);
+
           if (!hayCoincidencia) return false;
         }
 
@@ -1229,7 +1302,7 @@ export const GastosListScreen: React.FC<{ navigation: any; route: any }> = ({
           />
         </View>
 
-        {/* ✅ NUEVO (usuario): CUENTA BANCARIA (PLEGABLE) */}
+        {/* ✅ CUENTA BANCARIA (PLEGABLE) */}
         {hasAnyCuentaBancaria && (
           <>
             <View
@@ -2039,7 +2112,7 @@ export const GastosListScreen: React.FC<{ navigation: any; route: any }> = ({
           contentContainerStyle={styles.listContent}
           showsVerticalScrollIndicator={false}
           refreshControl={<RefreshControl refreshing={refreshing} onRefresh={handleRefresh} />}
-          // ✅ NUEVO (usuario): tocar o hacer scroll fuera cierra buscador
+          // ✅ tocar o hacer scroll fuera cierra buscador
           onScrollBeginDrag={closeBuscador}
           onTouchStart={() => {
             if (buscadorAbierto) closeBuscador();
@@ -2071,6 +2144,8 @@ export const GastosListScreen: React.FC<{ navigation: any; route: any }> = ({
             return (
               <ExpenseCard
                 key={g.id}
+                // ✅ NUEVO: fondo por regla (invitado/estándar)
+                backgroundColor={getCotidianoCardBg(g)}
                 title={titulo}
                 category={categoria}
                 dateLabel={formatFechaLarga(g.fecha)}
@@ -2145,7 +2220,7 @@ export const GastosListScreen: React.FC<{ navigation: any; route: any }> = ({
         contentContainerStyle={styles.listContent}
         showsVerticalScrollIndicator={false}
         refreshControl={<RefreshControl refreshing={refreshing} onRefresh={handleRefresh} />}
-        // ✅ NUEVO (usuario): tocar o hacer scroll fuera cierra buscador
+        // ✅ tocar o hacer scroll fuera cierra buscador
         onScrollBeginDrag={closeBuscador}
         onTouchStart={() => {
           if (buscadorAbierto) closeBuscador();
@@ -2159,6 +2234,8 @@ export const GastosListScreen: React.FC<{ navigation: any; route: any }> = ({
           return (
             <ExpenseCard
               key={gasto.id}
+              // ✅ NUEVO: fondo por regla (pendientes/coti, omitido, inactivo, pagado)
+              backgroundColor={getGestionableCardBg(gasto, filtro)}
               title={gasto.nombre}
               category={getCategoriaTextoGestionable(gasto)}
               dateLabel={dateLabel}

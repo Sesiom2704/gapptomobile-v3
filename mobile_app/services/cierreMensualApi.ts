@@ -24,7 +24,7 @@
 // -----------------------------------------------------------------------------
 
 import { api } from './api';
-import { reinicioApi, type CierrePreview } from './reinicioApi';
+import { fetchCierrePreview, type CierrePreview } from './cierreCore';
 
 // -----------------------------------------------------------------------------
 // Tipos
@@ -220,7 +220,7 @@ export const cierreMensualApi = {
       // 2) Fallback si el endpoint no está permitido / no existe
       if (status === 405 || status === 404) {
         try {
-          const preview = await reinicioApi.fetchCierrePreview({
+          const preview = await fetchCierrePreview({
             anio: opts?.anio,
             mes: opts?.mes,
           });

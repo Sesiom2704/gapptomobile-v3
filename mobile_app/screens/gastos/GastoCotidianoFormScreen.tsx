@@ -7,6 +7,17 @@
  *   - Reset solo cuando:
  *       a) guardas gasto (antes de salir), o
  *       b) sales confirmando descarte.
+ *
+ * Ajustes Importe/Pago (Solicitud Moises):
+ *   - Unificar cálculo: "Importe (mi parte)" y "Pago" comparten la misma lógica.
+ *   - "Importe (mi parte)" editable SIN aplicar regla inversa (no recalcula el total).
+ *   - "Participo" editable (con coherencia por tipo de pago).
+ *   - En "INVITADO (2)" permitir cantidad editable para reflejar "me invitan mi parte" (ej. 55 / 4).
+ *   - Texto en rojo si el usuario ha editado manualmente el importe (patrón replicable).
+ *
+ * Corrección de concepto:
+ *   - "Importe" es MI PARTE correspondiente (no mi pago).
+ *   - Si Participo = NO, se guarda pagado=false pero el importe se mantiene (referencia de invitación).
  */
 
 import React, { useEffect, useMemo, useState } from 'react';
@@ -23,7 +34,6 @@ import { commonFormStyles } from '../../components/forms/formStyles';
 
 import FormScreen from '../../components/forms/FormScreen';
 import { FormActionButton } from '../../components/ui/FormActionButton';
-import RepartoRow from '../../components/forms/RepartoRow';
 import { FormDateButton } from '../../components/ui/FormDateButton';
 
 import {
@@ -120,6 +130,10 @@ export const GastoCotidianoFormScreen: React.FC<Props> = ({ navigation, route })
     return '1';
   })();
 
+  /**
+   * "importeParte" = MI PARTE correspondiente (si pagado=true, coincide con lo que pago;
+   * si pagado=false, es referencia de lo que me invitaron).
+   */
   const initImporteParte = (() => {
     const imp = gastoEdit?.importe;
     return imp != null ? String(imp) : '';
@@ -135,6 +149,9 @@ export const GastoCotidianoFormScreen: React.FC<Props> = ({ navigation, route })
 
   const [importeParte, setImporteParte] = useState<string>(initImporteParte);
   const [participo, setParticipo] = useState<boolean>(initParticipo);
+
+  // ===== Flag de edición manual (texto rojo) =====
+  const [importeParteEdited, setImporteParteEdited] = useState<boolean>(false);
 
   // Tipo de gasto
   const [tipoId, setTipoId] = useState<string | null>(gastoEdit?.tipo_id ?? null);
@@ -182,6 +199,8 @@ export const GastoCotidianoFormScreen: React.FC<Props> = ({ navigation, route })
     setCantidad('1');
     setImporteParte('');
     setParticipo(true);
+
+    setImporteParteEdited(false);
 
     setTipoId(null);
 
@@ -415,10 +434,30 @@ export const GastoCotidianoFormScreen: React.FC<Props> = ({ navigation, route })
   const isTipo3 = tipoPago === 3;
   const isTipo4 = tipoPago === 4;
 
-  const cantidadBloqueada = isTipo1 || isTipo2 || isTipo3;
-  const importeParteBloqueado = isTipo1 || isTipo2;
-  const participoBloqueado = true;
+  /**
+   * Cantidad:
+   * - Tipo1: fija 1
+   * - Tipo3: fija 2
+   * - Tipo4: editable >= 3
+   * - Tipo2: editable >= 1 (para reflejar "me invitan mi parte", ej 55/4)
+   */
+  const cantidadBloqueada = isTipo1 || isTipo3;
 
+  /**
+   * Importe (mi parte) siempre visible y editable (salvo readOnly).
+   * Importante: ya NO lo bloqueamos cuando participo = NO.
+   */
+  const importeParteBloqueado = false;
+
+  /**
+   * Participo:
+   * - Tipo1 fuerza true
+   * - Tipo2 fuerza false
+   * - Tipo3 y 4 editable
+   */
+  const participoBloqueado = isTipo1 || isTipo2;
+
+  // Forzados coherentes al cambiar el tipo de pago
   useEffect(() => {
     if (isTipo1) {
       setCantidad('1');
@@ -426,63 +465,122 @@ export const GastoCotidianoFormScreen: React.FC<Props> = ({ navigation, route })
       return;
     }
     if (isTipo2) {
-      setCantidad('1');
+      // INVITADO => participo NO, pero mantenemos importe (mi parte) como referencia
       setParticipo(false);
       setCuentaId(null);
+      if (!String(cantidad ?? '').trim()) setCantidad('2');
       return;
     }
     if (isTipo3) {
       setCantidad('2');
-      setParticipo(true);
+      // En A PACHAS normalmente participas, pero lo permitimos editable en UI.
+      if (!String(cantidad ?? '').trim()) setCantidad('2');
       return;
     }
     if (isTipo4) {
       if (!String(cantidad ?? '').trim()) setCantidad('3');
-      setParticipo(true);
       return;
     }
-  }, [tipoPago]); // eslint-disable-line react-hooks/exhaustive-deps
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tipoPago]);
 
-  useEffect(() => {
+  /**
+   * Cálculo unificado:
+   * - parteAuto = total / cantidadEfectiva
+   * - miParte = importeParte (si usuario lo edita, manda)
+   * - invitadoRef:
+   *    - si participo = NO => invitadoRef = miParte (me invitan mi parte)
+   *    - si participo = SÍ  => invitadoRef = max(parteAuto - miParte, 0) (invitación parcial)
+   *
+   * Regla clave: editar importeParte NO recalcula el total.
+   */
+  const calcReparto = useMemo(() => {
     const totalNum = parseEuroToNumber(importeTotal) ?? 0;
 
-    const cantEff =
-      isTipo1 || isTipo2 ? 1 : isTipo3 ? 2 : (() => {
-        const c = parseCantidadInt(cantidad);
-        return c && c > 0 ? c : 0;
-      })();
+    // cantidadEfectiva
+    let cantEff = 1;
 
-    if (totalNum > 0 && cantEff > 0) {
-      const parte = totalNum / cantEff;
-      setImporteParte(format2(parte));
-    } else {
-      setImporteParte('');
+    if (isTipo1) cantEff = 1;
+    else if (isTipo3) cantEff = 2;
+    else if (isTipo4) {
+      const c = parseCantidadInt(cantidad);
+      cantEff = c && c >= 3 ? c : 0;
+    } else if (isTipo2) {
+      const c = parseCantidadInt(cantidad);
+      cantEff = c && c >= 1 ? c : 1;
     }
-  }, [importeTotal, cantidad, tipoPago]); // eslint-disable-line react-hooks/exhaustive-deps
+
+    const parteAutoNum = totalNum > 0 && cantEff > 0 ? totalNum / cantEff : 0;
+    const parteAutoStr = totalNum > 0 && cantEff > 0 ? format2(parteAutoNum) : '';
+
+    const miParteNum = parseEuroToNumber(importeParte) ?? 0;
+
+    const invitadoRefNum = !participo
+      ? Math.max(miParteNum, 0)
+      : Math.max(parteAutoNum - miParteNum, 0);
+
+    return {
+      totalNum,
+      cantEff,
+      parteAutoNum,
+      parteAutoStr,
+      miParteNum,
+      invitadoRefNum,
+    };
+  }, [importeTotal, cantidad, tipoPago, participo, importeParte]);
+
+  /**
+   * Auto-rellenar "importeParte" SOLO si el usuario NO lo ha tocado manualmente.
+   * - Si no está editado manualmente, se sincroniza con la parte automática.
+   * - Si el usuario lo edita, se respeta.
+   */
+  useEffect(() => {
+    if (readOnly) return;
+
+    if (!importeParteEdited) {
+      const next = calcReparto.parteAutoStr;
+      if ((importeParte ?? '').trim() !== (next ?? '').trim()) {
+        setImporteParte(next);
+      }
+    }
+  }, [calcReparto.parteAutoStr, importeParteEdited, readOnly]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const handleChangeImporteParte = (text: string) => {
     if (readOnly) return;
+
     setImporteParte(text);
+    setImporteParteEdited(true); // -> rojo (edición manual)
 
-    if (!(isTipo3 || isTipo4)) return;
+    // REGRA CLAVE: no recalculamos importeTotal (no norma inversa)
+  };
 
-    const parteNum = parseEuroToNumber(text) ?? 0;
-    if (parteNum <= 0) return;
+  const handleBlurImporteParte = () => {
+    if (readOnly) return;
 
-    const cantEff = isTipo3 ? 2 : (() => {
-      const c = parseCantidadInt(cantidad);
-      return c && c > 0 ? c : 0;
-    })();
-
-    if (!cantEff || cantEff <= 0) return;
-
-    const totalCalc = parteNum * cantEff;
-    setImporteTotal(format2(totalCalc));
+    // Si vuelve exactamente al valor automático, quitamos el rojo
+    const t = (importeParte ?? '').trim();
+    const auto = (calcReparto.parteAutoStr ?? '').trim();
+    if (t !== '' && auto !== '' && t === auto) {
+      setImporteParteEdited(false);
+    }
   };
 
   const handleChangeCantidad = (text: string) => {
     if (readOnly) return;
     setCantidad(text);
+  };
+
+  const handleToggleParticipo = (next: boolean) => {
+    if (readOnly) return;
+    if (participoBloqueado) return;
+
+    setParticipo(next);
+
+    // Si pasas a NO, solo anulamos cuenta (no afecta a liquidez).
+    // Importante: NO tocamos importeParte, porque es tu parte (referencia).
+    if (!next) {
+      setCuentaId(null);
+    }
   };
 
   // ========================
@@ -497,6 +595,8 @@ export const GastoCotidianoFormScreen: React.FC<Props> = ({ navigation, route })
       importeTotal: norm(initImporteTotal),
       cantidad: norm(initCantidad),
       importeParte: norm(initImporteParte),
+      participo: String(initParticipo),
+
       tipoId: norm(gastoEdit?.tipo_id ?? ''),
       proveedorId: norm(gastoEdit?.proveedor_id ?? ''),
       cuentaId: norm(gastoEdit?.cuenta_id ?? ''),
@@ -518,6 +618,7 @@ export const GastoCotidianoFormScreen: React.FC<Props> = ({ navigation, route })
       norm(importeTotal) !== initialSnapshot.importeTotal ||
       norm(cantidad) !== initialSnapshot.cantidad ||
       norm(importeParte) !== initialSnapshot.importeParte ||
+      String(participo) !== initialSnapshot.participo ||
       norm(tipoId) !== initialSnapshot.tipoId ||
       norm(proveedorSeleccionado?.id ?? '') !== initialSnapshot.proveedorId ||
       norm(cuentaId ?? '') !== initialSnapshot.cuentaId ||
@@ -534,6 +635,7 @@ export const GastoCotidianoFormScreen: React.FC<Props> = ({ navigation, route })
     importeTotal,
     cantidad,
     importeParte,
+    participo,
     tipoId,
     proveedorSeleccionado,
     cuentaId,
@@ -598,11 +700,21 @@ export const GastoCotidianoFormScreen: React.FC<Props> = ({ navigation, route })
       return;
     }
 
+    // Validación cantidad según tipo
     let cantidadEff = 1;
 
     if (isTipo1) cantidadEff = 1;
-    if (isTipo2) cantidadEff = 1;
     if (isTipo3) cantidadEff = 2;
+
+    if (isTipo2) {
+      const c = parseCantidadInt(cantidad) ?? 0;
+      if (c < 1) {
+        Alert.alert('Cantidad inválida', 'Para "INVITADO", la cantidad debe ser un entero >= 1.');
+        return;
+      }
+      cantidadEff = c;
+    }
+
     if (isTipo4) {
       const c = parseCantidadInt(cantidad) ?? 0;
       if (c < 3) {
@@ -612,8 +724,16 @@ export const GastoCotidianoFormScreen: React.FC<Props> = ({ navigation, route })
       cantidadEff = c;
     }
 
+    // Cuenta requerida SOLO si participas (afecta a tu liquidez)
     if (participo && !cuentaId) {
       Alert.alert('Campo requerido', 'Debes seleccionar la cuenta desde la que pagas este gasto.');
+      return;
+    }
+
+    // Mi parte (siempre se guarda, participes o no)
+    const miParteNum = parseEuroToNumber(importeParte) ?? 0;
+    if (miParteNum < 0) {
+      Alert.alert('Importe inválido', 'El importe (mi parte) no puede ser negativo.');
       return;
     }
 
@@ -622,7 +742,13 @@ export const GastoCotidianoFormScreen: React.FC<Props> = ({ navigation, route })
       return t === '' ? undefined : t;
     };
 
-    const payload: CrearGastoCotidianoPayload = {
+    /**
+     * Guardado:
+     * - importe = mi parte (si pagado=false, es referencia de invitación)
+     * - pagado = participo
+     * - cuentaId = null si no participo
+     */
+    const payload: (CrearGastoCotidianoPayload & { importe?: string; pagado?: boolean }) = {
       fecha,
       tipoId,
       proveedorId: proveedorSeleccionado.id,
@@ -631,6 +757,10 @@ export const GastoCotidianoFormScreen: React.FC<Props> = ({ navigation, route })
       tipoPago,
       importeTotal,
       cantidad: cantidadEff,
+
+      // NUEVO (compat): mi parte siempre
+      importe: format2(miParteNum),
+      pagado: participo,
 
       evento: toUndef(evento),
       observaciones: toUndef(observaciones),
@@ -651,7 +781,6 @@ export const GastoCotidianoFormScreen: React.FC<Props> = ({ navigation, route })
           {
             text: 'OK',
             onPress: () => {
-              // reset al guardar (según regla) y salir
               resetFormToNew();
               doNavigateBack();
             },
@@ -663,7 +792,6 @@ export const GastoCotidianoFormScreen: React.FC<Props> = ({ navigation, route })
           {
             text: 'OK',
             onPress: () => {
-              // reset al guardar (según regla) y salir
               resetFormToNew();
               doNavigateBack();
             },
@@ -676,7 +804,6 @@ export const GastoCotidianoFormScreen: React.FC<Props> = ({ navigation, route })
     }
   };
 
-  // ✅ Patrón “Gestionables”
   const title = 'Gasto cotidiano';
   const subtitle = readOnly ? 'Consulta' : isEdit ? 'Edición' : 'Nuevo Gasto';
 
@@ -830,23 +957,93 @@ export const GastoCotidianoFormScreen: React.FC<Props> = ({ navigation, route })
         <View style={styles.field}>
           <Text style={styles.label}>Reparto</Text>
 
-          <RepartoRow
-            cantidad={cantidad}
-            onChangeCantidad={handleChangeCantidad}
-            cantidadDisabled={cantidadBloqueada}
-            importe={importeParte}
-            onChangeImporte={handleChangeImporteParte}
-            importeDisabled={importeParteBloqueado}
-            participo={participo}
-            participoDisabled={participoBloqueado}
-            readOnly={readOnly}
-          />
+          {/* Reparto personalizado:
+              - "Importe (mi parte)" rojo si editado
+              - Participo editable
+              - Sin norma inversa al editar importe
+          */}
+          <View style={{ flexDirection: 'row', gap: 10, alignItems: 'flex-start' }}>
+            {/* Cantidad */}
+            <View style={{ flex: 1 }}>
+              <Text style={[styles.label, { fontSize: 12 }]}>Cantidad</Text>
+              <TextInput
+                style={[styles.input, cantidad && styles.inputFilled, cantidadBloqueada && styles.inputDisabled]}
+                keyboardType="numeric"
+                value={cantidad}
+                onChangeText={handleChangeCantidad}
+                editable={!readOnly && !cantidadBloqueada}
+                placeholder={isTipo4 ? '>= 3' : 'Ej. 2'}
+              />
+            </View>
 
-          {participoBloqueado && (
+            {/* Importe (mi parte) */}
+            <View style={{ flex: 1 }}>
+              <Text style={[styles.label, { fontSize: 12 }]}>Importe (mi parte)</Text>
+              <TextInput
+                style={[
+                  styles.input,
+                  importeParte && styles.inputFilled,
+                  (readOnly || importeParteBloqueado) && styles.inputDisabled,
+                  // ROJO si editado manualmente
+                  importeParteEdited && { color: colors.danger },
+                ]}
+                keyboardType="decimal-pad"
+                value={importeParte}
+                onChangeText={handleChangeImporteParte}
+                onBlur={handleBlurImporteParte}
+                editable={!readOnly && !importeParteBloqueado}
+                placeholder="Ej. 13,75"
+              />
+            </View>
+          </View>
+
+          {/* Participo */}
+          <View style={{ marginTop: 10 }}>
+            <Text style={[styles.label, { fontSize: 12 }]}>Participo</Text>
+            <View style={styles.segmentosRow}>
+              <View style={styles.segmentoWrapper}>
+                <PillButton
+                  label="SÍ"
+                  selected={participo === true}
+                  onPress={() => {
+                    if (readOnly) return;
+                    handleToggleParticipo(true);
+                  }}
+                />
+              </View>
+              <View style={styles.segmentoWrapper}>
+                <PillButton
+                  label="NO"
+                  selected={participo === false}
+                  onPress={() => {
+                    if (readOnly) return;
+                    handleToggleParticipo(false);
+                  }}
+                />
+              </View>
+            </View>
+
+            {participoBloqueado && (
+              <Text style={styles.helperText}>
+                Participo se fija automáticamente por el tipo de pago (1 = Sí, 2 = No).
+              </Text>
+            )}
+          </View>
+
+          {/* Info de cálculo */}
+          <View style={{ marginTop: 10 }}>
             <Text style={styles.helperText}>
-              Participo se determina automáticamente por el tipo de pago seleccionado.
+              Parte automática: {calcReparto.parteAutoStr ? `${calcReparto.parteAutoStr} €` : '—'}
+              {'  '}|{'  '}
+              {participo ? 'Invitación parcial' : 'Invitado'}:{' '}
+              {calcReparto.invitadoRefNum > 0 ? `${format2(calcReparto.invitadoRefNum)} €` : '0,00 €'}
             </Text>
-          )}
+            {importeParteEdited && (
+              <Text style={styles.helperText}>
+                Has editado tu parte manualmente (rojo). No recalculamos el total ni la cantidad.
+              </Text>
+            )}
+          </View>
         </View>
 
         <FormSection title="Cuenta de cargo">

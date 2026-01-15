@@ -55,4 +55,16 @@ export const colors = {
 
   // legacy alias (migrar gradualmente)
   backgroundColor: '#E5E7EB',
+
+    // =========================
+  // Tarjetas (fondos suaves)
+  // =========================
+  // Motivo: reglas de negocio -> tokens semánticos (no hex en pantallas).
+  cardBgDefault: '#FFFFFF',      // equivalente a surface
+  cardBgOmitted: '#F3F4F6',      // neutralSoft
+  cardBgInactive: '#FEF2F2',     // dangerSoft
+  cardBgPaid: '#ECFDF5',         // successSoft
+  cardBgPendingAlt: '#E0F7F7',   // primarySoft (alternativo suave para pendientes especiales)
+  cardBgGuest: '#FFFBEB',        // warningSoft (naranjita suave para “invitado”)
+  
 } as const;

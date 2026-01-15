@@ -52,6 +52,7 @@ type ExpenseCardProps = {
   /** Versión usada en IngresoListScreen */
   quickActionIconName?: string;
   onQuickActionPress?: () => void;
+  backgroundColor?: string;
 };
 
 const getIconForSegmento = (segmentoId?: string | null) => {
@@ -95,6 +96,7 @@ export const ExpenseCard: React.FC<ExpenseCardProps> = ({
   onActionPress,
   quickActionIconName,
   onQuickActionPress,
+  backgroundColor,
 }) => {
   const baseIcon = getIconForSegmento(segmentoId);
   const iconName = (iconNameOverride ?? baseIcon.name) as any;
@@ -106,7 +108,11 @@ export const ExpenseCard: React.FC<ExpenseCardProps> = ({
   const showQuickAction = Boolean(finalQuickActionHandler);
 
   return (
-    <TouchableOpacity style={styles.card} activeOpacity={0.85} onPress={onPress}>
+  <TouchableOpacity
+    style={[styles.card, backgroundColor ? { backgroundColor } : null]}
+    activeOpacity={0.85}
+    onPress={onPress}
+  >
       {/* Columna izquierda (flex): icono + textos */}
       <View style={styles.left}>
         <View style={[styles.iconCircle, { backgroundColor: baseIcon.bg }]}>

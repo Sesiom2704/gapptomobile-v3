@@ -6,44 +6,44 @@
  *   - Centraliza los tipos de params (TypeScript) para evitar “any” en screens.
  *   - Mantiene la convención del proyecto: header nativo oculto (se usa Header propio).
  *
- * Maneja:
- *   - UI: usa NativeStack sin header (Header custom vive en cada Screen).
- *   - Estado: no aplica (solo composición de navegación).
- *   - Datos: no aplica.
- *   - Navegación:
- *       - PrestamosList -> PrestamoDetalle (prestamoId)
- *       - PrestamosList -> PrestamoForm (nuevo)
- *       - PrestamoDetalle -> PrestamoForm (editar)
- *
- * Entradas / Salidas:
- *   - Props: no aplica
- *   - route.params:
- *       - PrestamoDetalle: { prestamoId: string }
- *       - PrestamoForm: { prestamoId?: string | null }
- *
- * Dependencias clave:
- *   - @react-navigation/native-stack
- *   - Screens: screens/prestamos/*
- *
- * Reutilización:
- *   - Candidato a externalizar: BAJO (stack específico de feature).
- *   - Riesgos: nombres de rutas deben coincidir con los navigate() de las pantallas.
- *
- * Notas de estilo:
- *   - Mantener screenOptions={{ headerShown: false }} como en MainTabs.
+ * ✅ Mejora (returnTo):
+ *   - Permite que PrestamosList reciba un "returnToTab/returnToScreen" para volver
+ *     al origen correcto (por ejemplo, si vienes desde Home, volver a Home).
  */
 
 import React from 'react';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
 
 // Screens
-// IMPORTANTE: respeta EXACTAMENTE el nombre de archivo real (case-sensitive).
 import PrestamosListScreen from '../screens/prestamos/PrestamosListScreen';
 import PrestamosDetalleScreen from '../screens/prestamos/PrestamosDetalleScreen';
 import PrestamoFormScreen from '../screens/prestamos/PrestamoFormScreen';
 
+export type EstadoFiltro = 'ACTIVOS' | 'VENCEN_MES' | 'CANCELADOS' | 'INACTIVOS';
+
+/**
+ * Params "returnTo":
+ * - returnToTab: nombre del tab raíz (HomeTab, PatrimonyTab, etc.)
+ * - returnToScreen: screen raíz dentro de ese tab (HomeScreen, PatrimonyHomeScreen, etc.)
+ *
+ * Nota: dejamos string para no acoplar este stack a MainTabsParamList y evitar imports cruzados.
+ */
+export type ReturnToParams = {
+  fromHome?: boolean;
+  returnToTab?: string;     // e.g. 'HomeTab'
+  returnToScreen?: string;  // e.g. 'HomeScreen'
+};
+
 export type PrestamosStackParamList = {
-  PrestamosList: undefined;
+  PrestamosList:
+    | ({
+        /**
+         * Filtro inicial al entrar (opcional).
+         * Si vienes desde Endeudamiento, lo normal es 'ACTIVOS'.
+         */
+        initialFiltro?: EstadoFiltro;
+      } & ReturnToParams)
+    | undefined;
 
   PrestamoDetalle: {
     prestamoId: string;
@@ -56,14 +56,6 @@ export type PrestamosStackParamList = {
 
 const Stack = createNativeStackNavigator<PrestamosStackParamList>();
 
-/**
- * NOTA CLAVE (bug corregido):
- *   - En tu versión anterior había un import circular:
- *       `import PrestamosStack from './PrestamosStacks';`
- *     Eso se importa a sí mismo y rompe el bundler/TypeScript.
- *
- * Este componente DEBE exportarse una sola vez, sin auto-import.
- */
 const PrestamosStackNavigator: React.FC = () => {
   return (
     <Stack.Navigator screenOptions={{ headerShown: false }}>

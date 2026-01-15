@@ -385,11 +385,18 @@ const HomeScreen: React.FC = () => {
 
   // ✅ NUEVO: ir a préstamos activos (desde Endeudamiento)
   const goPrestamosActivos = () => {
-    // Navegamos al tab de patrimonio y entramos al stack de préstamos.
-    // Pasamos un param opcional "initialFiltro: 'activos'" por si el stack lo soporta.
     navigation.navigate('PatrimonyTab', {
       screen: 'PrestamosStack',
-      params: { initialFiltro: 'activos' },
+      params: {
+        // Entrar al listado directamente con params útiles
+        screen: 'PrestamosList',
+        params: {
+          initialFiltro: 'ACTIVOS',
+          fromHome: true,
+          returnToTab: 'HomeTab',
+          returnToScreen: 'HomeScreen',
+        },
+      },
     });
   };
 
