@@ -6,6 +6,16 @@
 // - Mantener aliases legacy para no romper navegación ni pantallas previas.
 // - Mantener bloque Patrimonio.
 // - ✅ Añadir bloque Endeudamiento (Total deuda + % sobre Patrimonio Bruto/VM)
+//
+// FIX (Moises - Enero 2026):
+// - En Home, la barra de "Ingresos" (cobrados/consumidos vs pendientes) NO debe incluir extraordinarios.
+// - Extraordinario = periodicidad = PAGO UNICO y ultimo_ingreso_on = mes actual.
+// - En el summary, esos extraordinarios llegan como `detalle_ingresos.extraordinarios`.
+// - Antes: ingresosMes = recurrentes + extraordinarios  -> INCORRECTO para la barra.
+// - Ahora: ingresosMes = SOLO recurrentes.
+// - Se conserva `extrasIngresosMes` para el bloque Extras.
+// - Se añade (opcional) `ingresosMesTotalIncluyendoExtras` por si alguna pantalla necesita el total real del mes
+//   sin contaminar la barra principal.
 
 import { getMonthlySummary } from './analyticsApi';
 import { fetchBalanceMes } from './balanceApi';
@@ -22,9 +32,14 @@ export type HomeDashboardResponse = {
   saldoPrevistoFinMes: number;
 
   // Reales (mes)
+  // NOTA: ingresosMes en Home representa "ingresos cobrados/consumidos" para la barra principal,
+  // y por definición debe EXCLUIR extraordinarios (PAGO UNICO del mes).
   ingresosMes: number;
   gastosMes: number;
   ahorroMes: number;
+
+  // ✅ Opcional: total de ingresos del mes incluyendo extraordinarios (si lo necesitas en alguna pantalla)
+  ingresosMesTotalIncluyendoExtras?: number;
 
   // Presupuesto “ajustado” (puede excluir omitidos según backend)
   ingresosPresupuestados: number;
@@ -294,7 +309,11 @@ export async function fetchHomeDashboard(params: { year: number; month: number }
   // -----------------------
   const ingresosRecurrentesMes = n((summary as any)?.detalle_ingresos?.recurrentes);
   const extrasIngresosMes = n((summary as any)?.detalle_ingresos?.extraordinarios);
-  const ingresosMes = ingresosRecurrentesMes + extrasIngresosMes;
+
+  // ✅ FIX: En Home, "ingresosMes" NO debe sumar extraordinarios.
+  // Se mantiene el total completo en un campo opcional por si se necesita en algún punto.
+  const ingresosMes = ingresosRecurrentesMes;
+  const ingresosMesTotalIncluyendoExtras = ingresosRecurrentesMes + extrasIngresosMes;
 
   const gastosMes = n((summary as any)?.general?.gastos_mes);
   const ahorroMes = n((summary as any)?.general?.ahorro_mes);
@@ -341,7 +360,11 @@ export async function fetchHomeDashboard(params: { year: number; month: number }
 
   // Omitidos (aceptamos varias keys; si no vienen, derivamos original - ajustado)
   const ingresosOmitidosRaw = pickNumber(pres, ['ingresos_omitidos_mes', 'ingresos_omitidos', 'ingresos_omitidos_total'], NaN);
-  const gestionablesOmitidosRaw = pickNumber(pres, ['gestionables_omitidos_mes', 'gestionables_omitidos', 'gestionables_omitidos_total'], NaN);
+  const gestionablesOmitidosRaw = pickNumber(
+    pres,
+    ['gestionables_omitidos_mes', 'gestionables_omitidos', 'gestionables_omitidos_total'],
+    NaN
+  );
   const cotidianosOmitidosRaw = pickNumber(pres, ['cotidianos_omitidos_mes', 'cotidianos_omitidos', 'cotidianos_omitidos_total'], NaN);
   const totalGastoOmitidosRaw = pickNumber(pres, ['gasto_total_omitido_mes', 'gasto_total_omitido', 'gasto_total_omitido_total'], NaN);
 
@@ -402,8 +425,7 @@ export async function fetchHomeDashboard(params: { year: number; month: number }
   const patrimonioBruto = n(patrimonioSummary?.valorMercadoTotal);
 
   // Si no hay patrimonio, devolvemos null para UI "—"
-  const endeudamientoPct =
-    patrimonioBruto > 0 ? Number(((endeudamientoTotalDeuda / patrimonioBruto) * 100).toFixed(2)) : null;
+  const endeudamientoPct = patrimonioBruto > 0 ? Number(((endeudamientoTotalDeuda / patrimonioBruto) * 100).toFixed(2)) : null;
 
   return {
     year,
@@ -415,6 +437,9 @@ export async function fetchHomeDashboard(params: { year: number; month: number }
     ingresosMes,
     gastosMes,
     ahorroMes,
+
+    // ✅ campo opcional, no debería romper consumidores actuales
+    ingresosMesTotalIncluyendoExtras,
 
     ingresosPresupuestados,
     gestionablesPresupuestados,
