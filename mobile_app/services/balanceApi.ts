@@ -22,6 +22,11 @@ export type BalanceMesResponse = {
   ingresos_pendientes_total: number;
   gastos_pendientes_total: number;
   ahorro_mes_total: number;
+
+  // Compatibilidad: backend nuevo puede enviar estos campos.
+  // Si backend antiguo no los envía, simplemente serán undefined.
+  gastos_ahorro_total?: number;
+  ingresos_reintegro_ahorro_total?: number;
 };
 
 export async function fetchBalanceMes(params: {

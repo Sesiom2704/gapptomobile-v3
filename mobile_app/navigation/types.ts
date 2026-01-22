@@ -11,4 +11,11 @@ export type RootStackParamList = {
   Boot: undefined;
   Login: undefined;
   Main: undefined;
+
+  /**
+   * Screen global (RootStack) para ejecutar copias automáticas:
+   * - Neon -> Supabase
+   * - Neon -> Google Sheets
+   */
+  BackupAuto: undefined;
 };

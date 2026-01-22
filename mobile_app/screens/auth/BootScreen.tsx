@@ -8,13 +8,43 @@ import {
   Image,
   Text,
   ScrollView,
+  Alert,
 } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
+import * as SecureStore from "expo-secure-store";
 
 import { Screen } from "../../components/layout/Screen";
 import { colors, spacing, radius } from "../../theme";
 import { useAuth } from "../../context/AuthContext";
 import { getApiBaseUrl } from "../../services/api";
+
+/**
+ * Keys SecureStore para control de popup y ejecución por slot.
+ * - prompt: evita repetir popup el mismo día.
+ * - completed_slot: evita sugerir si ya completaste la copia correspondiente a ese slot.
+ */
+const SS_BACKUP_PROMPT_SEEN_DATE = "backup_prompt_seen_date"; // YYYY-MM-DD
+const SS_BACKUP_LAST_COMPLETED_SLOT = "backup_last_completed_slot"; // YYYY-MM-07 | YYYY-MM-14 | YYYY-MM-21 | YYYY-MM-28
+
+function pad2(n: number) {
+  return String(n).padStart(2, "0");
+}
+
+function todayKeyLocal(d = new Date()) {
+  return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
+}
+
+/**
+ * Devuelve slot (1..4) si el día es 7/14/21/28. Si no, null.
+ */
+function getBackupSlotForDate(d = new Date()): { day: number; slot: 1 | 2 | 3 | 4; slotLabel: string; slotKey: string } | null {
+  const day = d.getDate();
+  if (day !== 7 && day !== 14 && day !== 21 && day !== 28) return null;
+  const slot = (day / 7) as 1 | 2 | 3 | 4;
+  const slotLabel = `${slot}/4`;
+  const slotKey = `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(day)}`; // YYYY-MM-07
+  return { day, slot, slotLabel, slotKey };
+}
 
 /**
  * BootScreen
@@ -24,12 +54,9 @@ import { getApiBaseUrl } from "../../services/api";
  * 2) /ready (o fallback /api/health) -> BD accesible
  * 3) Si hay token -> /api/v1/auth/me -> token válido
  *
- * Objetivo:
- * - No entrar en Main hasta que backend esté listo.
- * - No entrar en Main con token inválido (evita “entra en main y luego te tira a login”).
- *
- * Nota (importante para el fix aplicado):
- * - Con el fix, tras hacer login, reseteamos a Boot para que este mismo flujo decida Main/Login.
+ * Extra (Gapptomobile V3):
+ * - Si hoy es 7/14/21/28 y estás autenticado -> popup para sugerir copia.
+ * - Si aceptas -> abre BackupAuto (dejando Main por debajo).
  */
 export const BootScreen: React.FC<{ navigation: any }> = ({ navigation }) => {
   console.log("[BOOT] BootScreen mounted");
@@ -43,6 +70,7 @@ export const BootScreen: React.FC<{ navigation: any }> = ({ navigation }) => {
   const [errorDetail, setErrorDetail] = useState<string | null>(null);
 
   const mountedRef = useRef(true);
+  const didFinalizeNavRef = useRef(false); // evita dobles navigation.reset
 
   // Igual que LoginScreen (lo dejo por si más adelante quieres tint suave)
   const primarySoft = useMemo(() => "#F3FBFA", []);
@@ -113,10 +141,6 @@ export const BootScreen: React.FC<{ navigation: any }> = ({ navigation }) => {
    * Validación de token:
    * - Si el token es inválido, el backend responderá 401.
    * - En ese caso hacemos logout() y forzamos Login.
-   *
-   * Importante:
-   * - Si /api/v1/auth/me no existe (404), no bloqueamos el arranque (compatibilidad),
-   *   pero es recomendable crearlo para un flujo robusto.
    */
   const validateSessionIfToken = async (base: string): Promise<"valid" | "invalid" | "unknown"> => {
     if (!token) return "unknown";
@@ -135,15 +159,89 @@ export const BootScreen: React.FC<{ navigation: any }> = ({ navigation }) => {
         return "unknown";
       }
 
-      // Otros estados (500, etc.) -> no asumimos válido
       return "unknown";
     } catch {
-      // Si el backend está justo despertando o hay problemas de red, no podemos afirmar
       return "unknown";
     }
   };
 
+  /**
+   * Decide si toca mostrar popup de copia y lo muestra.
+   * Devuelve true si el flujo de navegación queda “gestionado” por el popup (aceptar/rechazar),
+   * y por tanto runBoot debe hacer return para no ejecutar navigation.reset adicional.
+   */
+  const maybeShowBackupPrompt = useCallback(async (): Promise<boolean> => {
+    // Solo tiene sentido si vamos a entrar a Main (sesión activa).
+    if (!isAuthenticated) return false;
+
+    const slot = getBackupSlotForDate(new Date());
+    if (!slot) return false;
+
+    try {
+      const today = todayKeyLocal(new Date());
+
+      const [seenDate, completedSlot] = await Promise.all([
+        SecureStore.getItemAsync(SS_BACKUP_PROMPT_SEEN_DATE),
+        SecureStore.getItemAsync(SS_BACKUP_LAST_COMPLETED_SLOT),
+      ]);
+
+      // Si ya se completó este slot, no molestamos.
+      if (completedSlot && completedSlot === slot.slotKey) {
+        console.log("[BOOT] Backup slot ya completado, no se muestra popup:", completedSlot);
+        return false;
+      }
+
+      // Si ya se mostró el popup hoy, no insistimos.
+      if (seenDate && seenDate === today) {
+        console.log("[BOOT] Popup de backup ya mostrado hoy:", seenDate);
+        return false;
+      }
+
+      // Marcamos como “mostrado hoy” en cuanto decidimos mostrarlo (acepte o rechace, no insistimos).
+      await SecureStore.setItemAsync(SS_BACKUP_PROMPT_SEEN_DATE, today);
+
+      // Importante: el popup gestiona la navegación final.
+      Alert.alert(
+        "Copia de seguridad",
+        `Toca copia de seguridad (${slot.slotLabel}).\n\nSi la haces ahora, se copiará:\n- Neon → Supabase\n- Neon → Google Sheets`,
+        [
+          {
+            text: "Ahora no",
+            style: "cancel",
+            onPress: () => {
+              if (didFinalizeNavRef.current) return;
+              didFinalizeNavRef.current = true;
+              navigation.reset({ index: 0, routes: [{ name: "Main" }] });
+            },
+          },
+          {
+            text: "Hacer copia",
+            style: "default",
+            onPress: () => {
+              if (didFinalizeNavRef.current) return;
+              didFinalizeNavRef.current = true;
+              // Dejamos Main por debajo, y abrimos BackupAuto encima.
+              navigation.reset({
+                index: 1,
+                routes: [{ name: "Main" }, { name: "BackupAuto" }],
+              });
+            },
+          },
+        ],
+        { cancelable: true }
+      );
+
+      return true;
+    } catch (e) {
+      // Si SecureStore falla, no bloqueamos el arranque.
+      console.warn("[BOOT] maybeShowBackupPrompt error:", e);
+      return false;
+    }
+  }, [isAuthenticated, navigation]);
+
   const runBoot = useCallback(async () => {
+    didFinalizeNavRef.current = false;
+
     setFailed(false);
     setErrorDetail(null);
     setProgress(0);
@@ -199,7 +297,7 @@ export const BootScreen: React.FC<{ navigation: any }> = ({ navigation }) => {
       if (!mountedRef.current) return;
       setProgress(88);
 
-      // 4) Si hay token, validarlo (evita “entro en Main y luego me tira a Login”)
+      // 4) Si hay token, validarlo
       if (token) {
         setStatus("Validando credenciales…");
         setProgress(92);
@@ -207,7 +305,6 @@ export const BootScreen: React.FC<{ navigation: any }> = ({ navigation }) => {
         const session = await validateSessionIfToken(base);
 
         if (session === "invalid") {
-          // Token inválido -> limpiar y mandar a Login de forma controlada
           await logout();
           if (!mountedRef.current) return;
           setProgress(100);
@@ -221,8 +318,16 @@ export const BootScreen: React.FC<{ navigation: any }> = ({ navigation }) => {
       setProgress(100);
 
       if (isAuthenticated) {
+        // Intentamos popup de backup antes de entrar a Main (pero la navegación final la hace el popup).
+        const handledByPopup = await maybeShowBackupPrompt();
+        if (handledByPopup) return;
+
+        if (didFinalizeNavRef.current) return;
+        didFinalizeNavRef.current = true;
         navigation.reset({ index: 0, routes: [{ name: "Main" }] });
       } else {
+        if (didFinalizeNavRef.current) return;
+        didFinalizeNavRef.current = true;
         navigation.reset({ index: 0, routes: [{ name: "Login" }] });
       }
     } catch (e: any) {
@@ -231,7 +336,7 @@ export const BootScreen: React.FC<{ navigation: any }> = ({ navigation }) => {
       setStatus("No se pudo iniciar la app.");
       setErrorDetail(typeof e?.message === "string" ? e.message : "Error desconocido");
     }
-  }, [isAuthenticated, isHydrating, token, logout, navigation]);
+  }, [isAuthenticated, isHydrating, token, logout, navigation, maybeShowBackupPrompt]);
 
   useEffect(() => {
     mountedRef.current = true;

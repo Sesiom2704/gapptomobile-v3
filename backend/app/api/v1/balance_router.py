@@ -78,7 +78,7 @@ def _to_decimal(x) -> Decimal:
 
 def _gasto_importe_real(g: models.Gasto) -> Decimal:
     """
-    Importe real de un gasto gestionable pagado.
+    Importe real de un gasto gestionable pagado (visión caja).
     Por consistencia con el resto de tu backend:
     - preferimos importe_cuota (cuota/pago mensual)
     - fallback a importe (por compatibilidad)
@@ -288,6 +288,10 @@ def get_balance_cuentas_mes(
     Adicional:
     - Pendientes por cuenta (ingresos, gestionables, cotidianos) para tarjetas de pendientes.
       Nota: aquí se mantiene la definición anterior (activo+kpi+no pagado/cobrado).
+
+    CORRECCIÓN (pendientes):
+    - Gastos pendientes NO deben sumar importe_cuota si el negocio espera importe.
+      Se suma importe y, si es null, se hace fallback a importe_cuota (compatibilidad).
     """
     start, end = _get_month_range(year, month)
 
@@ -337,6 +341,7 @@ def get_balance_cuentas_mes(
     entradas_por_cuenta = {row.cuenta_id: float(row.total_entradas or 0.0) for row in ingresos_q}
 
     # 3) SALIDAS DEL MES - GASTOS (pagados)
+    # Nota: visión caja => aquí se mantiene importe_cuota como venías haciendo.
     gastos_mes_q = (
         db.query(
             models.Gasto.cuenta_id.label("cuenta_id"),
@@ -397,10 +402,12 @@ def get_balance_cuentas_mes(
     )
     ingresos_pendientes_por_cuenta = {row.cuenta_id: float(row.importe or 0.0) for row in ingresos_pendientes_q}
 
+    # ✅ CORRECCIÓN: gastos pendientes deben sumar IMPORTE (fallback a IMPORTE_CUOTA).
+    # Esto evita que el "pendiente" se calcule como cuota cuando el negocio espera el total.
     gastos_pendientes_q = (
         db.query(
             models.Gasto.cuenta_id,
-            func.coalesce(func.sum(models.Gasto.importe_cuota), 0.0).label("importe"),
+            func.coalesce(func.sum(func.coalesce(models.Gasto.importe, models.Gasto.importe_cuota)), 0.0).label("importe"),
         )
         .filter(
             models.Gasto.user_id == current_user.id,
@@ -414,6 +421,31 @@ def get_balance_cuentas_mes(
     )
     gastos_pendientes_por_cuenta = {row.cuenta_id: float(row.importe or 0.0) for row in gastos_pendientes_q}
 
+    # ✅ NUEVO: gastos cotidianos pendientes (si aplican en tu modelo).
+    # Definición alineada: no pagados, y si existen flags activo/kpi, se aplican igual.
+    gc_filters = [
+        models.GastoCotidiano.user_id == current_user.id,
+        models.GastoCotidiano.pagado.is_(False),
+        models.GastoCotidiano.cuenta_id.in_(cuenta_ids),
+    ]
+    if hasattr(models.GastoCotidiano, "activo"):
+        gc_filters.append(models.GastoCotidiano.activo.is_(True))
+    if hasattr(models.GastoCotidiano, "kpi"):
+        gc_filters.append(models.GastoCotidiano.kpi.is_(True))
+
+    gastos_cotidianos_pendientes_q = (
+        db.query(
+            models.GastoCotidiano.cuenta_id.label("cuenta_id"),
+            func.coalesce(func.sum(models.GastoCotidiano.importe), 0.0).label("importe"),
+        )
+        .filter(*gc_filters)
+        .group_by(models.GastoCotidiano.cuenta_id)
+        .all()
+    )
+    gastos_cotidianos_pendientes_por_cuenta = {
+        row.cuenta_id: float(row.importe or 0.0) for row in gastos_cotidianos_pendientes_q
+    }
+
     # 6) Construcción de objetos SaldoCuentaItem
     saldos_cuentas: list[SaldoCuentaItem] = []
 
@@ -425,8 +457,8 @@ def get_balance_cuentas_mes(
 
         ingresos_pend = ingresos_pendientes_por_cuenta.get(c.id, 0.0)
         gastos_pend = gastos_pendientes_por_cuenta.get(c.id, 0.0)
+        gastos_cot_pend = gastos_cotidianos_pendientes_por_cuenta.get(c.id, 0.0)
 
-        # Mantienes esquema actual: gestionables/cotidianos pendientes
         saldos_cuentas.append(
             SaldoCuentaItem(
                 cuenta_id=c.id,
@@ -436,7 +468,7 @@ def get_balance_cuentas_mes(
                 entradas=round(entradas, 2),
                 fin=round(saldo_actual, 2),
                 gastos_gestionables_pendientes=round(gastos_pend, 2),
-                gastos_cotidianos_pendientes=0.0,
+                gastos_cotidianos_pendientes=round(gastos_cot_pend, 2),
                 ingresos_pendientes=round(ingresos_pend, 2),
             )
         )
@@ -452,13 +484,6 @@ def get_balance_cuentas_mes(
 
     # ------------------------------------------------------------
     # KPI Ahorro (legacy) + nuevos totales para "Ahorrado neto"
-    #
-    # Legacy:
-    # - ahorro_mes_total: lo mantenemos tal como estaba para no alterar resultados en v2.
-    #
-    # Nuevo:
-    # - gastos_ahorro_total: gastos AHO pagados en el mes (importe_cuota fallback importe)
-    # - ingresos_reintegro_ahorro_total: ingresos cobrados tipo_id=TING-2IB5N9
     # ------------------------------------------------------------
 
     # NUEVO: total gastos ahorro (importe real)
