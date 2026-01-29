@@ -2,45 +2,73 @@
 
 from __future__ import annotations
 
+"""
+Day-to-day analysis (GappoMobile V3)
+
+Qué devuelve:
+- KPIs de Hoy / Semana / Mes (gastos cotidianos)
+- Distribución por categoría, proveedores, tendencias 7 días
+- Series diaria (mes) y mensual (últimos N meses)
+- Alertas legacy + insights estructurados
+
+CAMBIO (tu petición):
+- Presupuesto mensual = "presupuesto marcado" (tabla `gastos`, columna `importe_cuota`,
+  filtrado por `segmento_id = 'COT-12345'` y `user_id`).
+- Consumo mensual para el indicador (month.gastado_mes) usa el split del mes:
+    * YO    -> pagado_mes   (pagado=True)   ✅ en tu ejemplo: 901.51
+    * OTRO  -> invitado_mes (pagado=False)
+    * TODOS -> total_mes    (sin filtro pagado)
+
+Importante:
+- No se pierde funcionalidad: el filtro `pago` sigue aplicando a Hoy/Semana/Categorías/Proveedores/Series/Tendencias.
+- El split mensual (total/pagado/invitado) sigue siendo independiente del `pago` (como ya tenías).
+"""
+
 from datetime import date, datetime, timedelta
 from typing import Dict, List, Optional, Tuple
 
 from fastapi import APIRouter, Depends, Query
-from sqlalchemy import func, extract
+from sqlalchemy import extract, func
 from sqlalchemy.orm import Session
 from typing_extensions import Literal
 
-from backend.app.db.session import get_db
-from backend.app.db import models
-
-# ✅ Auth multi-tenant
 from backend.app.api.v1.auth_router import require_user
-
+from backend.app.db import models
+from backend.app.db.session import get_db
 from backend.app.schemas.day_to_day_analysis import (
+    CategoryKpi,
+    CategoryMonth,
+    DailySeriesItem,
     DayToDayAnalysisResponse,
+    EvolutionKpis,
+    InsightItem,
+    Last7DayItem,
+    MonthSummary,
+    MonthlySeriesItem,
+    ProviderItem,
     TodaySummary,
     WeekSummary,
-    MonthSummary,
-    CategoryMonth,
-    CategoryKpi,
-    ProviderItem,
-    Last7DayItem,
-    # series / evolución
-    DailySeriesItem,
-    MonthlySeriesItem,
-    EvolutionKpis,
-    # ✅ insights estructurados
-    InsightItem,
 )
 
 router = APIRouter(
-    prefix="/analytics",   # se completa con /api/v1 en main.py
+    prefix="/analytics",  # se completa con /api/v1 en main.py
     tags=["analytics"],
 )
 
-# ---------------------------------------------------------------------------
+# =============================================================================
+# Constantes de negocio
+# =============================================================================
+
+# Segmento "Cotidianos" en la tabla `gastos` (presupuesto marcado)
+COTIDIANOS_SEGMENTO_ID = "COT-12345"
+
+# Para el insight de contribución en supermercados (depende del tipo_id)
+SUPERMERCADOS_TIPO_ID = "COM-TIPOGASTO-311A33BD"
+
+# =============================================================================
 # Helpers: tipado defensivo
-# ---------------------------------------------------------------------------
+# =============================================================================
+
 
 def _safe_user_id_int(user: models.User) -> int:
     """
@@ -60,35 +88,30 @@ def _safe_user_id_int(user: models.User) -> int:
 
 
 def _f(x: object, default: float = 0.0) -> float:
+    """Convierte valores a float de forma defensiva (None/Decimal/str/etc.)."""
     try:
         v = float(x)  # type: ignore[arg-type]
-        return v if v == v else default
+        return v if v == v else default  # NaN -> default
     except Exception:
         return default
 
 
-# ---------------------------------------------------------------------------
+# =============================================================================
 # Mapeo de tipos de gasto cotidiano a categorías de análisis
-# ---------------------------------------------------------------------------
+# =============================================================================
 
 TIPO_TO_CATEGORY: dict[str, str] = {
     "COM-TIPOGASTO-311A33BD": "SUPERMERCADOS",
     "ELE-TIPOGASTO-47CC77E5": "SUMINISTROS",
-
     "TIP-GASOLINA-SW1ZQO": "VEHICULOS",
     "MAV-TIPOGASTO-BVC356": "VEHICULOS",
     "PEA-TIPOGASTO-7HDY89": "VEHICULOS",
-
     "ROP-TIPOGASTO-S227BB": "ROPA",
-
     "RES-TIPOGASTO-26ROES": "RESTAURACION",
-
     "TRA-TIPOGASTO-RB133Z": "OCIO",
     "HOS-TIPOGASTO-357FDG": "OCIO",
     "ACT-TIPOGASTO-2X9H1Q": "OCIO",
 }
-
-SUPERMERCADOS_TIPO_ID = "COM-TIPOGASTO-311A33BD"
 
 
 def classify_category(tipo_id: Optional[str]) -> str:
@@ -97,9 +120,9 @@ def classify_category(tipo_id: Optional[str]) -> str:
     return TIPO_TO_CATEGORY.get(tipo_id, "OTROS")
 
 
-# ---------------------------------------------------------------------------
+# =============================================================================
 # Utilidades de fechas
-# ---------------------------------------------------------------------------
+# =============================================================================
 
 def parse_base_date(fecha_str: Optional[str]) -> date:
     if not fecha_str:
@@ -111,6 +134,7 @@ def parse_base_date(fecha_str: Optional[str]) -> date:
 
 
 def month_range(base: date) -> tuple[date, date]:
+    """[start, next_month)"""
     start = base.replace(day=1)
     if base.month == 12:
         next_month = date(base.year + 1, 1, 1)
@@ -120,6 +144,7 @@ def month_range(base: date) -> tuple[date, date]:
 
 
 def prev_month_range(base: date) -> tuple[date, date]:
+    """Mes anterior: [start_prev, start_curr)"""
     if base.month == 1:
         start_prev = date(base.year - 1, 12, 1)
     else:
@@ -129,6 +154,7 @@ def prev_month_range(base: date) -> tuple[date, date]:
 
 
 def week_range(base: date) -> tuple[date, date]:
+    """Semana ISO: lunes..domingo (inclusive)."""
     start = base - timedelta(days=base.weekday())
     end = start + timedelta(days=6)
     return start, end
@@ -144,21 +170,22 @@ def format_spanish_date(d: date) -> str:
 
 
 def add_months(d: date, months: int) -> date:
+    """Devuelve month_start tras desplazar N meses."""
     y = d.year + (d.month - 1 + months) // 12
     m = (d.month - 1 + months) % 12 + 1
     return date(y, m, 1)
 
 
-# ---------------------------------------------------------------------------
+# =============================================================================
 # Helpers de filtros
-# ---------------------------------------------------------------------------
+# =============================================================================
 
 def apply_pago_filter(query, GastoCotidiano, pago_mode: str):
     """
-    Filtro existente (no se toca):
-    - YO   => pagado=True
-    - OTRO => pagado=False
-    - TODOS => sin filtro
+    Filtro existente (se mantiene):
+    - YO     => pagado=True
+    - OTRO   => pagado=False
+    - TODOS  => sin filtro
     """
     if pago_mode == "YO":
         return query.filter(GastoCotidiano.pagado.is_(True))
@@ -191,19 +218,35 @@ def apply_categoria_filters(
 
 
 def apply_user_filter(query, GastoCotidiano, user_id: int):
-    """
-    Multi-tenant: restringe por user_id.
-
-    IMPORTANTE:
-    - En tu BD user_id es INTEGER.
-    - Siempre filtramos con int para evitar INTEGER = VARCHAR.
-    """
+    """Multi-tenant: restringe por user_id (siempre int)."""
     return query.filter(GastoCotidiano.user_id == user_id)
 
 
-# ---------------------------------------------------------------------------
-# ✅ NUEVO: agregación mensual split (total/pagado/invitado)
-# ---------------------------------------------------------------------------
+# =============================================================================
+# Presupuesto marcado (tabla `gastos`)
+# =============================================================================
+
+def _presupuesto_marcado_cotidianos(db: Session, user_id: int) -> float:
+    """
+    Presupuesto marcado de cotidianos:
+    - tabla: gastos (models.Gasto)
+    - columna: importe_cuota
+    - filtro: user_id + segmento_id='COT-12345'
+    """
+    Gasto = models.Gasto
+
+    row = (
+        db.query(func.coalesce(func.sum(Gasto.importe_cuota), 0).label("budget"))
+        .filter(Gasto.user_id == user_id)
+        .filter(Gasto.segmento_id == COTIDIANOS_SEGMENTO_ID)
+        .one()
+    )
+    return _f(getattr(row, "budget", 0.0), 0.0)
+
+
+# =============================================================================
+# Agregación mensual split (total/pagado/invitado) SIN depender del parámetro pago
+# =============================================================================
 
 def _month_totals_split(
     db: Session,
@@ -214,15 +257,11 @@ def _month_totals_split(
     user_id: int,
 ) -> tuple[float, float, float]:
     """
-    Devuelve (total_mes, pagado_mes, invitado_mes) SIN depender del parámetro 'pago'.
+    Devuelve (total_mes, pagado_mes, invitado_mes) SIN depender de 'pago'.
 
     - total_mes: suma importe sin filtrar por pagado
     - pagado_mes: suma importe pagado=True
     - invitado_mes: suma importe pagado=False
-
-    Importante:
-    - Respeta user_id.
-    - Respeta categoria/tipo_id para mantener coherencia con la pantalla cuando se filtra por contenedor/subtipo.
     """
     GastoCotidiano = models.GastoCotidiano
 
@@ -254,7 +293,7 @@ def _supermercados_split_global(
     user_id: int,
 ) -> tuple[float, float]:
     """
-    Split de supermercados para el insight:
+    Split de supermercados para insight:
       supermercados_pagado / supermercados_total
 
     Se calcula a nivel global del mes (no depende de categoria/tipo_id),
@@ -280,9 +319,9 @@ def _supermercados_split_global(
     return total, paid
 
 
-# ---------------------------------------------------------------------------
-# Helpers de agregación existentes
-# ---------------------------------------------------------------------------
+# =============================================================================
+# Agregaciones existentes (categorías, proveedores, 7 días)
+# =============================================================================
 
 def _aggregate_by_category(
     db: Session,
@@ -333,9 +372,9 @@ def _aggregate_providers_by_category(
     """
     Agrega GastoCotidiano por proveedor y categoría.
 
-    Nota defensiva:
-    - Si proveedor_id puede ser NULL o el proveedor no existe, usamos outerjoin para no romper.
-    - Nombre proveedor se normaliza a 'SIN PROVEEDOR' si no hay.
+    Defensivo:
+    - proveedor puede ser NULL o no existir -> outerjoin
+    - nombre normalizado a 'SIN PROVEEDOR'
     """
     GastoCotidiano = models.GastoCotidiano
     Proveedor = models.Proveedor
@@ -422,9 +461,9 @@ def _aggregate_last_7_days(
     return out
 
 
-# ---------------------------------------------------------------------------
+# =============================================================================
 # Series para gráficas
-# ---------------------------------------------------------------------------
+# =============================================================================
 
 def _daily_series_for_month(
     db: Session,
@@ -573,9 +612,9 @@ def _compute_evolution_kpis(serie_mensual: List[MonthlySeriesItem]) -> Evolution
     )
 
 
-# ---------------------------------------------------------------------------
+# =============================================================================
 # Insights estructurados
-# ---------------------------------------------------------------------------
+# =============================================================================
 
 def _build_insights(
     *,
@@ -586,27 +625,23 @@ def _build_insights(
     week_total: float,
     week_limit: float,
     week_projection: float,
-
-    # ✅ NUEVO: splits reales para reglas pedidas
+    # splits reales
     month_total: float,
     month_paid: float,
     month_guest: float,
-
     supermercados_total: float,
     supermercados_paid: float,
 ) -> List[InsightItem]:
     """
     Genera insights estructurados.
 
-    Importante:
-    - Mantiene la lógica existente (presupuesto, concentración, evolución, semana).
-    - Añade las 2 reglas pedidas:
-        1) Invitaciones >= 30% del total mensual -> "gorras"
-        2) Supermercados: pagado/total < 75% -> "no contribuyes"
+    Mantiene lógica existente + añade reglas:
+      1) Invitaciones >= 30% del total mensual -> "gorras"
+      2) Supermercados: pagado/total < 75% -> "no contribuyes"
     """
     insights: List[InsightItem] = []
 
-    # Presupuesto mensual (si existe)
+    # Presupuesto mensual (marcado)
     pct_mes_usado = (gastado_mes / presupuesto_mes) * 100.0 if presupuesto_mes > 0 else 0.0
     if presupuesto_mes > 0:
         severity: Literal["info", "warning", "critical"] = "info"
@@ -619,7 +654,7 @@ def _build_insights(
             InsightItem(
                 id="BUDGET_MONTH_USAGE",
                 title="Presupuesto mensual",
-                message=f"Has consumido el {pct_mes_usado:.1f}% del presupuesto mensual estimado de gastos cotidianos.",
+                message=f"Has consumido el {pct_mes_usado:.1f}% del presupuesto mensual marcado de gastos cotidianos.",
                 severity=severity,
                 meta={
                     "pct": round(pct_mes_usado, 1),
@@ -652,7 +687,7 @@ def _build_insights(
                 )
             )
 
-    # Evolución vs mes anterior
+    # Evolución vs mes anterior (basado en serie mensual)
     if kpis_evolucion.variacion_mes_abs > 0:
         insights.append(
             InsightItem(
@@ -680,7 +715,7 @@ def _build_insights(
             )
         )
 
-    # Semana: proyección vs límite (si hay)
+    # Semana: proyección vs límite
     if week_limit > 0:
         if week_projection > week_limit * 1.15:
             insights.append(
@@ -711,9 +746,7 @@ def _build_insights(
                 )
             )
 
-    # -----------------------------------------------------------------------
-    # ✅ REGLA 1 (PEDIDA): Invitaciones >= 30% del total mensual
-    # -----------------------------------------------------------------------
+    # Regla 1: invitaciones >= 30% del total mensual (split real)
     if month_total > 0:
         guest_pct = (month_guest / month_total) * 100.0
         if guest_pct >= 30.0:
@@ -732,9 +765,7 @@ def _build_insights(
                 )
             )
 
-    # -----------------------------------------------------------------------
-    # ✅ REGLA 2 (PEDIDA): Supermercados pagado/total < 75%
-    # -----------------------------------------------------------------------
+    # Regla 2: supermercados pagado/total < 75%
     if supermercados_total > 0:
         ratio = supermercados_paid / supermercados_total
         if ratio < 0.75:
@@ -753,7 +784,6 @@ def _build_insights(
                 )
             )
 
-    # Si no hay ninguno, dejamos al menos uno informativo (evita UI vacía)
     if not insights:
         insights.append(
             InsightItem(
@@ -767,34 +797,47 @@ def _build_insights(
     return insights
 
 
-# ---------------------------------------------------------------------------
+# =============================================================================
 # Endpoint principal
-# ---------------------------------------------------------------------------
+# =============================================================================
 
 @router.get("/day-to-day", response_model=DayToDayAnalysisResponse)
 def get_day_to_day_analysis(
     fecha: str | None = Query(default=None, description="Fecha base YYYY-MM-DD. Por defecto, hoy."),
-    pago: Literal["YO", "OTRO", "TODOS"] = Query("YO", description="YO=pagado True, OTRO=pagado False, TODOS=sin filtro"),
-    categoria: Optional[str] = Query(default=None, description="Categoría de análisis (SUPERMERCADOS, VEHICULOS, ...). Opcional."),
-    tipo_id: Optional[str] = Query(default=None, description="Tipo concreto de gasto cotidiano (tipo_id). Opcional; si se informa, tiene prioridad sobre categoria."),
-    months_back: int = Query(default=12, ge=2, le=36, description="Ventana de meses para serie mensual (incluye el mes actual)."),
+    pago: Literal["YO", "OTRO", "TODOS"] = Query(
+        "YO",
+        description="YO=pagado True, OTRO=pagado False, TODOS=sin filtro"
+    ),
+    categoria: Optional[str] = Query(
+        default=None,
+        description="Categoría de análisis (SUPERMERCADOS, VEHICULOS, ...). Opcional."
+    ),
+    tipo_id: Optional[str] = Query(
+        default=None,
+        description="Tipo concreto de gasto cotidiano (tipo_id). Opcional; si se informa, tiene prioridad sobre categoria."
+    ),
+    months_back: int = Query(
+        default=12,
+        ge=2,
+        le=36,
+        description="Ventana de meses para serie mensual (incluye el mes actual).",
+    ),
     db: Session = Depends(get_db),
     current_user: models.User = Depends(require_user),
 ):
     """
     Devuelve el análisis 'día a día' de los gastos cotidianos.
 
-    Mantiene comportamiento actual + añade split mensual sin ambigüedad.
-
-    ✅ NUEVO:
-    - month.total_mes / month.pagado_mes / month.invitado_mes:
-      * NO dependen de 'pago'
-      * Sí respetan (user_id + categoria/tipo_id)
-    - insights: incluye reglas adicionales (gorras + supermercados contribución)
+    Cambios clave (presupuesto marcado):
+    - month.presupuesto_mes se obtiene de `gastos.importe_cuota` para segmento COT-12345.
+    - month.gastado_mes se decide desde el split real del mes:
+        YO    -> pagado_mes (pagado=True)
+        OTRO  -> invitado_mes
+        TODOS -> total_mes
     """
     base_date = parse_base_date(fecha)
 
-    # ✅ CRÍTICO: user_id como int (evita INTEGER = VARCHAR)
+    # CRÍTICO: user_id como int (evita INTEGER = VARCHAR)
     user_id = _safe_user_id_int(current_user)
 
     month_start, month_next = month_range(base_date)
@@ -803,9 +846,9 @@ def get_day_to_day_analysis(
 
     GastoCotidiano = models.GastoCotidiano
 
-    # -----------------------------------------------------------------------
-    # Hoy
-    # -----------------------------------------------------------------------
+    # -------------------------------------------------------------------------
+    # HOY
+    # -------------------------------------------------------------------------
     today_query = (
         db.query(
             func.coalesce(func.sum(GastoCotidiano.importe), 0).label("total"),
@@ -822,7 +865,7 @@ def get_day_to_day_analysis(
     movimientos_hoy = int(today_row.movs or 0)
     ticket_medio_hoy = total_hoy / movimientos_hoy if movimientos_hoy > 0 else 0.0
 
-    # Ayer
+    # AYER
     ayer = base_date - timedelta(days=1)
     yesterday_query = (
         db.query(func.coalesce(func.sum(GastoCotidiano.importe), 0).label("total"))
@@ -854,9 +897,9 @@ def get_day_to_day_analysis(
         tendencia=tendencia_texto,
     )
 
-    # -----------------------------------------------------------------------
-    # Semana actual
-    # -----------------------------------------------------------------------
+    # -------------------------------------------------------------------------
+    # SEMANA ACTUAL (respeta filtro 'pago')
+    # -------------------------------------------------------------------------
     week_query = (
         db.query(func.coalesce(func.sum(GastoCotidiano.importe), 0).label("total"))
         .filter(GastoCotidiano.fecha >= week_start)
@@ -874,50 +917,12 @@ def get_day_to_day_analysis(
     gasto_medio_diario_semana = total_semana / dias_consumidos if dias_consumidos > 0 else 0.0
     proyeccion_fin_semana = gasto_medio_diario_semana * 7
 
-    # -----------------------------------------------------------------------
-    # Mes en curso (con filtro 'pago' para mantener semántica)
-    # -----------------------------------------------------------------------
-    month_query = (
-        db.query(func.coalesce(func.sum(GastoCotidiano.importe), 0).label("total"))
-        .filter(GastoCotidiano.fecha >= month_start)
-        .filter(GastoCotidiano.fecha < month_next)
-    )
-    month_query = apply_user_filter(month_query, GastoCotidiano, user_id)
-    month_query = apply_pago_filter(month_query, GastoCotidiano, pago)
-    month_query = apply_categoria_filters(month_query, GastoCotidiano, categoria, tipo_id)
-    month_total_row = month_query.one()
-    gastado_mes = _f(month_total_row.total, 0.0)
-
-    # Mes anterior (para presupuesto estimado) - consideración: mantiene semántica con filtro 'pago'
-    prev_month_query = (
-        db.query(func.coalesce(func.sum(GastoCotidiano.importe), 0).label("total"))
-        .filter(GastoCotidiano.fecha >= prev_month_start)
-        .filter(GastoCotidiano.fecha < prev_month_next)
-    )
-    prev_month_query = apply_user_filter(prev_month_query, GastoCotidiano, user_id)
-    prev_month_query = apply_pago_filter(prev_month_query, GastoCotidiano, pago)
-    prev_month_query = apply_categoria_filters(prev_month_query, GastoCotidiano, categoria, tipo_id)
-    prev_month_total_row = prev_month_query.one()
-    gastado_mes_anterior = _f(prev_month_total_row.total, 0.0)
-
-    # Presupuesto estimado (tu lógica actual)
-    if gastado_mes_anterior > 0:
-        presupuesto_mes = gastado_mes_anterior * 1.1
-    elif gastado_mes > 0:
-        presupuesto_mes = gastado_mes * 1.3
-    else:
-        presupuesto_mes = 0.0
-
-    limite_semana = presupuesto_mes / 4 if presupuesto_mes > 0 else (gastado_mes or 0.0)
-
-    week_summary = WeekSummary(
-        total_semana=total_semana,
-        limite_semana=limite_semana,
-        proyeccion_fin_semana=proyeccion_fin_semana,
-        dias_restantes=max(0, (week_end - base_date).days),
-    )
-
-    # ✅ NUEVO: split real del mes (independiente de 'pago', pero coherente con categoria/tipo_id)
+    # -------------------------------------------------------------------------
+    # MES EN CURSO
+    # 1) Split REAL del mes (independiente de 'pago')
+    # 2) Gastado_mes (semántica) se decide con 'pago' usando el split
+    # 3) Presupuesto_mes = marcado (tabla gastos)
+    # -------------------------------------------------------------------------
     total_mes_real, pagado_mes_real, invitado_mes_real = _month_totals_split(
         db=db,
         month_start=month_start,
@@ -927,25 +932,44 @@ def get_day_to_day_analysis(
         user_id=user_id,
     )
 
+    if pago == "YO":
+        gastado_mes = pagado_mes_real  # ✅ tu caso: 901.51
+    elif pago == "OTRO":
+        gastado_mes = invitado_mes_real
+    else:
+        gastado_mes = total_mes_real
+
+    presupuesto_mes = _presupuesto_marcado_cotidianos(db, user_id)
+
+    # Límite semanal: derivado del presupuesto marcado (si existe)
+    limite_semana = presupuesto_mes / 4 if presupuesto_mes > 0 else (gastado_mes or 0.0)
+
+    week_summary = WeekSummary(
+        total_semana=total_semana,
+        limite_semana=limite_semana,
+        proyeccion_fin_semana=proyeccion_fin_semana,
+        dias_restantes=max(0, (week_end - base_date).days),
+    )
+
     month_summary = MonthSummary(
         presupuesto_mes=presupuesto_mes,
         gastado_mes=gastado_mes,
-
-        # ✅ NUEVO
+        # split mensual real (siempre útil para UI / insights)
         total_mes=total_mes_real,
         pagado_mes=pagado_mes_real,
         invitado_mes=invitado_mes_real,
     )
 
-    # -----------------------------------------------------------------------
-    # Distribución por categoría + KPIs vs mes anterior
-    # -----------------------------------------------------------------------
+    # -------------------------------------------------------------------------
+    # DISTRIBUCIÓN POR CATEGORÍA + KPIs vs mes anterior (respeta filtro 'pago')
+    # -------------------------------------------------------------------------
     cat_curr = _aggregate_by_category(db, month_start, month_next, pago, categoria, tipo_id, user_id)
     cat_prev = _aggregate_by_category(db, prev_month_start, prev_month_next, pago, categoria, tipo_id, user_id)
 
     categorias_mes: List[CategoryMonth] = []
     category_kpis: Dict[str, CategoryKpi] = {}
 
+    # Denominador para %: usamos el "gastado_mes" semántico (coherente con 'pago' en cat_curr)
     total_mes_para_pct = gastado_mes if gastado_mes > 0 else 1.0
 
     for key, data_curr in cat_curr.items():
@@ -958,8 +982,16 @@ def get_day_to_day_analysis(
         total_prev = float(prev_data["total"])
         tickets_prev = float(prev_data["tickets"])
 
-        var_importe_pct = ((total_cat - total_prev) / total_prev) * 100.0 if total_prev > 0 else (100.0 if total_cat > 0 else 0.0)
-        var_tickets_pct = ((tickets_cat - tickets_prev) / tickets_prev) * 100.0 if tickets_prev > 0 else (100.0 if tickets_cat > 0 else 0.0)
+        var_importe_pct = (
+            ((total_cat - total_prev) / total_prev) * 100.0
+            if total_prev > 0
+            else (100.0 if total_cat > 0 else 0.0)
+        )
+        var_tickets_pct = (
+            ((tickets_cat - tickets_prev) / tickets_prev) * 100.0
+            if tickets_prev > 0
+            else (100.0 if tickets_cat > 0 else 0.0)
+        )
 
         categorias_mes.append(
             CategoryMonth(
@@ -982,33 +1014,35 @@ def get_day_to_day_analysis(
 
     categorias_mes.sort(key=lambda c: c.importe, reverse=True)
 
-    # -----------------------------------------------------------------------
-    # Proveedores por categoría
-    # -----------------------------------------------------------------------
+    # -------------------------------------------------------------------------
+    # PROVEEDORES POR CATEGORÍA (respeta filtro 'pago')
+    # -------------------------------------------------------------------------
     proveedores_por_categoria = _aggregate_providers_by_category(
         db, month_start, month_next, pago, categoria, tipo_id, user_id
     )
 
-    # -----------------------------------------------------------------------
-    # Últimos 7 días
-    # -----------------------------------------------------------------------
+    # -------------------------------------------------------------------------
+    # ÚLTIMOS 7 DÍAS (respeta filtro 'pago')
+    # -------------------------------------------------------------------------
     ultimos_7_dias = _aggregate_last_7_days(db, base_date, pago, categoria, tipo_id, user_id)
 
-    # -----------------------------------------------------------------------
-    # Series + KPIs evolución
-    # -----------------------------------------------------------------------
+    # -------------------------------------------------------------------------
+    # SERIES + KPIs EVOLUCIÓN (respeta filtro 'pago')
+    # -------------------------------------------------------------------------
     serie_diaria_mes = _daily_series_for_month(db, month_start, month_next, pago, categoria, tipo_id, user_id)
     serie_mensual = _monthly_series_last_n(db, base_date, months_back, pago, categoria, tipo_id, user_id)
     kpis_evolucion = _compute_evolution_kpis(serie_mensual)
 
-    # -----------------------------------------------------------------------
-    # Alertas (compatibilidad)
-    # -----------------------------------------------------------------------
+    # -------------------------------------------------------------------------
+    # ALERTAS (compatibilidad) + INSIGHTS estructurados
+    # -------------------------------------------------------------------------
     alertas: List[str] = []
 
     pct_mes_usado = (gastado_mes / presupuesto_mes) * 100.0 if presupuesto_mes > 0 else 0.0
     if presupuesto_mes > 0:
-        alertas.append(f"Has consumido el {pct_mes_usado:.1f}% del presupuesto mensual estimado de gastos cotidianos.")
+        alertas.append(
+            f"Has consumido el {pct_mes_usado:.1f}% del presupuesto mensual marcado de gastos cotidianos."
+        )
 
     for cat in categorias_mes:
         if cat.porcentaje >= 40:
@@ -1022,9 +1056,7 @@ def get_day_to_day_analysis(
     if not alertas:
         alertas.append("No hay alertas destacadas este mes en tus gastos cotidianos.")
 
-    # -----------------------------------------------------------------------
-    # ✅ NUEVO: supermercados split global (para insight 2)
-    # -----------------------------------------------------------------------
+    # Split supermercados global (para insight 2)
     supermercados_total, supermercados_paid = _supermercados_split_global(
         db=db,
         month_start=month_start,
@@ -1032,9 +1064,6 @@ def get_day_to_day_analysis(
         user_id=user_id,
     )
 
-    # -----------------------------------------------------------------------
-    # ✅ Insights estructurados (incluye reglas nuevas)
-    # -----------------------------------------------------------------------
     insights = _build_insights(
         presupuesto_mes=presupuesto_mes,
         gastado_mes=gastado_mes,
@@ -1043,18 +1072,16 @@ def get_day_to_day_analysis(
         week_total=total_semana,
         week_limit=limite_semana,
         week_projection=proyeccion_fin_semana,
-
         month_total=total_mes_real,
         month_paid=pagado_mes_real,
         month_guest=invitado_mes_real,
-
         supermercados_total=supermercados_total,
         supermercados_paid=supermercados_paid,
     )
 
-    # -----------------------------------------------------------------------
-    # Respuesta
-    # -----------------------------------------------------------------------
+    # -------------------------------------------------------------------------
+    # RESPUESTA
+    # -------------------------------------------------------------------------
     return DayToDayAnalysisResponse(
         today=today_summary,
         week=week_summary,
@@ -1065,7 +1092,6 @@ def get_day_to_day_analysis(
         ultimos_7_dias=ultimos_7_dias,
         alertas=alertas,
         insights=insights,
-
         # nuevos campos
         serie_diaria_mes=serie_diaria_mes,
         serie_mensual=serie_mensual,
