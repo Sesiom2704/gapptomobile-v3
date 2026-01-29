@@ -226,22 +226,39 @@ def apply_user_filter(query, GastoCotidiano, user_id: int):
 # Presupuesto marcado (tabla `gastos`)
 # =============================================================================
 
-def _presupuesto_marcado_cotidianos(db: Session, user_id: int) -> float:
+def _presupuesto_marcado_cotidianos(
+    db: Session,
+    user_id: int,
+    categoria: Optional[str],
+    tipo_id: Optional[str],
+) -> float:
     """
-    Presupuesto marcado de cotidianos:
-    - tabla: gastos (models.Gasto)
-    - columna: importe_cuota
-    - filtro: user_id + segmento_id='COT-12345'
+    Presupuesto marcado de cotidianos (tabla `gastos`, importe_cuota),
+    aplicando el mismo contexto del endpoint:
+      - si tipo_id -> presupuesto de ese tipo
+      - si categoria -> suma de tipos de esa categoria (TIPO_TO_CATEGORY)
+      - si ninguno -> total
     """
     Gasto = models.Gasto
 
-    row = (
+    q = (
         db.query(func.coalesce(func.sum(Gasto.importe_cuota), 0).label("budget"))
         .filter(Gasto.user_id == user_id)
         .filter(Gasto.segmento_id == COTIDIANOS_SEGMENTO_ID)
-        .one()
     )
+
+    # Prioridad: tipo_id
+    if tipo_id:
+        q = q.filter(Gasto.tipo_id == tipo_id)
+    elif categoria:
+        cat_u = categoria.upper()
+        tipo_ids = [tid for tid, cat in TIPO_TO_CATEGORY.items() if cat.upper() == cat_u]
+        if tipo_ids:
+            q = q.filter(Gasto.tipo_id.in_(tipo_ids))
+
+    row = q.one()
     return _f(getattr(row, "budget", 0.0), 0.0)
+
 
 
 # =============================================================================
@@ -939,7 +956,7 @@ def get_day_to_day_analysis(
     else:
         gastado_mes = total_mes_real
 
-    presupuesto_mes = _presupuesto_marcado_cotidianos(db, user_id)
+    presupuesto_mes = _presupuesto_marcado_cotidianos(db, user_id, categoria, tipo_id)
 
     # Límite semanal: derivado del presupuesto marcado (si existe)
     limite_semana = presupuesto_mes / 4 if presupuesto_mes > 0 else (gastado_mes or 0.0)
