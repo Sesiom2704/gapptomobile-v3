@@ -92,6 +92,7 @@ PROM_GROUPS = {
     COT_TIPOS["ELECTRICIDAD"]: [COT_TIPOS["ELECTRICIDAD"]],
     COT_TIPOS["COMIDA"]:       [COT_TIPOS["COMIDA"]],
     COT_TIPOS["ROPA"]:         [COT_TIPOS["ROPA"]],
+    COT_TIPOS["ACTIVIDADES"]:  [COT_TIPOS["ACTIVIDADES"]],
 }
 
 
@@ -417,15 +418,15 @@ def _avg_3m_for_tipo_user(
     m2: tuple[date, date],
     m3: tuple[date, date],
 ) -> float:
+    """
+    Media de los últimos 3 meses completos (excluye mes actual en el caller).
+    IMPORTANTE: incluye meses con 0 para no sesgar el presupuesto.
+    """
     (s1, e1), (s2, e2), (s3, e3) = m1, m2, m3
     v3 = _sum_gc_tipo_mes_user(db, user_id, tipo_id, s3, e3)
     v2 = _sum_gc_tipo_mes_user(db, user_id, tipo_id, s2, e2)
     v1 = _sum_gc_tipo_mes_user(db, user_id, tipo_id, s1, e1)
-    used = [v for v in (v3, v2, v1) if v > 0]
-    if not used:
-        return 0.0
-    return round(sum(used) / len(used), 2)
-
+    return round((v3 + v2 + v1) / 3.0, 2)
 
 def _sum_of_avgs_3m_user(
     db: Session,
