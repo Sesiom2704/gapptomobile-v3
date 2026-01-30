@@ -22,6 +22,10 @@ CAMBIO (tu petición):
 Importante:
 - No se pierde funcionalidad: el filtro `pago` sigue aplicando a Hoy/Semana/Categorías/Proveedores/Series/Tendencias.
 - El split mensual (total/pagado/invitado) sigue siendo independiente del `pago` (como ya tenías).
+
+✅ AÑADIDO AHORA:
+- En proveedores_por_categoria, cada ProviderItem incluye `tipo_id` (opcional) para que el frontend
+  pueda desglosar el ranking por componentes (p.ej. OCIO → Transporte/Hospedaje/Actividades).
 """
 
 from datetime import date, datetime, timedelta
@@ -260,7 +264,6 @@ def _presupuesto_marcado_cotidianos(
     return _f(getattr(row, "budget", 0.0), 0.0)
 
 
-
 # =============================================================================
 # Agregación mensual split (total/pagado/invitado) SIN depender del parámetro pago
 # =============================================================================
@@ -392,6 +395,9 @@ def _aggregate_providers_by_category(
     Defensivo:
     - proveedor puede ser NULL o no existir -> outerjoin
     - nombre normalizado a 'SIN PROVEEDOR'
+
+    ✅ Importante:
+    - Se incluye `tipo_id` en cada ProviderItem para permitir ranking por componentes en frontend.
     """
     GastoCotidiano = models.GastoCotidiano
     Proveedor = models.Proveedor
@@ -424,6 +430,7 @@ def _aggregate_providers_by_category(
             importe=_f(getattr(r, "total", 0), 0.0),
             num_compras=int(getattr(r, "tickets", 0) or 0),
             tendencia="FLAT",  # TODO: tendencia real si comparas con mes anterior por proveedor
+            tipo_id=(getattr(r, "tipo_id", None) or None),  # ✅ NUEVO (para componentes)
         )
         result.setdefault(categoria_key, []).append(provider_item)
 
@@ -950,7 +957,7 @@ def get_day_to_day_analysis(
     )
 
     if pago == "YO":
-        gastado_mes = pagado_mes_real  # ✅ tu caso: 901.51
+        gastado_mes = pagado_mes_real
     elif pago == "OTRO":
         gastado_mes = invitado_mes_real
     else:
@@ -971,7 +978,7 @@ def get_day_to_day_analysis(
     month_summary = MonthSummary(
         presupuesto_mes=presupuesto_mes,
         gastado_mes=gastado_mes,
-        # split mensual real (siempre útil para UI / insights)
+        # split mensual real
         total_mes=total_mes_real,
         pagado_mes=pagado_mes_real,
         invitado_mes=invitado_mes_real,
@@ -986,7 +993,6 @@ def get_day_to_day_analysis(
     categorias_mes: List[CategoryMonth] = []
     category_kpis: Dict[str, CategoryKpi] = {}
 
-    # Denominador para %: usamos el "gastado_mes" semántico (coherente con 'pago' en cat_curr)
     total_mes_para_pct = gastado_mes if gastado_mes > 0 else 1.0
 
     for key, data_curr in cat_curr.items():
@@ -1073,7 +1079,6 @@ def get_day_to_day_analysis(
     if not alertas:
         alertas.append("No hay alertas destacadas este mes en tus gastos cotidianos.")
 
-    # Split supermercados global (para insight 2)
     supermercados_total, supermercados_paid = _supermercados_split_global(
         db=db,
         month_start=month_start,
@@ -1096,9 +1101,6 @@ def get_day_to_day_analysis(
         supermercados_paid=supermercados_paid,
     )
 
-    # -------------------------------------------------------------------------
-    # RESPUESTA
-    # -------------------------------------------------------------------------
     return DayToDayAnalysisResponse(
         today=today_summary,
         week=week_summary,
@@ -1109,7 +1111,6 @@ def get_day_to_day_analysis(
         ultimos_7_dias=ultimos_7_dias,
         alertas=alertas,
         insights=insights,
-        # nuevos campos
         serie_diaria_mes=serie_diaria_mes,
         serie_mensual=serie_mensual,
         kpis_evolucion=kpis_evolucion,

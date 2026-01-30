@@ -5,23 +5,17 @@
 // CAMBIOS solicitados (TARJETA SUPERIOR):
 // - Cambiar “TOTAL GASTADO” por “TOTALES” y mostrar el nombre del mes.
 // - Mostrar 2 totales:
-//    1) Pagado por mí (pagado = true / lo que ya tenías como gastado_mes)
-//    2) Invitado (pagado = false) -> suma de importe donde pagado=false
+//    1) Pagado por mí (pagado = true / split mensual pagado_mes)
+//    2) Invitado (pagado = false / split mensual invitado_mes)
 // - Mostrar el % de cada bloque sobre el total general del mes (sin filtrar por pagado).
 // - Añadir insights:
 //    * Si invitado >= 30% del total general -> alerta “te estás convirtiendo en un gorras!”
 //    * Si (Supermercados pagado / Supermercados total) < 75% -> insight “NO estás contribuyendo lo suficiente.”
 //
-// NOTA IMPORTANTE (transparencia técnica):
-// - En tu snippet original, el “resto del fichero” estaba recortado.
-// - Para NO perder funcionalidad, aquí dejo implementadas secciones estándar (resumen, concentración y charts)
-//   usando los datos YA presentes en este archivo (ultimos_7_dias, serie_diaria_mes, serie_mensual, kpis_evolucion,
-//   category_kpis, categorias_mes, etc.). Si tu versión real tenía secciones adicionales específicas,
-//   esta base no debería romper nada, pero podrías querer reinsertar cualquier bloque extra que tuvieras.
+// EXTRA solicitado previamente:
+// - Añadir “Ranking por proveedores” debajo de “Ranking por contenedores”
+//   y, si hay componentes (OCIO), mostrar ranking por componente (Transporte/Hospedaje/Actividades) usando tipo_id.
 //
-// -----------------------------------------------------------------------------
-//
-// Importante: este archivo está pensado para copiar/pegar.
 // -----------------------------------------------------------------------------
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
@@ -115,6 +109,10 @@ function safeNum(n: any): number {
   return Number.isFinite(v) ? v : 0;
 }
 
+function safeStr(x: any): string {
+  return typeof x === 'string' ? x : '';
+}
+
 function fmtCurrency(n: number | undefined | null) {
   const v = typeof n === 'number' ? n : 0;
   try {
@@ -202,6 +200,44 @@ function isFutureMonth(d: Date) {
 }
 
 // --------------------
+// Ranking Proveedores helpers
+// --------------------
+
+function normalizeProviderName(name: string) {
+  return (name || '').trim().toUpperCase();
+}
+
+function aggregateProvidersByName(list: any[]) {
+  const map: Record<string, any> = {};
+
+  (list || []).forEach((p) => {
+    const key = normalizeProviderName(p?.nombre);
+    if (!key) return;
+
+    if (!map[key]) {
+      map[key] = {
+        nombre: key,
+        importe: safeNum(p?.importe),
+        num_compras: Math.max(0, Math.trunc(safeNum(p?.num_compras))),
+        tendencia: p?.tendencia ?? 'FLAT',
+        tipo_id: safeStr(p?.tipo_id) || null,
+      };
+    } else {
+      map[key].importe = safeNum(map[key].importe) + safeNum(p?.importe);
+      map[key].num_compras =
+        Math.max(0, Math.trunc(safeNum(map[key].num_compras))) + Math.max(0, Math.trunc(safeNum(p?.num_compras)));
+
+      const incomingTid = safeStr(p?.tipo_id) || null;
+      if (incomingTid && map[key].tipo_id && incomingTid !== map[key].tipo_id) {
+        map[key].tipo_id = null; // mezcla de tipos => null
+      }
+    }
+  });
+
+  return Object.values(map).sort((a: any, b: any) => safeNum(b?.importe) - safeNum(a?.importe));
+}
+
+// --------------------
 // Tipado route params
 // --------------------
 
@@ -252,42 +288,45 @@ type ChartTooltip = {
 type Split = { total: number; paid: number; guest: number };
 
 /**
- * Intenta leer un split (total/paid/guest) de un objeto con claves variables,
- * para no casarnos con un naming exacto del backend.
+ * ✅ FIX IMPORTANTE:
+ * En esta pantalla queremos el split mensual REAL (independiente del filtro pago),
+ * por eso priorizamos:
+ * - total_mes
+ * - pagado_mes
+ * - invitado_mes
+ * y solo como fallback usamos gastado_mes (que depende de pago=YO/OTRO/TODOS).
  */
 function readSplit(obj: any): Split {
   const total =
+    safeNum(obj?.total_mes) ||
     safeNum(obj?.total) ||
     safeNum(obj?.importe_total) ||
-    safeNum(obj?.total_mes) ||
     safeNum(obj?.gastado_total) ||
     safeNum(obj?.importe) ||
     0;
 
   const paid =
+    safeNum(obj?.pagado_mes) ||
     safeNum(obj?.paid) ||
     safeNum(obj?.pagado) ||
     safeNum(obj?.importe_pagado) ||
-    safeNum(obj?.gastado_mes) ||
+    safeNum(obj?.gastado_pagado) ||
+    safeNum(obj?.gastado_mes) || // fallback antiguo (dependía de pago)
     safeNum(obj?.importe_pagado_por_mi) ||
     0;
 
   const guest =
+    safeNum(obj?.invitado_mes) ||
     safeNum(obj?.guest) ||
     safeNum(obj?.invitado) ||
     safeNum(obj?.importe_invitado) ||
-    safeNum(obj?.invitado_mes) ||
+    safeNum(obj?.gastado_invitado) ||
     safeNum(obj?.importe_no_pagado) ||
     0;
 
-  // Si el backend solo trae paid + guest, total puede venir a 0: lo reconstruimos.
   const computedTotal = total > 0 ? total : paid + guest;
 
-  return {
-    total: computedTotal,
-    paid,
-    guest,
-  };
+  return { total: computedTotal, paid, guest };
 }
 
 function pctOf(part: number, total: number) {
@@ -309,9 +348,7 @@ export const DayToDayKpisScreen: React.FC = () => {
   const fromHome = params.fromHome ?? false;
 
   // Filtros (panel)
-  const [selectedView, setSelectedView] = useState<'GENERAL' | 'CATEGORIA'>(
-    params.view ?? 'GENERAL'
-  );
+  const [selectedView, setSelectedView] = useState<'GENERAL' | 'CATEGORIA'>(params.view ?? 'GENERAL');
   const [filtrosAbiertos, setFiltrosAbiertos] = useState(false);
   const [pagoFiltro, setPagoFiltro] = useState<PagoFiltro>(params.pago ?? 'YO');
   const [monthsBack, setMonthsBack] = useState<number>(params.monthsBack ?? 12);
@@ -320,12 +357,8 @@ export const DayToDayKpisScreen: React.FC = () => {
   const [selectedMonth, setSelectedMonth] = useState<Date>(() => startOfMonth(new Date()));
 
   // Contenedor / Subtipo
-  const [selectedCategoryKey, setSelectedCategoryKey] = useState<string | null>(
-    params.categoria ?? null
-  );
-  const [selectedSubtipoId, setSelectedSubtipoId] = useState<string | null>(
-    params.tipoId ?? null
-  );
+  const [selectedCategoryKey, setSelectedCategoryKey] = useState<string | null>(params.categoria ?? null);
+  const [selectedSubtipoId, setSelectedSubtipoId] = useState<string | null>(params.tipoId ?? null);
 
   // Ranking desplegable
   const [rankingExpanded, setRankingExpanded] = useState(false);
@@ -417,15 +450,7 @@ export const DayToDayKpisScreen: React.FC = () => {
     } finally {
       setLoading(false);
     }
-  }, [
-    pagoFiltro,
-    selectedView,
-    selectedCategoryKey,
-    selectedSubtipoId,
-    monthsBack,
-    selectedMonth,
-    hideTooltip,
-  ]);
+  }, [pagoFiltro, selectedView, selectedCategoryKey, selectedSubtipoId, monthsBack, selectedMonth, hideTooltip]);
 
   useEffect(() => {
     fetchData();
@@ -440,18 +465,15 @@ export const DayToDayKpisScreen: React.FC = () => {
   const categoriasMes = (data as any)?.categorias_mes ?? [];
   const ultimos7Dias: Last7DayItem[] = (data as any)?.ultimos_7_dias ?? [];
   const categoryKpis = (data as any)?.category_kpis ?? {};
+  const proveedoresPorCategoria = (data as any)?.proveedores_por_categoria ?? {};
+  const insightsArr: any[] = (data as any)?.insights ?? [];
 
   const serieDiariaMes: DailySeriesItem[] = ((data as any)?.serie_diaria_mes ?? []) as any;
   const serieMensual: MonthlySeriesItem[] = ((data as any)?.serie_mensual ?? []) as any;
   const kpisEvolucion: EvolutionKpis | null = ((data as any)?.kpis_evolucion ?? null) as any;
 
-  const hasMonthlyCharts = Boolean(serieDiariaMes?.length || serieMensual?.length);
-
   const fullCategoryRanking = useMemo(() => {
-    const byKey = new Map<
-      string,
-      { key: string; label: string; importe: number; porcentaje?: number }
-    >();
+    const byKey = new Map<string, { key: string; label: string; importe: number; porcentaje?: number }>();
     categoriasMes.forEach((c: any) => {
       byKey.set(c.key, {
         key: c.key,
@@ -551,9 +573,7 @@ export const DayToDayKpisScreen: React.FC = () => {
   const concentration = useMemo(() => {
     if (!categoriasMes.length) return { top1Pct: 0, top3Pct: 0, top1: null as any };
 
-    const sorted = [...categoriasMes].sort(
-      (a: any, b: any) => safeNum(b.importe) - safeNum(a.importe)
-    );
+    const sorted = [...categoriasMes].sort((a: any, b: any) => safeNum(b.importe) - safeNum(a.importe));
     const total = sorted.reduce((acc, c: any) => acc + safeNum(c.importe), 0) || 1;
 
     const top1 = sorted[0];
@@ -565,10 +585,7 @@ export const DayToDayKpisScreen: React.FC = () => {
     return { top1Pct, top3Pct, top1 };
   }, [categoriasMes]);
 
-  const { labels: labels7, values: values7 } = useMemo(
-    () => normalizeLast7(ultimos7Dias),
-    [ultimos7Dias]
-  );
+  const { labels: labels7, values: values7 } = useMemo(() => normalizeLast7(ultimos7Dias), [ultimos7Dias]);
 
   const { labels: labelsMonthDays, values: valuesMonthDays } = useMemo(() => {
     if (!serieDiariaMes?.length) return { labels: [], values: [] };
@@ -633,18 +650,11 @@ export const DayToDayKpisScreen: React.FC = () => {
         width: monthlyChartWidth,
       });
     },
-    [
-      labelsMonths.length,
-      monthlyChartWidth,
-      valuesMonths,
-      fullMonthLabels,
-      labelsMonths,
-      showTooltip,
-    ]
+    [labelsMonths.length, monthlyChartWidth, valuesMonths, fullMonthLabels, labelsMonths, showTooltip]
   );
 
   // --------------------
-  // NUEVO: Totales del mes (pagado vs invitado) + insights
+  // Totales mes (split real) + insights
   // --------------------
   const monthSplit = useMemo(() => readSplit(month), [month]);
 
@@ -659,12 +669,91 @@ export const DayToDayKpisScreen: React.FC = () => {
   const isGorrasAlert = monthGuestPct >= 30;
 
   // Insight 2: supermercados pagado/total < 75%
-  const supermarketSplit = useMemo(() => readSplit(categoryKpis?.SUPERMERCADOS), [categoryKpis]);
-  const supermarketPaidRatio = useMemo(
-    () => pctOf(supermarketSplit.paid, supermarketSplit.total),
-    [supermarketSplit]
-  );
-  const isSupermarketLowContribution = supermarketSplit.total > 0 && supermarketPaidRatio < 75;
+  // ✅ Se lee desde data.insights (si backend lo devuelve). Si no, no se muestra.
+  const supermercadoInsight = useMemo(() => {
+    return (insightsArr || []).find((i: any) => String(i?.id ?? '') === 'SUPERMARKET_LOW_CONTRIBUTION') ?? null;
+  }, [insightsArr]);
+
+  const isSupermarketLowContribution = Boolean(supermercadoInsight);
+  const supermarketPaidRatio = safeNum(supermercadoInsight?.meta?.paid_pct ?? 0); // ya viene en %
+  // (opcional por si quieres mostrar importes)
+  // const supermarketPaid = safeNum(supermercadoInsight?.meta?.paid ?? 0);
+  // const supermarketTotal = safeNum(supermercadoInsight?.meta?.total ?? 0);
+
+  // --------------------
+  // Ranking por proveedores (debajo del ranking por contenedores)
+  // --------------------
+  const providersInContext = useMemo(() => {
+    let list: any[] = [];
+
+    if (selectedView === 'CATEGORIA' && effectiveSelectedCategory?.key) {
+      list = proveedoresPorCategoria[effectiveSelectedCategory.key] ?? [];
+    } else {
+      Object.keys(proveedoresPorCategoria || {}).forEach((k) => {
+        list = list.concat(proveedoresPorCategoria[k] ?? []);
+      });
+    }
+
+    // defensivo (normalmente ya viene filtrado si envías tipoId)
+    if (selectedSubtipoId) {
+      list = list.filter((p) => safeStr(p?.tipo_id) === selectedSubtipoId);
+    }
+
+    return list;
+  }, [proveedoresPorCategoria, selectedView, effectiveSelectedCategory?.key, selectedSubtipoId]);
+
+  const providerGroups = useMemo(() => {
+    // Caso simple: GENERAL o subtipo seleccionado
+    if (selectedView !== 'CATEGORIA' || selectedSubtipoId || !effectiveSelectedCategory?.key) {
+      return [
+        {
+          key: 'ALL',
+          title: 'Top proveedores',
+          items: aggregateProvidersByName(providersInContext),
+        },
+      ];
+    }
+
+    const catKey = effectiveSelectedCategory.key;
+    const subOpts = SUBTIPOS_POR_CATEGORIA?.[catKey] ?? [];
+    const typedOpts = subOpts.filter((o) => !!o.id);
+
+    // Si no hay componentes definidos, lista única
+    if (!typedOpts.length) {
+      return [
+        {
+          key: 'ALL',
+          title: 'Top proveedores',
+          items: aggregateProvidersByName(providersInContext),
+        },
+      ];
+    }
+
+    // Agrupa por tipo_id (componente)
+    const byTipo: Record<string, any[]> = {};
+    (providersInContext || []).forEach((p) => {
+      const tid = safeStr(p?.tipo_id) || '__NO_TYPE__';
+      if (!byTipo[tid]) byTipo[tid] = [];
+      byTipo[tid].push(p);
+    });
+
+    // ✅ SIEMPRE mostramos los grupos del contenedor (aunque estén vacíos)
+    const groups = typedOpts.map((o) => ({
+      key: o.id as string,
+      title: o.label,
+      items: aggregateProvidersByName(byTipo[o.id as string] ?? []),
+    }));
+
+    if ((byTipo['__NO_TYPE__'] ?? []).length) {
+      groups.push({
+        key: 'SIN_TIPO',
+        title: 'Otros',
+        items: aggregateProvidersByName(byTipo['__NO_TYPE__'] ?? []),
+      });
+    }
+
+    return groups;
+  }, [selectedView, selectedSubtipoId, effectiveSelectedCategory?.key, providersInContext]);
 
   // --------------------
   // Render
@@ -721,9 +810,7 @@ export const DayToDayKpisScreen: React.FC = () => {
                   color={colors.textSecondary}
                   style={{ marginRight: 8 }}
                 />
-                <Text style={analysisStyles.filterToggleText}>
-                  {filtrosAbiertos ? 'Ocultar filtros' : 'Mostrar filtros'}
-                </Text>
+                <Text style={analysisStyles.filterToggleText}>{filtrosAbiertos ? 'Ocultar filtros' : 'Mostrar filtros'}</Text>
               </View>
             </TouchableOpacity>
 
@@ -750,16 +837,8 @@ export const DayToDayKpisScreen: React.FC = () => {
                   <Text style={analysisStyles.filterLabel}>Quién paga</Text>
                   <FilterRow columns={3}>
                     <FilterPill label="Todos" selected={pagoFiltro === 'TODOS'} onPress={() => setPagoFiltro('TODOS')} />
-                    <FilterPill
-                      label="Pagados por mí"
-                      selected={pagoFiltro === 'YO'}
-                      onPress={() => setPagoFiltro('YO')}
-                    />
-                    <FilterPill
-                      label="Lo paga otro"
-                      selected={pagoFiltro === 'OTRO'}
-                      onPress={() => setPagoFiltro('OTRO')}
-                    />
+                    <FilterPill label="Pagados por mí" selected={pagoFiltro === 'YO'} onPress={() => setPagoFiltro('YO')} />
+                    <FilterPill label="Lo paga otro" selected={pagoFiltro === 'OTRO'} onPress={() => setPagoFiltro('OTRO')} />
                   </FilterRow>
                 </View>
 
@@ -770,9 +849,7 @@ export const DayToDayKpisScreen: React.FC = () => {
                       <FilterPill key={m} label={`${m}m`} selected={monthsBack === m} onPress={() => setMonthsBack(m)} />
                     ))}
                   </FilterRow>
-                  <Text style={analysisStyles.filterHelper}>
-                    Afecta a la evolución mensual (serie de meses y KPIs de tendencia).
-                  </Text>
+                  <Text style={analysisStyles.filterHelper}>Afecta a la evolución mensual (serie de meses y KPIs de tendencia).</Text>
                 </View>
               </View>
             )}
@@ -798,7 +875,7 @@ export const DayToDayKpisScreen: React.FC = () => {
           {/* CONTENIDO */}
           {data && (
             <>
-              {/* ✅ CAMBIO: Tarjeta “TOTALES” con mes + pagado vs invitado + % */}
+              {/* ✅ TOTALES (mes) */}
               <View style={panelStyles.section}>
                 <SectionHeader
                   title={`TOTALES · ${monthLabelEs(selectedMonth)}`}
@@ -811,7 +888,6 @@ export const DayToDayKpisScreen: React.FC = () => {
                 />
 
                 <View style={panelStyles.card}>
-                  {/* Header visual */}
                   <View style={styles.totalHeaderRow}>
                     <View style={{ flex: 1 }}>
                       <Text style={styles.totalTitle}>Total general</Text>
@@ -823,7 +899,6 @@ export const DayToDayKpisScreen: React.FC = () => {
                     </View>
                   </View>
 
-                  {/* Split rows */}
                   <View style={styles.splitBox}>
                     <View style={styles.splitRow}>
                       <View style={styles.splitLeft}>
@@ -850,12 +925,7 @@ export const DayToDayKpisScreen: React.FC = () => {
                       <View style={styles.splitRight}>
                         <Text style={styles.splitValue}>{fmtCurrency(monthGuest)}</Text>
                         <View style={[styles.pctPill, isGorrasAlert ? styles.pctPillWarn : null]}>
-                          <Text
-                            style={[
-                              styles.pctPillText,
-                              isGorrasAlert ? styles.pctPillTextWarn : null,
-                            ]}
-                          >
+                          <Text style={[styles.pctPillText, isGorrasAlert ? styles.pctPillTextWarn : null]}>
                             {fmtPctPlain(monthGuestPct)}
                           </Text>
                         </View>
@@ -878,8 +948,7 @@ export const DayToDayKpisScreen: React.FC = () => {
                             <Text style={styles.insightAlertTitle}>Alerta</Text>
                           </View>
                           <Text style={styles.insightAlertText}>
-                            Las invitaciones suponen <Text style={styles.readingStrong}>{fmtPctPlain(monthGuestPct)}</Text>{' '}
-                            del gasto total del mes. Te estás convirtiendo en un gorras.
+                            Las invitaciones suponen <Text style={styles.readingStrong}>{fmtPctPlain(monthGuestPct)}</Text> del gasto total del mes. Te estás convirtiendo en un gorras.
                           </Text>
                         </View>
                       )}
@@ -892,8 +961,7 @@ export const DayToDayKpisScreen: React.FC = () => {
                           </View>
                           <Text style={styles.insightText}>
                             En <Text style={styles.readingStrong}>SUPERMERCADOS</Text>, solo estás pagando{' '}
-                            <Text style={styles.readingStrong}>{fmtPctPlain(supermarketPaidRatio)}</Text> del total del
-                            contenedor. No estás contribuyendo lo suficiente.
+                            <Text style={styles.readingStrong}>{fmtPctPlain(supermarketPaidRatio)}</Text> del total del contenedor. No estás contribuyendo lo suficiente.
                           </Text>
                         </View>
                       )}
@@ -902,7 +970,7 @@ export const DayToDayKpisScreen: React.FC = () => {
                 </View>
               </View>
 
-              {/* Ranking / Selector contenedor (ARRIBA) */}
+              {/* Ranking / Selector contenedor */}
               <View style={panelStyles.section}>
                 <SectionHeader
                   title="Ranking por contenedores (mes)"
@@ -926,11 +994,7 @@ export const DayToDayKpisScreen: React.FC = () => {
                       style={styles.rankExpandBtn}
                     >
                       <Text style={styles.rankExpandText}>{rankingExpanded ? 'Ver menos' : 'Ver todos'}</Text>
-                      <Ionicons
-                        name={rankingExpanded ? 'chevron-up' : 'chevron-down'}
-                        size={16}
-                        color={colors.textSecondary}
-                      />
+                      <Ionicons name={rankingExpanded ? 'chevron-up' : 'chevron-down'} size={16} color={colors.textSecondary} />
                     </TouchableOpacity>
                   </View>
 
@@ -948,18 +1012,14 @@ export const DayToDayKpisScreen: React.FC = () => {
                         <View style={styles.rankLeft}>
                           <View style={[styles.rankDot, isSelected && styles.rankDotSelected]} />
                           <View style={{ flex: 1 }}>
-                            <Text style={[styles.rankLabel, isSelected && styles.rankLabelSelected]}>
-                              {cat.label}
-                            </Text>
+                            <Text style={[styles.rankLabel, isSelected && styles.rankLabelSelected]}>{cat.label}</Text>
                             <Text style={styles.rankSub}>{fmtCurrency(cat.importe)}</Text>
                           </View>
                         </View>
 
                         <View style={styles.rankRight}>
                           <Text style={[styles.rankValue, isSelected && styles.rankValueSelected]}>
-                            {safeNum((cat as any).porcentaje)
-                              ? `${safeNum((cat as any).porcentaje).toFixed(1)}%`
-                              : '—'}
+                            {safeNum((cat as any).porcentaje) ? `${safeNum((cat as any).porcentaje).toFixed(1)}%` : '—'}
                           </Text>
                           <View style={styles.rankBarBg}>
                             <View style={[styles.rankBarFill, { width: `${Math.min(100, pct)}%` }]} />
@@ -973,18 +1033,13 @@ export const DayToDayKpisScreen: React.FC = () => {
                   <TouchableOpacity
                     activeOpacity={0.85}
                     onPress={selectAllContainers}
-                    style={[
-                      styles.allRow,
-                      selectedView === 'GENERAL' && !selectedCategoryKey ? styles.allRowSelected : null,
-                    ]}
+                    style={[styles.allRow, selectedView === 'GENERAL' && !selectedCategoryKey ? styles.allRowSelected : null]}
                   >
                     <View style={styles.allLeft}>
                       <Ionicons
                         name={selectedView === 'GENERAL' && !selectedCategoryKey ? 'checkmark-circle' : 'ellipse-outline'}
                         size={18}
-                        color={
-                          selectedView === 'GENERAL' && !selectedCategoryKey ? colors.primary : colors.textSecondary
-                        }
+                        color={selectedView === 'GENERAL' && !selectedCategoryKey ? colors.primary : colors.textSecondary}
                       />
                       <Text
                         style={[
@@ -1030,9 +1085,7 @@ export const DayToDayKpisScreen: React.FC = () => {
                                 style={[styles.subPill, selected && styles.subPillSelected]}
                                 onPress={() => setSelectedSubtipoId(opt.id)}
                               >
-                                <Text style={[styles.subPillText, selected && styles.subPillTextSelected]}>
-                                  {opt.label}
-                                </Text>
+                                <Text style={[styles.subPillText, selected && styles.subPillTextSelected]}>{opt.label}</Text>
                               </TouchableOpacity>
                             );
                           })}
@@ -1044,6 +1097,63 @@ export const DayToDayKpisScreen: React.FC = () => {
                       </Text>
                     </View>
                   )}
+                </View>
+              </View>
+
+              {/* ✅ NUEVO: Ranking por proveedores (debajo de contenedores) */}
+              <View style={panelStyles.section}>
+                <SectionHeader
+                  title="Ranking por proveedores"
+                  onInfo={() =>
+                    info.open(
+                      'Ranking por proveedores',
+                      'Top proveedores del mes según filtros (pago, contenedor y/o subtipo). Si el contenedor tiene componentes (p.ej. OCIO), se muestra el ranking por componente: Transporte/Hospedaje/Actividades.'
+                    )
+                  }
+                />
+
+                <View style={panelStyles.card}>
+                  {(providerGroups || []).map((g) => (
+                    <View key={g.key} style={{ marginBottom: 10 }}>
+                      <Text style={styles.providerGroupTitle}>{g.title}</Text>
+
+                      {!g.items || g.items.length === 0 ? (
+                        <Text style={analysisStyles.emptyText}>Sin proveedores para este componente.</Text>
+                      ) : (
+                        g.items.slice(0, 12).map((p: any, idx: number) => (
+                          <TouchableOpacity
+                            key={`${g.key}-${p.nombre}-${idx}`}
+                            style={styles.providerRow}
+                            activeOpacity={0.85}
+                            onPress={() =>
+                              navigation.navigate('GastosList', {
+                                initialFiltro: 'cotidiano',
+                                fromDiaADia: true,
+                                initialSearchText: p.nombre,
+                              } as any)
+                            }
+                          >
+                            <View style={styles.providerLeft}>
+                              <View style={styles.providerAvatar}>
+                                <Text style={styles.providerAvatarText}>
+                                  {(String(p.nombre || '??').slice(0, 2)).toUpperCase()}
+                                </Text>
+                              </View>
+
+                              <View>
+                                <Text style={styles.providerName}>{p.nombre}</Text>
+                                <Text style={styles.providerSub}>{safeNum(p.num_compras)} compras</Text>
+                              </View>
+                            </View>
+
+                            <View style={styles.providerRight}>
+                              <Text style={styles.providerAmount}>{fmtCurrency(safeNum(p.importe))}</Text>
+                            </View>
+                          </TouchableOpacity>
+                        ))
+                      )}
+                    </View>
+                  ))}
                 </View>
               </View>
 
@@ -1141,20 +1251,14 @@ export const DayToDayKpisScreen: React.FC = () => {
                 <SectionHeader
                   title="Evolución (últimos 7 días)"
                   onInfo={() =>
-                    info.open(
-                      'Evolución 7 días',
-                      'Línea de importes por día. Útil para detectar picos y comparar tu patrón reciente.'
-                    )
+                    info.open('Evolución 7 días', 'Línea de importes por día. Útil para detectar picos y comparar tu patrón reciente.')
                   }
                 />
 
                 <View style={panelStyles.card}>
                   {labels7.length ? (
                     <LineChart
-                      data={{
-                        labels: labels7,
-                        datasets: [{ data: values7.length ? values7 : [0] }],
-                      }}
+                      data={{ labels: labels7, datasets: [{ data: values7.length ? values7 : [0] }] }}
                       width={chartWidth}
                       height={chartHeight}
                       chartConfig={chartConfig}
@@ -1192,10 +1296,7 @@ export const DayToDayKpisScreen: React.FC = () => {
                   {labelsMonthDays.length ? (
                     <ScrollView horizontal showsHorizontalScrollIndicator={false}>
                       <BarChartAny
-                        data={{
-                          labels: labelsMonthDays,
-                          datasets: [{ data: valuesMonthDays.length ? valuesMonthDays : [0] }],
-                        }}
+                        data={{ labels: labelsMonthDays, datasets: [{ data: valuesMonthDays.length ? valuesMonthDays : [0] }] }}
                         width={Math.max(chartWidth, labelsMonthDays.length * 18)}
                         height={chartHeight}
                         chartConfig={chartConfig}
@@ -1222,16 +1323,11 @@ export const DayToDayKpisScreen: React.FC = () => {
                 </View>
               </View>
 
-              {/* CHART: serie mensual (ventana monthsBack) */}
+              {/* CHART: serie mensual */}
               <View style={panelStyles.section}>
                 <SectionHeader
                   title="Serie mensual"
-                  onInfo={() =>
-                    info.open(
-                      'Serie mensual',
-                      'Barras por mes para la ventana seleccionada. Toca el gráfico para ver el valor de un mes.'
-                    )
-                  }
+                  onInfo={() => info.open('Serie mensual', 'Barras por mes para la ventana seleccionada. Toca el gráfico para ver el valor de un mes.')}
                 />
 
                 <View style={panelStyles.card}>
@@ -1239,10 +1335,7 @@ export const DayToDayKpisScreen: React.FC = () => {
                     <ScrollView horizontal showsHorizontalScrollIndicator={false}>
                       <Pressable onPress={onMonthlyChartTap}>
                         <BarChartAny
-                          data={{
-                            labels: labelsMonths,
-                            datasets: [{ data: valuesMonths.length ? valuesMonths : [0] }],
-                          }}
+                          data={{ labels: labelsMonths, datasets: [{ data: valuesMonths.length ? valuesMonths : [0] }] }}
                           width={monthlyChartWidth}
                           height={chartHeight}
                           chartConfig={chartConfig}
@@ -1261,15 +1354,12 @@ export const DayToDayKpisScreen: React.FC = () => {
                 </View>
               </View>
 
-              {/* KPIs evolución (si existen) */}
+              {/* KPIs evolución */}
               <View style={panelStyles.section}>
                 <SectionHeader
                   title="KPIs de tendencia"
                   onInfo={() =>
-                    info.open(
-                      'KPIs de tendencia',
-                      'Métricas derivadas de la serie mensual (si el backend las devuelve), para interpretar dirección y cambios.'
-                    )
+                    info.open('KPIs de tendencia', 'Métricas derivadas de la serie mensual (si el backend las devuelve), para interpretar dirección y cambios.')
                   }
                 />
 
@@ -1278,23 +1368,29 @@ export const DayToDayKpisScreen: React.FC = () => {
                     <View style={styles.evoRow}>
                       <View style={styles.evoCard}>
                         <Text style={styles.evoLabel}>Variación</Text>
-                        <Text
-                          style={[
-                            styles.evoValue,
-                            safeNum((kpisEvolucion as any)?.var_pct) > 0 ? styles.varUp : styles.varDown,
-                          ]}
-                        >
-                          {fmtPctSigned(safeNum((kpisEvolucion as any)?.var_pct))}
-                        </Text>
-                        <Text style={styles.evoHint}>vs periodo anterior</Text>
+                        {(() => {
+                          const varPct = safeNum((kpisEvolucion as any)?.variacion_mes_pct ?? (kpisEvolucion as any)?.var_pct);
+                          const varAbs = safeNum((kpisEvolucion as any)?.variacion_mes_abs ?? (kpisEvolucion as any)?.var_abs);
+
+                          return (
+                            <>
+                              <Text style={[styles.evoValue, varPct > 0 ? styles.varUp : styles.varDown]}>
+                                {fmtPctSigned(varPct)}
+                              </Text>
+                              <Text style={styles.evoHint}>{fmtCurrency(varAbs)} vs mes anterior</Text>
+                            </>
+                          );
+                        })()}
                       </View>
 
                       <View style={styles.evoCard}>
                         <Text style={styles.evoLabel}>Tendencia</Text>
                         <Text style={styles.evoValue}>
-                          {String((kpisEvolucion as any)?.trend ?? (kpisEvolucion as any)?.tendencia ?? '—')}
+                          {String((kpisEvolucion as any)?.tendencia ?? (kpisEvolucion as any)?.trend ?? '—')}
                         </Text>
-                        <Text style={styles.evoHint}>lectura cualitativa</Text>
+                        <Text style={styles.evoHint}>
+                          {String((kpisEvolucion as any)?.tendencia_detalle ?? 'lectura cualitativa')}
+                        </Text>
                       </View>
                     </View>
                   ) : (
@@ -1680,6 +1776,56 @@ const styles = StyleSheet.create({
   },
   subPillTextSelected: {
     color: colors.primary,
+  },
+
+  // ✅ Proveedores
+  providerGroupTitle: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: colors.textPrimary,
+    marginBottom: 6,
+  },
+  providerRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    paddingVertical: 6,
+  },
+  providerLeft: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    flex: 1,
+  },
+  providerAvatar: {
+    width: 32,
+    height: 32,
+    borderRadius: 16,
+    backgroundColor: colors.primarySoft,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginRight: 8,
+  },
+  providerAvatarText: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: colors.primary,
+  },
+  providerName: {
+    fontSize: 13,
+    fontWeight: '600',
+    color: colors.textPrimary,
+  },
+  providerSub: {
+    fontSize: 11,
+    color: colors.textSecondary,
+  },
+  providerRight: {
+    alignItems: 'flex-end',
+  },
+  providerAmount: {
+    fontSize: 13,
+    fontWeight: '700',
+    color: colors.textPrimary,
   },
 
   // Resumen

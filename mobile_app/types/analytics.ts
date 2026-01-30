@@ -22,9 +22,23 @@ export interface WeekSummary {
   dias_restantes: number;
 }
 
+/**
+ * Mes en curso (cotidianos)
+ *
+ * - presupuesto_mes: presupuesto marcado (tabla gastos, importe_cuota)
+ * - gastado_mes: semántico según filtro pago (YO/OTRO/TODOS)
+ * - total_mes/pagado_mes/invitado_mes: split REAL del mes (independiente del filtro pago)
+ *
+ * ✅ Los campos split son opcionales para no romper si backend antiguo no los devuelve.
+ */
 export interface MonthSummary {
   presupuesto_mes: number;
   gastado_mes: number;
+
+  // ✅ NUEVO: split real del mes
+  total_mes?: number;
+  pagado_mes?: number;
+  invitado_mes?: number;
 }
 
 export interface CategoryMonth {
@@ -42,11 +56,19 @@ export interface CategoryKpi {
   peso_sobre_total_gasto: number;
 }
 
+/**
+ * Proveedor agregado.
+ * ✅ `tipo_id` (opcional) permite desglosar por componentes dentro de un contenedor
+ *    (p.ej. OCIO → Transporte/Hospedaje/Actividades).
+ */
 export interface ProviderItem {
   nombre: string;
   importe: number;
   num_compras: number;
   tendencia: Tendencia;
+
+  // ✅ NUEVO (backend): opcional
+  tipo_id?: string | null;
 }
 
 export interface Last7DayItem {
