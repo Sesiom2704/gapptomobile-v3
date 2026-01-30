@@ -15,6 +15,12 @@ Cambios v3 (omitidos):
     * omitido_count
 - Se permite update parcial de omitido_este_mes (para la opción "Omitir mes"/"Deshacer omisión").
   Nota: idealmente esto lo expones por endpoint/acción dedicada, pero no rompe nada dejarlo en Update.
+
+FIX (2026-01) - importe_cuota:
+- En la tabla/models existe `importe_cuota`, y en el router se usa en create/update.
+- El schema GastoUpdate NO lo incluía, por lo que Pydantic descartaba el campo aunque el cliente lo enviase.
+- Se añade `importe_cuota` en GastoBase y GastoUpdate (y sus serializers) para permitir:
+    * editar presupuesto (importe_cuota) en COTIDIANOS sin tocar importe (restante)
 """
 
 from __future__ import annotations
@@ -23,7 +29,7 @@ from typing import Optional
 from datetime import date, datetime
 from decimal import Decimal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 from pydantic import ConfigDict  # para model_config = ConfigDict(from_attributes=True)
 
 # Compatibilidad Pydantic v1/v2 para field_serializer:
@@ -63,7 +69,12 @@ class GastoBase(BaseModel):
     cuenta_id: str
 
     # Campos monetarios con tipo Money (Decimal por debajo)
+    # IMPORTANT:
+    # - `importe_cuota` existe en el modelo/tabla y se usa en router (create/update).
+    # - En NO-COT suele ser igual a `importe`.
+    # - En COT puede ser diferente (presupuesto vs restante).
     importe: Money
+    importe_cuota: Money
     cuotas: int
     total: Money
 
@@ -77,7 +88,7 @@ class GastoBase(BaseModel):
     referencia_vivienda_id: Optional[str] = None
     comentarios: Optional[str] = None
 
-    @field_serializer("importe", "total", when_used="json")
+    @field_serializer("importe", "importe_cuota", "total", when_used="json")
     def _ser_money_base(cls, v: Decimal | None):
         """
         Cuando se devuelve como JSON:
@@ -92,11 +103,12 @@ class GastoCreate(GastoBase):
     Schema para CREAR un gasto gestionable.
 
     - inactivatedon es opcional y normalmente se deja a NULL.
-    - El servidor se encarga de calcular:
+    - El servidor se encarga de calcular/ajustar:
       * id
       * createon / modifiedon
       * cuotas_pagadas / cuotas_restantes
-      * importe_cuota / importe_pendiente
+      * importe_pendiente
+      * (y puede sobreescribir importe/importe_cuota/total según reglas de negocio)
     """
     inactivatedon: Optional[datetime] = None
 
@@ -114,6 +126,9 @@ class GastoUpdate(BaseModel):
         * Deshacer    -> omitido_este_mes = False
       La lógica de ultimo_omitido_on y omitido_count se recomienda gestionarla
       en backend (router/service), no desde el cliente.
+
+    FIX (2026-01):
+    - Se añade `importe_cuota` para permitir update parcial de este campo.
     """
     fecha: Optional[str] = None
     periodicidad: Optional[str] = None
@@ -123,15 +138,21 @@ class GastoUpdate(BaseModel):
     tipo_id: Optional[str] = None
     segmento_id: Optional[str] = None
     cuenta_id: Optional[str] = None
+
+    # Monetarios
     importe: Optional[Money] = None
-    cuotas: Optional[int] = None
+    importe_cuota: Optional[Money] = None
     total: Optional[Money] = None
+
+    cuotas: Optional[int] = None
     rango_pago: Optional[str] = None
     activo: Optional[bool] = None
     pagado: Optional[bool] = None
     kpi: Optional[bool] = None
+
     referencia_gasto: Optional[str] = None
     referencia_vivienda_id: Optional[str] = None
+
     cuotas_pagadas: Optional[int] = None
     inactivatedon: Optional[datetime] = None
     comentarios: Optional[str] = None
@@ -141,10 +162,10 @@ class GastoUpdate(BaseModel):
     # -----------------------
     omitido_este_mes: Optional[bool] = None
 
-    @field_serializer("importe", "total", when_used="json")
+    @field_serializer("importe", "importe_cuota", "total", when_used="json")
     def _ser_money_upd(cls, v: Decimal | None):
         """
-        Serializador para importe/total en respuestas de actualización.
+        Serializador para importe/importe_cuota/total en respuestas de actualización.
         """
         return float(v) if v is not None else None
 
