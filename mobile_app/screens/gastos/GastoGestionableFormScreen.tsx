@@ -25,26 +25,12 @@
  * - Se introduce `comentariosDirty` para que el API sepa cuándo debe enviar `comentarios`.
  *   Si no está dirty, el update NO debe pisar comentarios existentes en BD.
  *
- * ✅ AJUSTE NUEVO (Importes gestionables vs cotidianos):
- * - Problema actual: al editar "importe cuota" se recalcula "importe total" y se BLOQUEA el campo contrario
- *   (editable={!... && !lock...}). Esto impide editar ambos.
- *
- * - Requisito:
- *   1) En TODOS los gestionables EXCEPTO "cotidianos":
- *      - Mantener el comportamiento de recalcular el otro campo,
- *      - PERO SIN BLOQUEAR el campo contrario (debe permitir editar ambos).
- *   2) En "cotidianos":
- *      - NO recalcular automáticamente,
- *      - Dejar que importe cuota e importe total se editen por separado (independientes).
- *
- * - Implementación:
- *   - Detectamos el segmento "cotidianos" buscando su nombre en SEGMENTOS (sin hardcode de IDs).
- *   - Si isCotidianos => no sincronizamos importes al editar cuota/total ni al cambiar cuotas.
- *   - Para NO cotidianos:
- *      - seguimos recalculando,
- *      - pero eliminamos el bloqueo del editable (ahora editable depende solo de readOnly).
- *   - Los locks se mantienen (por compatibilidad y para el cálculo en cambio de cuotas),
- *     pero ya no se usan para deshabilitar el input.
+ * AJUSTE NUEVO (importe vs importe_cuota):
+ * - Para "gestionables" en general, se mantiene la relación:
+ *    - Editar Importe total recalcula Importe cuota (y viceversa), con locks para evitar bucles.
+ * - EXCEPCIÓN: segmento_id === 'COT-12345' (COTIDIANOS)
+ *    - Debe permitir editar importe e importe_cuota por separado.
+ *    - En cotidianos NO se recalcula automáticamente el otro campo y NO se aplican locks.
  */
 
 import React, { useEffect, useMemo, useRef, useState } from 'react';
@@ -195,21 +181,12 @@ export const GastoGestionableFormScreen: React.FC<Props> = ({ navigation, route 
   const [segmentoId, setSegmentoId] = useState<string | null>(gastoSource?.segmento_id ?? null);
   const [tipoId, setTipoId] = useState<string | null>(gastoSource?.tipo_id ?? null);
 
-  // =========================================================
-  // ✅ NUEVO: Detectar "Cotidianos" sin hardcode de ID
-  // ---------------------------------------------------------
-  // Si el segmento existe y su nombre contiene "cotidian",
-  // lo tratamos como "COTIDIANOS".
-  //
-  // Esto evita depender de una constante que quizá no existe
-  // en constants/general.
-  // =========================================================
-  const COTIDIANOS_SEGMENTO_ID = useMemo(() => {
-    const seg = SEGMENTOS.find((s: any) => (s?.nombre ?? '').toLowerCase().includes('cotidian'));
-    return seg?.id ?? null;
-  }, []);
-
-  const isCotidianos = segmentoId != null && COTIDIANOS_SEGMENTO_ID != null && segmentoId === COTIDIANOS_SEGMENTO_ID;
+  /**
+   * ✅ NUEVO: flag de "cotidiano".
+   * - En COTIDIANOS (segmento_id === 'COT-12345') se permite editar
+   *   importe e importe_cuota por separado (sin recalcular ni bloquear).
+   */
+  const isCotidiano = useMemo(() => segmentoId === 'COT-12345', [segmentoId]);
 
   // ========================
   // Catálogos
@@ -279,9 +256,18 @@ export const GastoGestionableFormScreen: React.FC<Props> = ({ navigation, route 
   }, [preset, periodicidad]);
 
   // Locks para evitar bucles de cálculo cuota/total
-  // ✅ Se mantienen, pero YA NO bloquean editable.
   const [lockImporteCuota, setLockImporteCuota] = useState(false);
   const [lockImporteTotal, setLockImporteTotal] = useState(false);
+
+  /**
+   * ✅ NUEVO: si cambiamos a COTIDIANO, no queremos locks activos.
+   * Esto evita que un lock residual deje un campo "bloqueado" al cambiar el segmento.
+   */
+  useEffect(() => {
+    if (!isCotidiano) return;
+    setLockImporteCuota(false);
+    setLockImporteTotal(false);
+  }, [isCotidiano]);
 
   // Campos “solo edición”
   const [cuotasPagadas, setCuotasPagadas] = useState<number>(gastoAny?.cuotas_pagadas ?? 0);
@@ -603,8 +589,16 @@ export const GastoGestionableFormScreen: React.FC<Props> = ({ navigation, route 
     const cuotas = !n || n <= 0 ? 1 : n;
     setNumCuotas(cuotas);
 
-    // ✅ Cotidianos: NO recalcular importes al cambiar cuotas
-    if (isCotidianos) return;
+    /**
+     * ✅ COTIDIANOS:
+     * - No recalculamos automáticamente (permitimos valores independientes).
+     */
+    if (isCotidiano) {
+      // Aseguramos que no haya locks residuales.
+      if (lockImporteCuota) setLockImporteCuota(false);
+      if (lockImporteTotal) setLockImporteTotal(false);
+      return;
+    }
 
     const totalNum = parseEuroToNumber(importeTotal) ?? 0;
     const cuotaNum = parseEuroToNumber(importeCuota) ?? 0;
@@ -619,8 +613,16 @@ export const GastoGestionableFormScreen: React.FC<Props> = ({ navigation, route 
   const handleChangeImporteCuota = (text: string) => {
     setImporteCuota(text);
 
-    // ✅ Cotidianos: NO sincronizar
-    if (isCotidianos) return;
+    /**
+     * ✅ COTIDIANOS:
+     * - No sincronizamos total.
+     * - No bloqueamos ningún campo.
+     */
+    if (isCotidiano) {
+      if (lockImporteCuota) setLockImporteCuota(false);
+      if (lockImporteTotal) setLockImporteTotal(false);
+      return;
+    }
 
     const cuotaNum = parseEuroToNumber(text) ?? 0;
     if (!text) {
@@ -630,9 +632,6 @@ export const GastoGestionableFormScreen: React.FC<Props> = ({ navigation, route 
     if (cuotaNum <= 0 || numCuotas <= 0) return;
 
     setImporteTotal(String(cuotaNum * numCuotas));
-
-    // ✅ Seguimos usando locks como "memoria" del último campo editado
-    // para el caso de cambiar numCuotas, pero YA NO bloquea el input.
     setLockImporteTotal(true);
     setLockImporteCuota(false);
   };
@@ -640,8 +639,16 @@ export const GastoGestionableFormScreen: React.FC<Props> = ({ navigation, route 
   const handleChangeImporteTotal = (text: string) => {
     setImporteTotal(text);
 
-    // ✅ Cotidianos: NO sincronizar
-    if (isCotidianos) return;
+    /**
+     * ✅ COTIDIANOS:
+     * - No sincronizamos cuota.
+     * - No bloqueamos ningún campo.
+     */
+    if (isCotidiano) {
+      if (lockImporteCuota) setLockImporteCuota(false);
+      if (lockImporteTotal) setLockImporteTotal(false);
+      return;
+    }
 
     const totalNum = parseEuroToNumber(text) ?? 0;
     if (!text) {
@@ -651,8 +658,6 @@ export const GastoGestionableFormScreen: React.FC<Props> = ({ navigation, route 
     if (totalNum <= 0 || numCuotas <= 0) return;
 
     setImporteCuota(String(totalNum / numCuotas));
-
-    // ✅ Locks se mantienen sin deshabilitar inputs
     setLockImporteCuota(true);
     setLockImporteTotal(false);
   };
@@ -974,13 +979,9 @@ export const GastoGestionableFormScreen: React.FC<Props> = ({ navigation, route 
                 styles.input,
                 styles.amountInputBig,
                 importeCuota.trim() !== '' && styles.inputFilled,
-                // ✅ Visual opcional: solo marcamos "disabled" si NO es cotidianos y lock activo,
-                // pero el campo seguirá siendo editable (no se bloquea).
-                !isCotidianos && lockImporteCuota && styles.inputDisabled,
+                lockImporteCuota && styles.inputDisabled,
               ]}
-              // ✅ ANTES: editable={!readOnly && !lockImporteCuota}
-              // ✅ AHORA: editable SOLO depende de readOnly (se puede editar siempre).
-              editable={!readOnly}
+              editable={!readOnly && !lockImporteCuota}
               keyboardType="decimal-pad"
               value={importeCuota}
               onChangeText={handleChangeImporteCuota}
@@ -995,12 +996,9 @@ export const GastoGestionableFormScreen: React.FC<Props> = ({ navigation, route 
                 styles.input,
                 styles.amountInputBig,
                 importeTotal.trim() !== '' && styles.inputFilled,
-                // ✅ Visual opcional: idem
-                !isCotidianos && lockImporteTotal && styles.inputDisabled,
+                lockImporteTotal && styles.inputDisabled,
               ]}
-              // ✅ ANTES: editable={!readOnly && !lockImporteTotal}
-              // ✅ AHORA: editable SOLO depende de readOnly (se puede editar siempre).
-              editable={!readOnly}
+              editable={!readOnly && !lockImporteTotal}
               keyboardType="decimal-pad"
               value={importeTotal}
               onChangeText={handleChangeImporteTotal}
@@ -1042,11 +1040,7 @@ export const GastoGestionableFormScreen: React.FC<Props> = ({ navigation, route 
               </View>
               <View style={styles.col}>
                 <Text style={styles.label}>Cuotas restantes</Text>
-                <TextInput
-                  style={[styles.input, styles.inputAdvanced, styles.inputDisabled]}
-                  editable={false}
-                  value={String(cuotasRestantes)}
-                />
+                <TextInput style={[styles.input, styles.inputAdvanced, styles.inputDisabled]} editable={false} value={String(cuotasRestantes)} />
               </View>
             </View>
 

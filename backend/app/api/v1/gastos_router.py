@@ -1037,9 +1037,35 @@ def create_gasto(
     payload["cuotas"] = cuotas_final
     payload["cuotas_pagadas"] = cuotas_pagadas
     payload["cuotas_restantes"] = cuotas_restantes
-    payload["importe_cuota"] = round(importe, 2)
-    payload["total"] = round(cuotas_final * importe, 2)
-    payload["importe_pendiente"] = round(cuotas_restantes * importe, 2)
+    seg_str = (payload.get("segmento_id") or "").upper().strip()
+    is_cot = (seg_str == SEG_COT)
+
+    # --- Importes y derivados ---
+    if is_cot:
+        # COTIDIANOS (concepto especial):
+        # - importe       = presupuesto restante (viene del cliente y se irá ajustando con otra tabla)
+        # - importe_cuota = presupuesto (viene del cliente)
+        presupuesto = safe_float(payload.get("importe_cuota"))
+        restante = safe_float(payload.get("importe"))
+
+        payload["cuotas"] = 1
+        payload["cuotas_pagadas"] = 0 if per_str != "PAGO UNICO" else 1
+        payload["cuotas_restantes"] = 0
+
+        payload["importe"] = round(restante, 2)
+        payload["importe_cuota"] = round(presupuesto, 2)
+
+        # total no es relevante en COT -> lo dejamos a 0 para no inducir interpretaciones
+        payload["total"] = 0.0
+        payload["importe_pendiente"] = 0.0
+    else:
+        # NO COT (regla estándar):
+        # - importe e importe_cuota iguales
+        # - total = importe * cuotas
+        payload["importe_cuota"] = round(importe, 2)
+        payload["total"] = round(cuotas_final * importe, 2)
+        payload["importe_pendiente"] = round(cuotas_restantes * importe, 2)
+
 
     # Reglas por periodicidad
     if per_str == "PAGO UNICO":
@@ -1098,6 +1124,15 @@ def update_gasto(
     NUEVO:
     - Los campos de omisión NO se actualizan vía PUT general:
       se controlan por endpoints específicos /omitir y /deshacer-omision.
+
+    AJUSTE COTIDIANOS (SEG_COT):
+    - Para segmento_id == SEG_COT:
+        * importe       = presupuesto restante (editable/independiente)
+        * importe_cuota = presupuesto (editable/independiente)
+        * total         = no relevante (0)
+        * cuotas        = 1 (sin pendientes)
+      Es decir: NO forzamos importe_cuota = importe.
+    - Para NO-COT: se mantiene el comportamiento actual (importe_cuota = round(importe, 2)).
     """
     db_obj = (
         db.query(models.Gasto)
@@ -1153,67 +1188,102 @@ def update_gasto(
             db_obj.inactivatedon = None
 
     per_str = (incoming.get("periodicidad", db_obj.periodicidad) or "").upper().strip()
-    importe = safe_float(
-        incoming.get(
-            "importe",
-            db_obj.importe if db_obj.importe is not None else db_obj.importe_cuota,
-        )
-    )
 
-    if "cuotas" in incoming:
-        try:
-            if (
-                int(incoming["cuotas"] or 0) == 0
-                and (db_obj.cuotas or 0) > 0
-                and per_str != "PAGO UNICO"
-            ):
-                incoming.pop("cuotas")
-        except Exception:
-            pass
+    # Segmento objetivo (si viene en incoming lo usamos, si no el actual)
+    target_seg = (incoming.get("segmento_id", getattr(db_obj, "segmento_id", None)) or "").upper().strip()
+    is_cot = (target_seg == SEG_COT)
 
-    cuotas_raw = incoming.get("cuotas", db_obj.cuotas)
-    cuotas_final = int(cuotas_raw) if cuotas_raw is not None else int(db_obj.cuotas or 1)
-    if cuotas_final <= 0:
-        cuotas_final = 1
+    # ----------------------------
+    # RAMA COTIDIANOS
+    # ----------------------------
+    if is_cot:
+        # En COT no aplicamos lógica de financiación/recurrente para cuotas/pendientes.
+        # Solo respetamos los valores editables:
+        # - importe       = presupuesto restante
+        # - importe_cuota = presupuesto
+        restante = safe_float(incoming.get("importe", getattr(db_obj, "importe", 0.0)))
+        presupuesto = safe_float(incoming.get("importe_cuota", getattr(db_obj, "importe_cuota", 0.0)))
 
-    is_pu = (per_str == "PAGO UNICO")
-    is_financiacion = (not is_pu) and (cuotas_final > 1)
-    is_recurrente = (
-        (not is_pu)
-        and (not is_financiacion)
-        and (per_str in ("MENSUAL", "TRIMESTRAL", "SEMESTRAL", "ANUAL"))
-    )
+        incoming["cuotas"] = 1
 
-    cp_raw = incoming.get("cuotas_pagadas", db_obj.cuotas_pagadas)
-    cp_val = int(cp_raw) if cp_raw is not None else int(db_obj.cuotas_pagadas or 0)
+        # Para COT: mantenemos consistencia sin pendientes.
+        # (si por alguna razón el gasto es PAGO UNICO, reflejamos cuotas_pagadas=1; si no, 0)
+        incoming["cuotas_pagadas"] = 1 if per_str == "PAGO UNICO" else 0
+        incoming["cuotas_restantes"] = 0
 
-    if is_recurrente:
-        cuotas_final = 1
-        cuotas_pagadas = max(0, cp_val)
-        cuotas_restantes = 0
-        importe_cuota = round(importe, 2)
-        total_calc = round(1 * importe, 2)
-        importe_pendiente = 0.0
-    elif is_financiacion:
-        cuotas_pagadas = max(0, min(cp_val, cuotas_final))
-        cuotas_restantes = max(cuotas_final - cuotas_pagadas, 0)
-        importe_cuota = round(importe, 2)
-        total_calc = round(cuotas_final * importe, 2)
-        importe_pendiente = round(cuotas_restantes * importe, 2)
+        incoming["importe"] = round(restante, 2)
+        incoming["importe_cuota"] = round(presupuesto, 2)
+
+        # total/pendiente no se usan en COT
+        incoming["total"] = 0.0
+        incoming["importe_pendiente"] = 0.0
+
+    # ----------------------------
+    # RAMA ESTÁNDAR (NO COT)
+    # ----------------------------
     else:
-        cuotas_pagadas = max(0, min(cp_val, cuotas_final))
-        cuotas_restantes = max(cuotas_final - cuotas_pagadas, 0)
-        importe_cuota = round(importe, 2)
-        total_calc = round(cuotas_final * importe, 2)
-        importe_pendiente = round(cuotas_restantes * importe, 2)
+        importe = safe_float(
+            incoming.get(
+                "importe",
+                db_obj.importe if db_obj.importe is not None else db_obj.importe_cuota,
+            )
+        )
 
-    incoming["cuotas"] = cuotas_final
-    incoming["cuotas_pagadas"] = cuotas_pagadas
-    incoming["cuotas_restantes"] = cuotas_restantes
-    incoming["importe_cuota"] = importe_cuota
-    incoming["total"] = total_calc
-    incoming["importe_pendiente"] = importe_pendiente
+        if "cuotas" in incoming:
+            try:
+                if (
+                    int(incoming["cuotas"] or 0) == 0
+                    and (db_obj.cuotas or 0) > 0
+                    and per_str != "PAGO UNICO"
+                ):
+                    incoming.pop("cuotas")
+            except Exception:
+                pass
 
+        cuotas_raw = incoming.get("cuotas", db_obj.cuotas)
+        cuotas_final = int(cuotas_raw) if cuotas_raw is not None else int(db_obj.cuotas or 1)
+        if cuotas_final <= 0:
+            cuotas_final = 1
+
+        is_pu = (per_str == "PAGO UNICO")
+        is_financiacion = (not is_pu) and (cuotas_final > 1)
+        is_recurrente = (
+            (not is_pu)
+            and (not is_financiacion)
+            and (per_str in ("MENSUAL", "TRIMESTRAL", "SEMESTRAL", "ANUAL"))
+        )
+
+        cp_raw = incoming.get("cuotas_pagadas", db_obj.cuotas_pagadas)
+        cp_val = int(cp_raw) if cp_raw is not None else int(db_obj.cuotas_pagadas or 0)
+
+        if is_recurrente:
+            cuotas_final = 1
+            cuotas_pagadas = max(0, cp_val)
+            cuotas_restantes = 0
+            importe_cuota = round(importe, 2)
+            total_calc = round(1 * importe, 2)
+            importe_pendiente = 0.0
+        elif is_financiacion:
+            cuotas_pagadas = max(0, min(cp_val, cuotas_final))
+            cuotas_restantes = max(cuotas_final - cuotas_pagadas, 0)
+            importe_cuota = round(importe, 2)
+            total_calc = round(cuotas_final * importe, 2)
+            importe_pendiente = round(cuotas_restantes * importe, 2)
+        else:
+            cuotas_pagadas = max(0, min(cp_val, cuotas_final))
+            cuotas_restantes = max(cuotas_final - cuotas_pagadas, 0)
+            importe_cuota = round(importe, 2)
+            total_calc = round(cuotas_final * importe, 2)
+            importe_pendiente = round(cuotas_restantes * importe, 2)
+
+        incoming["cuotas"] = cuotas_final
+        incoming["cuotas_pagadas"] = cuotas_pagadas
+        incoming["cuotas_restantes"] = cuotas_restantes
+        incoming["importe_cuota"] = importe_cuota
+        incoming["total"] = total_calc
+        incoming["importe_pendiente"] = importe_pendiente
+
+    # Aplicar campos
     for field, value in incoming.items():
         setattr(db_obj, field, value)
 

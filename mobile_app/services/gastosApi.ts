@@ -13,6 +13,13 @@
 // 1) "No pisar" campos opcionales por defecto (comentarios).
 // 2) Tipos claros y helpers para payload -> body backend.
 // 3) Logs estructurados de endpoints para diagnóstico.
+//
+// AJUSTE (2026-01): COTIDIANOS (segmento_id = 'COT-12345')
+// - Concepto especial:
+//    * importe       = presupuesto restante (se recalcula al insertar gastos cotidianos en otra tabla)
+//    * importe_cuota = presupuesto (base)
+//    * total         = no relevante
+// - Por tanto, en COT permitimos que importe e importe_cuota sean independientes.
 
 import axios from 'axios';
 import { api } from './api';
@@ -35,6 +42,11 @@ import {
 const ENDPOINT_GASTOS_PENDIENTES = '/api/v1/gastos/pendientes';
 const ENDPOINT_GASTOS_ACTIVOS = '/api/v1/gastos/activos';
 const ENDPOINT_GASTOS_TODOS = '/api/v1/gastos/'; // importante la barra final
+
+// ========================
+// Constantes negocio
+// ========================
+const SEG_COT = 'COT-12345';
 
 // ========================
 // Tipos básicos
@@ -174,18 +186,23 @@ function normalizeOptionalText(val: unknown): string | null {
 /**
  * Normaliza el payload del formulario (UI) al body del backend.
  *
- * Reglas:
- * - parseImporte para dinero string -> number.
- * - calcula importe/total según cuotas.
- * - mapea keys UI -> backend: segmento_id, tipo_id, proveedor_id, cuenta_id...
- * - flags pagado/activo/kpi si vienen informados.
- * - soporte de cuotas_pagadas, num_cuota, prestamo_id, timestamps.
+ * Reglas generales (NO COT):
+ * - importe e importe_cuota SIEMPRE iguales (importe por cuota).
+ * - total = importe * cuotas.
+ *
+ * Reglas COT (segmentoId === SEG_COT):
+ * - importe       = presupuesto restante (independiente)
+ * - importe_cuota = presupuesto (independiente)
+ * - total         = 0 (no relevante)
+ * - cuotas        = 1 (blindaje defensivo)
  *
  * Comentarios:
  * - Aquí siempre lo normalizamos a string|null.
  * - La decisión de "enviar o no enviar" en UPDATE se hace en actualizarGasto().
  */
 function normalizarPayloadGasto(payload: CrearGastoGestionablePayload) {
+  const isCot = (payload.segmentoId || '').toUpperCase().trim() === SEG_COT;
+
   const importeTotalNum = parseImporte(payload.importeTotal);
   const importeCuotaNum = parseImporte(payload.importeCuota);
 
@@ -195,28 +212,89 @@ function normalizarPayloadGasto(payload: CrearGastoGestionablePayload) {
   const totalVal: number = Number.isFinite(safeTotal) ? safeTotal : 0;
   const cuotaVal: number = Number.isFinite(safeCuota) ? safeCuota : 0;
 
-  const nCuotas: number =
-    payload.numCuotas && payload.numCuotas > 0 ? payload.numCuotas : 1;
+  // ============================
+  // Caso COTIDIANOS (concepto especial)
+  // ============================
+  if (isCot) {
+    const presupuesto = cuotaVal; // importe_cuota
+    const presupuestoRestante = totalVal; // importe
 
-  let importe: number = 0;
-  let total: number = 0;
+    const bodyCot: any = {
+      // Texto principal
+      nombre: payload.nombre.trim().toUpperCase(),
+
+      // Fecha y periodicidad
+      fecha: payload.fecha,
+      periodicidad: payload.periodicidad,
+
+      // IDs
+      segmento_id: payload.segmentoId,
+      tipo_id: payload.tipoId,
+      proveedor_id: payload.proveedorId,
+      cuenta_id: payload.cuentaId,
+
+      // Campos opcionales
+      tienda: payload.tienda ?? null,
+      referencia_vivienda_id: payload.viviendaId ?? null,
+      rango_pago: payload.rangoPago,
+      referencia_gasto: payload.referenciaGasto ?? null,
+
+      // Importes / cuotas (COT)
+      cuotas: 1,
+      importe: presupuestoRestante,
+      importe_cuota: presupuesto,
+      total: 0,
+
+      // comentarios normalizado (string|null)
+      comentarios: normalizeOptionalText(payload.comentarios),
+    };
+
+    // Flags opcionales (solo si vienen informados)
+    if (typeof payload.pagado === 'boolean') bodyCot.pagado = payload.pagado;
+    if (typeof payload.activo === 'boolean') bodyCot.activo = payload.activo;
+    if (typeof payload.kpi === 'boolean') bodyCot.kpi = payload.kpi;
+
+    // Edición / financiación / préstamo (opcionales)
+    if (typeof payload.cuotasPagadas === 'number') bodyCot.cuotas_pagadas = payload.cuotasPagadas;
+    if (typeof payload.numCuota === 'number') bodyCot.num_cuota = payload.numCuota;
+
+    if (typeof payload.prestamoId === 'string' && payload.prestamoId.trim() !== '') {
+      bodyCot.prestamo_id = payload.prestamoId.trim();
+    }
+
+    // Timestamps opcionales (si backend los soporta)
+    if (typeof payload.createOn === 'string') bodyCot.createon = payload.createOn;
+    if (typeof payload.modifiedOn === 'string') bodyCot.modifiedon = payload.modifiedOn;
+    if (typeof payload.inactivatedOn === 'string') bodyCot.inactivatedon = payload.inactivatedOn;
+    if (typeof payload.ultimoPagoOn === 'string') bodyCot.ultimo_pago_on = payload.ultimoPagoOn;
+
+    return bodyCot;
+  }
+
+  // ============================
+  // Caso GENERAL (NO COT)
+  // - importe e importe_cuota siempre iguales
+  // - total = importe * cuotas
+  // ============================
+  const nCuotas: number = payload.numCuotas && payload.numCuotas > 0 ? payload.numCuotas : 1;
+
+  // En NO-COT aceptamos que el usuario informe cualquiera de los dos inputs,
+  // pero el modelo final es siempre: importe = importe_cuota.
+  let importeUnit: number = 0;
 
   if (nCuotas <= 1) {
-    // 1 cuota: PAGO ÚNICO o recurrente sin financiación
-    const base = totalVal > 0 ? totalVal : cuotaVal;
-    importe = base;
-    total = base;
+    // 1 cuota: usamos el "total" si existe, si no el de cuota
+    importeUnit = (totalVal > 0 ? totalVal : cuotaVal) || 0;
   } else {
-    // Varias cuotas: financiación
+    // Varias cuotas: si hay cuota, manda; si no, repartimos el total.
     if (cuotaVal > 0) {
-      importe = cuotaVal;
-      total = cuotaVal * nCuotas;
+      importeUnit = cuotaVal;
     } else {
-      // Si solo hay total, lo repartimos
-      importe = nCuotas > 0 ? totalVal / nCuotas : totalVal;
-      total = totalVal;
+      importeUnit = nCuotas > 0 ? (totalVal / nCuotas) : totalVal;
     }
   }
+
+  const totalCalc = round2(importeUnit * nCuotas);
 
   const body: any = {
     // Texto principal
@@ -238,11 +316,11 @@ function normalizarPayloadGasto(payload: CrearGastoGestionablePayload) {
     rango_pago: payload.rangoPago,
     referencia_gasto: payload.referenciaGasto ?? null,
 
-    // Importes / cuotas
+    // Importes / cuotas (NO COT)
     cuotas: nCuotas,
-    importe,
-    total,
-    importe_cuota: cuotaVal || importe,
+    importe: round2(importeUnit),
+    importe_cuota: round2(importeUnit),
+    total: totalCalc,
 
     // comentarios normalizado (string|null)
     comentarios: normalizeOptionalText(payload.comentarios),
@@ -268,6 +346,12 @@ function normalizarPayloadGasto(payload: CrearGastoGestionablePayload) {
   if (typeof payload.ultimoPagoOn === 'string') body.ultimo_pago_on = payload.ultimoPagoOn;
 
   return body;
+}
+
+/** redondeo defensivo a 2 decimales */
+function round2(n: number): number {
+  const x = Number(n || 0);
+  return Math.round(x * 100) / 100;
 }
 
 // ========================
@@ -356,13 +440,6 @@ export async function eliminarGasto(gastoId: string): Promise<void> {
 // Acciones sobre gasto
 // ========================
 
-/**
- * Marcar un gasto como pagado (gestionables).
- *
- * Nota importante (confirmado por ti):
- * - Esto marca como pagado el GASTO (contenedor/gestionable) en /gastos.
- * - No afecta a la tabla de GASTOS COTIDIANOS (son recursos distintos).
- */
 export async function marcarGastoComoPagado(gastoId: string): Promise<Gasto> {
   const url = `/api/v1/gastos/${gastoId}/pagar`;
   console.log('[gastosApi] PUT pagar ->', url);
@@ -370,12 +447,6 @@ export async function marcarGastoComoPagado(gastoId: string): Promise<Gasto> {
   return res.data;
 }
 
-/**
- * NUEVO: Omitir un gasto este mes.
- * - No marca pagado.
- * - No toca liquidez.
- * - Lo excluye de /gastos/pendientes.
- */
 export async function omitirGastoEsteMes(gastoId: string): Promise<Gasto> {
   const url = `/api/v1/gastos/${gastoId}/omitir`;
   console.log('[gastosApi] PUT omitir ->', url);
@@ -383,9 +454,6 @@ export async function omitirGastoEsteMes(gastoId: string): Promise<Gasto> {
   return res.data;
 }
 
-/**
- * NUEVO: Deshacer la omisión del mes.
- */
 export async function deshacerOmisionGastoEsteMes(gastoId: string): Promise<Gasto> {
   const url = `/api/v1/gastos/${gastoId}/deshacer-omision`;
   console.log('[gastosApi] PUT deshacer-omision ->', url);
@@ -411,10 +479,6 @@ export type ReinicioMesResult = {
   };
 };
 
-/**
- * Nota: este método parece placeholder en tu versión actual.
- * Mantengo exactamente el comportamiento para no romper nada.
- */
 export async function fetchReinicioMesEligibility(): Promise<ReinicioMesEligibility> {
   const url = ENDPOINT_GASTOS_TODOS;
   const res = await api.get<ReinicioMesEligibility>(url);
