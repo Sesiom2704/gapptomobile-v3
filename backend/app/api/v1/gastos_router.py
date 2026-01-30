@@ -26,6 +26,20 @@ Notas (2026-01) - NUEVO:
 - Se añaden endpoints:
   * PUT /{gasto_id}/omitir
   * PUT /{gasto_id}/deshacer-omision
+
+AJUSTE (2026-01) - COTIDIANOS (SEG_COT):
+- En COTIDIANOS el significado de campos es:
+    * importe       = presupuesto restante (se ajusta desde otra tabla de gastos cotidianos)
+    * importe_cuota = presupuesto (editable en el form)
+    * total         = no relevante
+- Por tanto:
+    * En CREATE se respetan ambos campos.
+    * En UPDATE debe ser posible cambiar importe_cuota SIN tocar importe.
+      Para ello, en COT el router:
+        - NO fuerza importe_cuota = importe
+        - NO pisa importe si el cliente NO lo envía
+        - NO pisa importe_cuota si el cliente NO lo envía
+      (bloque robusto)
 """
 
 from __future__ import annotations
@@ -1037,6 +1051,7 @@ def create_gasto(
     payload["cuotas"] = cuotas_final
     payload["cuotas_pagadas"] = cuotas_pagadas
     payload["cuotas_restantes"] = cuotas_restantes
+
     seg_str = (payload.get("segmento_id") or "").upper().strip()
     is_cot = (seg_str == SEG_COT)
 
@@ -1065,7 +1080,6 @@ def create_gasto(
         payload["importe_cuota"] = round(importe, 2)
         payload["total"] = round(cuotas_final * importe, 2)
         payload["importe_pendiente"] = round(cuotas_restantes * importe, 2)
-
 
     # Reglas por periodicidad
     if per_str == "PAGO UNICO":
@@ -1125,14 +1139,13 @@ def update_gasto(
     - Los campos de omisión NO se actualizan vía PUT general:
       se controlan por endpoints específicos /omitir y /deshacer-omision.
 
-    AJUSTE COTIDIANOS (SEG_COT):
+    AJUSTE COTIDIANOS (SEG_COT) - BLOQUE ROBUSTO:
     - Para segmento_id == SEG_COT:
-        * importe       = presupuesto restante (editable/independiente)
-        * importe_cuota = presupuesto (editable/independiente)
+        * importe       = presupuesto restante (solo se toca si el cliente lo envía)
+        * importe_cuota = presupuesto (solo se toca si el cliente lo envía)
         * total         = no relevante (0)
-        * cuotas        = 1 (sin pendientes)
-      Es decir: NO forzamos importe_cuota = importe.
-    - Para NO-COT: se mantiene el comportamiento actual (importe_cuota = round(importe, 2)).
+        * cuotas        = 1
+      Objetivo: permitir actualizar importe_cuota sin tocar importe.
     """
     db_obj = (
         db.query(models.Gasto)
@@ -1194,29 +1207,34 @@ def update_gasto(
     is_cot = (target_seg == SEG_COT)
 
     # ----------------------------
-    # RAMA COTIDIANOS
+    # RAMA COTIDIANOS (ROBUSTA)
     # ----------------------------
     if is_cot:
-        # En COT no aplicamos lógica de financiación/recurrente para cuotas/pendientes.
-        # Solo respetamos los valores editables:
-        # - importe       = presupuesto restante
-        # - importe_cuota = presupuesto
-        restante = safe_float(incoming.get("importe", getattr(db_obj, "importe", 0.0)))
-        presupuesto = safe_float(incoming.get("importe_cuota", getattr(db_obj, "importe_cuota", 0.0)))
+        # Debug explícito para ver qué llega desde el cliente.
+        # Esto es CLAVE para detectar si el frontend está enviando "importe" aunque no se haya tocado.
+        print("[DEBUG][COT][UPDATE] incoming keys:", sorted(list(incoming.keys())))
+        print("[DEBUG][COT][UPDATE] incoming importe:", incoming.get("importe"))
+        print("[DEBUG][COT][UPDATE] incoming importe_cuota:", incoming.get("importe_cuota"))
 
+        # Blindajes de consistencia COT (sin tocar lo que no proceda)
         incoming["cuotas"] = 1
-
-        # Para COT: mantenemos consistencia sin pendientes.
-        # (si por alguna razón el gasto es PAGO UNICO, reflejamos cuotas_pagadas=1; si no, 0)
-        incoming["cuotas_pagadas"] = 1 if per_str == "PAGO UNICO" else 0
-        incoming["cuotas_restantes"] = 0
-
-        incoming["importe"] = round(restante, 2)
-        incoming["importe_cuota"] = round(presupuesto, 2)
-
-        # total/pendiente no se usan en COT
         incoming["total"] = 0.0
         incoming["importe_pendiente"] = 0.0
+
+        # MUY IMPORTANTE:
+        # - Solo actualizamos `importe` si el cliente lo envía explícitamente.
+        # - Solo actualizamos `importe_cuota` si el cliente lo envía explícitamente.
+        # Esto permite "editar presupuesto (importe_cuota) sin tocar restante (importe)".
+        if "importe" in incoming:
+            incoming["importe"] = round(safe_float(incoming.get("importe")), 2)
+
+        if "importe_cuota" in incoming:
+            incoming["importe_cuota"] = round(safe_float(incoming.get("importe_cuota")), 2)
+
+        # Nota: NO forzamos cuotas_pagadas/cuotas_restantes aquí,
+        # para evitar efectos colaterales si el cliente no pretendía tocarlos.
+        # Si necesitas fijarlos SIEMPRE para COT, hazlo con una regla específica,
+        # pero entonces también debes asumir que ese PUT siempre los "pisará".
 
     # ----------------------------
     # RAMA ESTÁNDAR (NO COT)
