@@ -17,6 +17,11 @@ Endpoints:
 NOTA IMPORTANTE (corrección clave):
 - El ANAGRAMA debe ser consistente con la app: "REFERENCIA - NOMBRE DEL BANCO".
   Antes se estaba generando abreviado (ej. MEDI_CRÉD). Ahora se unifica.
+
+SEGURIDAD / PROPIEDAD:
+- Create asigna user_id desde el usuario autenticado (no lo manda el cliente).
+- Update y Get validan que la cuenta pertenece al usuario autenticado.
+- Delete se deja tal cual lo tenías (tú dices que ya funciona). Si quieres, luego lo blindamos igual.
 """
 
 from __future__ import annotations
@@ -28,6 +33,7 @@ from fastapi import (
     Depends,
     HTTPException,
     Query,
+    Request,
     status,
 )
 from sqlalchemy.orm import Session
@@ -47,6 +53,52 @@ router = APIRouter(
     prefix="/cuentas",
     tags=["cuentas"],
 )
+
+# ============================================================
+# Dependencia de usuario actual
+# ============================================================
+# Intentamos usar tu dependencia real (si existe). Si no existe,
+# usamos un fallback con header X-User-Id para no bloquear desarrollo.
+#
+# Recomendado: tener get_current_user y eliminar el fallback.
+try:
+    # AJUSTA este import si tu proyecto lo tiene en otro sitio.
+    from backend.app.api.deps import get_current_user as _get_current_user  # type: ignore
+except Exception:  # pragma: no cover
+    _get_current_user = None  # type: ignore
+
+
+if _get_current_user is not None:
+    # Caso normal: tu proyecto ya tiene auth y get_current_user funciona.
+    def current_user_dep(user: models.User = Depends(_get_current_user)) -> models.User:
+        return user
+else:
+    # Fallback: si NO existe get_current_user, exigimos X-User-Id (solo dev).
+    def current_user_dep(
+        request: Request,
+        db: Session = Depends(get_db),
+    ) -> models.User:
+        user_id_raw = request.headers.get("X-User-Id")
+        if not user_id_raw:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Falta autenticación. Configura get_current_user o envía X-User-Id (solo dev).",
+            )
+        try:
+            user_id = int(user_id_raw)
+        except ValueError:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="X-User-Id debe ser un entero.",
+            )
+
+        user = db.get(models.User, user_id)
+        if not user:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Usuario no válido.",
+            )
+        return user
 
 
 # ============================================================
@@ -75,18 +127,24 @@ def _build_anagrama(nombre_banco: str, referencia: str) -> str:
     - nombre_banco = "MEDIOLANUM BANCO"
       referencia   = "CRÉDITO"
       -> "CRÉDITO - MEDIOLANUM BANCO"
-
-    Nota:
-    - No forzamos mayúsculas aquí: respetamos lo que venga, pero
-      normalizamos espacios para evitar "dobles espacios".
     """
     ref = _normalize_spaces(referencia or "")
     banco = _normalize_spaces(nombre_banco or "")
 
     if ref and banco:
         return f"{ref} - {banco}"
-    # Si falta uno de los dos, devolvemos el que exista (mejor que vacío)
     return ref or banco
+
+
+def _assert_ownership(obj: models.CuentaBancaria, current_user: models.User) -> None:
+    """
+    Garantiza que la cuenta pertenece al usuario autenticado.
+    """
+    if obj.user_id != current_user.id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="No tienes permisos sobre esta cuenta.",
+        )
 
 
 # ============================================================
@@ -105,33 +163,41 @@ def list_cuentas_bancarias(
     ),
     user_id: Optional[int] = Query(
         None,
-        description="Si se indica, filtra solo las cuentas de este usuario.",
+        description="Si se indica, filtra solo las cuentas de este usuario. Si no se indica, usa el usuario autenticado.",
     ),
     activo: Optional[bool] = Query(
         None,
         description="Si se indica, filtra por estado activo/inactivo.",
     ),
     db: Session = Depends(get_db),
+    current_user: models.User = Depends(current_user_dep),
 ):
     """
     Devuelve el listado de cuentas bancarias.
 
-    - Sin parámetros -> todas las cuentas.
-    - Con banco_id   -> solo las cuentas cuyo banco_id coincide.
-    - Con user_id    -> solo las cuentas del usuario.
-    - Con activo     -> solo activas o solo inactivas.
-
-    Recomendación funcional:
-    - En app móvil normalmente debes filtrar por user_id, para no mostrar cuentas de otros
-      (o cuentas con user_id NULL heredadas de datos antiguos).
+    Seguridad:
+    - Por defecto lista SOLO las cuentas del usuario autenticado.
+    - Si se pasa user_id y no coincide con el usuario autenticado -> 403.
     """
     q = db.query(models.CuentaBancaria)
 
+    # Evita devolver registros legacy huérfanos (user_id NULL) que podrían romper respuestas
+    q = q.filter(models.CuentaBancaria.user_id.isnot(None))
+
+    # Si user_id no se indica, usamos el del usuario actual
+    effective_user_id = current_user.id if user_id is None else user_id
+
+    # Si intentan consultar otro user_id, bloqueamos (no hay roles/admin aquí)
+    if effective_user_id != current_user.id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="No puedes listar cuentas de otro usuario.",
+        )
+
+    q = q.filter(models.CuentaBancaria.user_id == effective_user_id)
+
     if banco_id:
         q = q.filter(models.CuentaBancaria.banco_id == banco_id)
-
-    if user_id is not None:
-        q = q.filter(models.CuentaBancaria.user_id == user_id)
 
     if activo is not None:
         q = q.filter(models.CuentaBancaria.activo == activo)
@@ -147,11 +213,13 @@ def list_cuentas_bancarias(
 def get_cuenta_bancaria(
     cuenta_id: str,
     db: Session = Depends(get_db),
+    current_user: models.User = Depends(current_user_dep),
 ):
     """
     Recupera una cuenta bancaria por su ID.
 
-    Si no existe, devuelve 404.
+    Seguridad:
+    - Solo permite leer cuentas del usuario autenticado.
     """
     obj = db.get(models.CuentaBancaria, cuenta_id)
     if not obj:
@@ -159,6 +227,8 @@ def get_cuenta_bancaria(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Cuenta bancaria no encontrada.",
         )
+
+    _assert_ownership(obj, current_user)
     return obj
 
 
@@ -171,19 +241,16 @@ def get_cuenta_bancaria(
 def create_cuenta_bancaria(
     cuenta_in: CuentaBancariaCreate,
     db: Session = Depends(get_db),
+    current_user: models.User = Depends(current_user_dep),
 ):
     """
     Crea una nueva cuenta bancaria.
 
     Reglas de negocio:
-    - El banco asociado (`banco_id`) debe:
-        * existir en la tabla de proveedores.
-        * pertenecer a la rama 'Bancos y financieras'.
-    - El ID de la cuenta se genera automáticamente con prefijo 'CTA-'.
-    - El ANAGRAMA se calcula como "REFERENCIA - NOMBRE DEL BANCO".
-    - liquidez y liquidez_inicial quedan por defecto a 0.0 (BD), salvo que
-      en el futuro decidas permitir liquidez_inicial en el create.
-    - user_id es obligatorio (tu model lo define nullable=False).
+    - banco_id debe existir y ser de la rama 'Bancos y financieras'.
+    - ID se genera con prefijo 'CTA-'.
+    - ANAGRAMA se calcula como "REFERENCIA - NOMBRE DEL BANCO".
+    - user_id se asigna desde el usuario autenticado (NO desde el cliente).
     """
     # 1) Validar proveedor y que sea banco
     proveedor = ensure_proveedor_es_banco(db, cuenta_in.banco_id)
@@ -194,21 +261,20 @@ def create_cuenta_bancaria(
     # 3) Construir anagrama unificado con el front
     anagrama = _build_anagrama(proveedor.nombre, cuenta_in.referencia)
 
-    # 4) Crear objeto
+    # 4) Crear objeto (user_id SIEMPRE desde current_user)
     obj = models.CuentaBancaria(
         id=new_id,
         banco_id=cuenta_in.banco_id,
         referencia=cuenta_in.referencia,
         anagrama=anagrama,
-        user_id=cuenta_in.user_id,
-        activo=True if cuenta_in.activo is None else bool(cuenta_in.activo),
+        user_id=current_user.id,
+        activo=True if getattr(cuenta_in, "activo", None) is None else bool(getattr(cuenta_in, "activo")),
         # liquidez y liquidez_inicial se dejan a default de BD (0.0)
     )
 
     db.add(obj)
     db.commit()
     db.refresh(obj)
-
     return obj
 
 
@@ -221,20 +287,19 @@ def update_cuenta_bancaria(
     cuenta_id: str,
     cuenta_in: CuentaBancariaUpdate,
     db: Session = Depends(get_db),
+    current_user: models.User = Depends(current_user_dep),
 ):
     """
     Actualiza una cuenta bancaria existente.
 
+    Seguridad:
+    - Solo permite actualizar cuentas del usuario autenticado.
+
     Reglas de negocio:
-    - Si se cambia `banco_id`, el nuevo proveedor debe ser de la rama
-      'Bancos y financieras'.
-    - Si cambian `banco_id` o `referencia` y NO se envía `anagrama`,
-      el anagrama se recalcula automáticamente con la regla unificada:
-      "REFERENCIA - NOMBRE DEL BANCO".
-    - Si se envía `anagrama`, se respeta tal cual (no se recalcula).
-    - La `liquidez` solo se modifica si se envía en el body.
-    - `activo` solo se modifica si se envía en el body.
-    - `liquidez_inicial` solo se modifica si se envía en el body.
+    - Si se cambia banco_id -> debe ser banco/financiera.
+    - Si cambian banco_id o referencia y NO se envía anagrama -> recalcula anagrama (regla unificada).
+    - Si se envía anagrama -> se respeta tal cual (no se recalcula).
+    - liquidez / liquidez_inicial / activo se actualizan solo si vienen en body.
     """
     obj = db.get(models.CuentaBancaria, cuenta_id)
     if not obj:
@@ -242,6 +307,8 @@ def update_cuenta_bancaria(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Cuenta bancaria no encontrada.",
         )
+
+    _assert_ownership(obj, current_user)
 
     recalc_anagrama = False
     proveedor = None
@@ -257,33 +324,29 @@ def update_cuenta_bancaria(
         obj.referencia = cuenta_in.referencia
         recalc_anagrama = True
 
-    # 3) Cambio explícito de anagrama
+    # 3) Cambio explícito de anagrama (si el cliente lo manda, se respeta)
     if cuenta_in.anagrama is not None:
         obj.anagrama = cuenta_in.anagrama
-        # Si el usuario lo fija manualmente, no lo recalculamos
         recalc_anagrama = False
 
     # 4) Cambio de liquidez (opcional)
-    if cuenta_in.liquidez is not None:
+    if getattr(cuenta_in, "liquidez", None) is not None:
         obj.liquidez = float(cuenta_in.liquidez)
 
     # 5) Cambio de liquidez_inicial (opcional)
-    if cuenta_in.liquidez_inicial is not None:
+    if getattr(cuenta_in, "liquidez_inicial", None) is not None:
         obj.liquidez_inicial = float(cuenta_in.liquidez_inicial)
 
     # 6) Cambio de activo (opcional)
-    if cuenta_in.activo is not None:
+    if getattr(cuenta_in, "activo", None) is not None:
         obj.activo = bool(cuenta_in.activo)
 
-    # 7) Recalcular anagrama si hace falta
+    # 7) Recalcular anagrama si hace falta (regla unificada)
     if recalc_anagrama:
         if proveedor is None and obj.banco_id:
             proveedor = db.get(models.Proveedor, obj.banco_id)
         if proveedor:
-            obj.anagrama = _build_anagrama(
-                proveedor.nombre,
-                obj.referencia or "",
-            )
+            obj.anagrama = _build_anagrama(proveedor.nombre, obj.referencia or "")
 
     db.commit()
     db.refresh(obj)
