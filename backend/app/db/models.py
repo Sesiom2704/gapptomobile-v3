@@ -298,23 +298,30 @@ class CuentaBancaria(Base):
     __tablename__ = "cuentas_bancarias"
     __table_args__ = {"extend_existing": True}
 
-    id         = Column(String, primary_key=True, index=True)
-    banco_id   = Column(String, ForeignKey("proveedores.id"))
+    id = Column(String, primary_key=True, index=True)
+    banco_id = Column(String, ForeignKey("proveedores.id"))
     referencia = Column(String)
-    anagrama   = Column(String)
-    liquidez   = Column(Float, nullable=False, server_default=text("0"))
-    liquidez_inicial   = Column(Float, nullable=False, server_default=text("0"))
-    # 👇 Nueva columna: propietario de la cuenta
-    user_id    = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    anagrama = Column(String)
+
+    liquidez = Column(Float, nullable=False, server_default=text("0"))
+    liquidez_inicial = Column(Float, nullable=False, server_default=text("0"))
+
+    # IMPORTANTE: nullable=False => el backend DEBE asignar user_id en create
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+
     activo = Column(Boolean, default=True)
 
     banco_rel = relationship("Proveedor", back_populates="cuentas_bancarias")
-    gastos    = relationship("Gasto", back_populates="cuenta_rel")
-    ingresos  = relationship("Ingreso", back_populates="cuenta")
-    gastos_cotidianos = relationship("GastoCotidiano",back_populates="cuenta", cascade="all, delete-orphan")
+    gastos = relationship("Gasto", back_populates="cuenta_rel")
+    ingresos = relationship("Ingreso", back_populates="cuenta")
+    gastos_cotidianos = relationship(
+        "GastoCotidiano",
+        back_populates="cuenta",
+        cascade="all, delete-orphan"
+    )
 
-    # 👇 Relación inversa hacia el usuario
-    user      = relationship("User", back_populates="cuentas_bancarias")
+    user = relationship("User", back_populates="cuentas_bancarias")
+
     movimientos_origen = relationship(
         "MovimientoCuenta",
         foreign_keys="MovimientoCuenta.cuenta_origen_id",

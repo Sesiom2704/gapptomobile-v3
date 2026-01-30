@@ -5,20 +5,19 @@ Schemas Pydantic para CUENTAS BANCARIAS.
 
 Objetivo:
 - Separar claramente qué se envía al crear, actualizar y leer una cuenta.
-- Documentar el comportamiento para poder hacer un manual funcional.
 
 Notas de negocio:
 - El ID de la cuenta se genera en el backend (prefijo 'CTA-').
-- El ANAGRAMA se calcula automáticamente a partir del nombre del banco
-  y la referencia, salvo que el usuario lo envíe explícitamente en un
-  update.
-- La liquidez inicial, si no se especifica, queda en 0.0 (por defecto BD).
+- El ANAGRAMA se calcula automáticamente a partir del nombre del banco y la referencia.
+  Regla unificada con el front: "REFERENCIA - NOMBRE DEL BANCO".
+- La liquidez y liquidez_inicial, si no se especifica, quedan en 0.0 (por defecto BD).
+- user_id es obligatorio según el modelo (nullable=False).
 """
 
 from __future__ import annotations
 
 from typing import Optional
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class CuentaBancariaBase(BaseModel):
@@ -27,10 +26,10 @@ class CuentaBancariaBase(BaseModel):
 
     - banco_id: ID del proveedor que representa el banco / financiera.
     - referencia: texto que te ayuda a identificar la cuenta
-      (ejemplo: 'NÓMINA BBVA', 'CUENTA AHORRO', etc.).
+      (ejemplo: 'NÓMINA', 'GASTOS', 'CRÉDITO', etc.).
     """
-    banco_id: str
-    referencia: str
+    banco_id: str = Field(..., description="ID del proveedor (banco/financiera).")
+    referencia: str = Field(..., description="Etiqueta de la cuenta (ej. NÓMINA, GASTOS, CRÉDITO).")
 
 
 class CuentaBancariaCreate(CuentaBancariaBase):
@@ -39,14 +38,12 @@ class CuentaBancariaCreate(CuentaBancariaBase):
 
     Reglas:
     - El ID se genera en el backend.
-    - El ANAGRAMA se calcula automáticamente con el nombre del banco
-      y la referencia.
-    - La liquidez inicial se deja en 0.0 (por defecto de la BD).
+    - El ANAGRAMA se calcula automáticamente con el nombre del banco y la referencia.
+    - La liquidez y liquidez_inicial se dejan en 0.0 (por defecto de la BD).
+    - user_id es obligatorio.
     """
-    # Si en el futuro quisieras permitir indicar liquidez inicial,
-    # podríamos añadir aquí un campo opcional, ej.:
-    # liquidez_inicial: float | None = None
-    pass
+    user_id: int = Field(..., description="Propietario de la cuenta (users.id).")
+    activo: Optional[bool] = Field(True, description="Si la cuenta está activa o no.")
 
 
 class CuentaBancariaUpdate(BaseModel):
@@ -60,11 +57,15 @@ class CuentaBancariaUpdate(BaseModel):
     - referencia: cambiar la referencia textual.
     - anagrama: si se envía, se respeta tal cual y NO se recalcula.
     - liquidez: permite ajustar manualmente la liquidez almacenada.
+    - liquidez_inicial: permite ajustar la liquidez inicial (si tu lógica lo permite).
+    - activo: activar/desactivar la cuenta.
     """
-    banco_id: Optional[str] = None
-    referencia: Optional[str] = None
-    anagrama: Optional[str] = None
-    liquidez: Optional[float] = None
+    banco_id: Optional[str] = Field(None, description="Nuevo banco_id (proveedor).")
+    referencia: Optional[str] = Field(None, description="Nueva referencia.")
+    anagrama: Optional[str] = Field(None, description="Anagrama manual. Si se envía, no se recalcula.")
+    liquidez: Optional[float] = Field(None, description="Liquidez actual almacenada.")
+    liquidez_inicial: Optional[float] = Field(None, description="Liquidez inicial almacenada.")
+    activo: Optional[bool] = Field(None, description="Estado activo/inactivo.")
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -77,6 +78,9 @@ class CuentaBancariaRead(BaseModel):
     banco_id: Optional[str] = None
     referencia: Optional[str] = None
     anagrama: Optional[str] = None
-    liquidez: Optional[float] = 0.0
+    liquidez: float = 0.0
+    liquidez_inicial: float = 0.0
+    user_id: int
+    activo: bool = True
 
     model_config = ConfigDict(from_attributes=True)
