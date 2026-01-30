@@ -23,6 +23,21 @@ NUEVO (requisito mobile):
   para que el móvil calcule:
     Ahorrado = gastos_ahorro_total - ingresos_reintegro_ahorro_total
   sin romper el campo legacy ahorro_mes_total.
+
+AJUSTE (pendientes por cuenta, definición actualizada por negocio):
+- SIEMPRE por cuenta bancaria, desde tabla "gastos":
+    - Gestionables pendientes =
+        gastos.activo=true AND gastos.kpi=true AND gastos.pagado=false
+        AND COALESCE(gastos.segmento_id,'') <> 'COT-12345'
+        SUMA de gastos.importe (nunca importe_cuota)
+    - Cotidianos pendientes =
+        gastos.activo=true AND gastos.kpi=true AND gastos.pagado=false
+        AND gastos.segmento_id = 'COT-12345'
+        SUMA de gastos.importe (nunca importe_cuota)
+
+Nota:
+- Se mantiene el cálculo de "salidas del mes" (visión caja) tal como estaba:
+  gastos pagados usan importe_cuota, y gastos_cotidianos pagados usan su importe.
 """
 
 from __future__ import annotations
@@ -50,6 +65,9 @@ router = APIRouter(prefix="/balance", tags=["balance"])
 # Constantes de negocio (alineadas con tu criterio actual)
 AHO_SEGMENTO_ID = "AHO-12345"
 REINTEGRO_AHORRO_TIPO_ID = "TING-2IB5N9"
+
+# ✅ Segmento de "Cotidianos" dentro de la tabla gastos (pendientes por cuenta)
+COT_SEGMENTO_ID = "COT-12345"
 
 
 def _get_month_range(year: Optional[int], month: Optional[int]) -> Tuple[date, date]:
@@ -285,13 +303,13 @@ def get_balance_cuentas_mes(
     - Salidas    = gastos pagados en el mes (gastos + gastos_cotidianos)
     - Fin        = saldo actual real (cuentas_bancarias.liquidez)
 
-    Adicional:
-    - Pendientes por cuenta (ingresos, gestionables, cotidianos) para tarjetas de pendientes.
-      Nota: aquí se mantiene la definición anterior (activo+kpi+no pagado/cobrado).
+    Pendientes por cuenta (definición NEGOCIO actual):
+    - Gestionables pendientes = tabla gastos, activo+kpi, pagado=false, segmento_id <> COT_SEGMENTO_ID, suma(importe)
+    - Cotidianos pendientes   = tabla gastos, activo+kpi, pagado=false, segmento_id =  COT_SEGMENTO_ID, suma(importe)
 
-    CORRECCIÓN (pendientes):
-    - Gastos pendientes NO deben sumar importe_cuota si el negocio espera importe.
-      Se suma importe y, si es null, se hace fallback a importe_cuota (compatibilidad).
+    Nota:
+    - Se elimina el uso de gastos_cotidianos para "pendientes" porque el negocio lo define
+      en la tabla gastos (segmento COT).
     """
     start, end = _get_month_range(year, month)
 
@@ -402,10 +420,10 @@ def get_balance_cuentas_mes(
     )
     ingresos_pendientes_por_cuenta = {row.cuenta_id: float(row.importe or 0.0) for row in ingresos_pendientes_q}
 
-    # ✅ Opción A: pendientes = SUM(importe) (nunca importe_cuota)
-    gastos_pendientes_q = (
+    # ✅ Gestionables pendientes (tabla gastos) = activo+kpi, pagado=false, segmento_id <> COT, suma(importe)
+    gastos_gestionables_pendientes_q = (
         db.query(
-            models.Gasto.cuenta_id,
+            models.Gasto.cuenta_id.label("cuenta_id"),
             func.coalesce(func.sum(func.coalesce(models.Gasto.importe, 0.0)), 0.0).label("importe"),
         )
         .filter(
@@ -414,32 +432,30 @@ def get_balance_cuentas_mes(
             models.Gasto.kpi.is_(True),
             models.Gasto.pagado.is_(False),
             models.Gasto.cuenta_id.in_(cuenta_ids),
+            func.coalesce(models.Gasto.segmento_id, "") != COT_SEGMENTO_ID,
         )
         .group_by(models.Gasto.cuenta_id)
         .all()
     )
+    gastos_pendientes_por_cuenta = {
+        row.cuenta_id: float(row.importe or 0.0) for row in gastos_gestionables_pendientes_q
+    }
 
-    gastos_pendientes_por_cuenta = {row.cuenta_id: float(row.importe or 0.0) for row in gastos_pendientes_q}
-
-    # ✅ NUEVO: gastos cotidianos pendientes (si aplican en tu modelo).
-    # Definición alineada: no pagados, y si existen flags activo/kpi, se aplican igual.
-    gc_filters = [
-        models.GastoCotidiano.user_id == current_user.id,
-        models.GastoCotidiano.pagado.is_(False),
-        models.GastoCotidiano.cuenta_id.in_(cuenta_ids),
-    ]
-    if hasattr(models.GastoCotidiano, "activo"):
-        gc_filters.append(models.GastoCotidiano.activo.is_(True))
-    if hasattr(models.GastoCotidiano, "kpi"):
-        gc_filters.append(models.GastoCotidiano.kpi.is_(True))
-
+    # ✅ Cotidianos pendientes (tabla gastos) = activo+kpi, pagado=false, segmento_id = COT, suma(importe)
     gastos_cotidianos_pendientes_q = (
         db.query(
-            models.GastoCotidiano.cuenta_id.label("cuenta_id"),
-            func.coalesce(func.sum(models.GastoCotidiano.importe), 0.0).label("importe"),
+            models.Gasto.cuenta_id.label("cuenta_id"),
+            func.coalesce(func.sum(func.coalesce(models.Gasto.importe, 0.0)), 0.0).label("importe"),
         )
-        .filter(*gc_filters)
-        .group_by(models.GastoCotidiano.cuenta_id)
+        .filter(
+            models.Gasto.user_id == current_user.id,
+            models.Gasto.activo.is_(True),
+            models.Gasto.kpi.is_(True),
+            models.Gasto.pagado.is_(False),
+            models.Gasto.cuenta_id.in_(cuenta_ids),
+            models.Gasto.segmento_id == COT_SEGMENTO_ID,
+        )
+        .group_by(models.Gasto.cuenta_id)
         .all()
     )
     gastos_cotidianos_pendientes_por_cuenta = {
