@@ -502,11 +502,11 @@ def get_balance_cuentas_mes(
     # KPI Ahorro (legacy) + nuevos totales para "Ahorrado neto"
     # ------------------------------------------------------------
 
-    # NUEVO: total gastos ahorro (importe real)
+    # NUEVO: total gastos ahorro (AHORRO) => SUM(gastos.importe) (nunca importe_cuota)
     gastos_ahorro_q = (
         db.query(
             func.coalesce(
-                func.sum(func.coalesce(models.Gasto.importe_cuota, models.Gasto.importe)),
+                func.sum(func.coalesce(models.Gasto.importe, 0.0)),
                 0.0,
             ).label("total_gastos_ahorro")
         )
