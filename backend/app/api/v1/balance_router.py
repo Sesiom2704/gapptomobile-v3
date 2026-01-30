@@ -407,7 +407,7 @@ def get_balance_cuentas_mes(
     gastos_pendientes_q = (
         db.query(
             models.Gasto.cuenta_id,
-            func.coalesce(func.sum(func.coalesce(models.Gasto.importe, models.Gasto.importe_cuota)), 0.0).label("importe"),
+            func.sum(func.coalesce(models.Gasto.importe, 0.0))
         )
         .filter(
             models.Gasto.user_id == current_user.id,

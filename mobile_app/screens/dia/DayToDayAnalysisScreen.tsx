@@ -1,11 +1,24 @@
 // mobile_app/screens/dia/DayToDayAnalysisScreen.tsx
-// Cambios solicitados:
-// - En la tarjeta "Hoy" > "Comparativa mes a fecha", el texto de "Diferencia" ahora cambia de color:
-//   * Positivo (gastas más que el mes anterior) => ROJO
-//   * Negativo (gastas menos que el mes anterior) => VERDE
-//   * Cero => NEUTRO
+// -----------------------------------------------------------------------------
+// Cambios solicitados (NUEVO):
+// - En la tarjeta "MES EN CURSO" (al desplegar):
+//   1) Mostrar por CONTENEDOR (categoría) el resumen:
+//      - Nombre del contenedor (EN MAYÚSCULAS)
+//      - Gastado / Presupuestado
+//      - Barra de cumplimiento + % (con 2 decimales)
+//      - Si excede presupuesto => indicador y barra en ROJO
+//   2) Si el contenedor tiene VARIOS tipos (p.ej. VEHICULOS u OCIO):
+//      - Mostrar debajo el detalle APILADO del consumo de cada tipo (solo gasto),
+//        bien alineado (label izquierda / importe derecha), incluyendo 0.00 si no hay.
+// - No se modifica lógica de negocio del backend; reutiliza el "monthBreakdownItems" existente,
+//   pero ahora se agrupa/representa por contenedor.
 //
-// Nota: No se modifica ninguna funcionalidad ni lógica de negocio. Solo se añade estilo dinámico.
+// Cambios previos (se mantienen):
+// - En la tarjeta "Hoy" > "Comparativa mes a fecha", el texto de "Diferencia" cambia de color:
+//   * Positivo => ROJO
+//   * Negativo => VERDE
+//   * Cero => NEUTRO
+// -----------------------------------------------------------------------------
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
@@ -149,6 +162,12 @@ function fmtPct(n: number | undefined | null) {
   return `${sign}${v.toFixed(1)}%`;
 }
 
+// ✅ NUEVO: % “plain” (sin signo) con 2 decimales y coma española
+function fmtPctPlain2(n: number | undefined | null) {
+  const v = Number.isFinite(n as number) ? (n as number) : 0;
+  return `${v.toFixed(2).replace('.', ',')}%`;
+}
+
 function tendenciaColor(t: 'UP' | 'DOWN' | 'FLAT') {
   if (t === 'UP') return colors.danger;
   if (t === 'DOWN') return colors.success;
@@ -218,6 +237,13 @@ function sumDailySeriesUpToDay(series: any[], day: number) {
     .reduce((acc, it) => acc + Number(it?.importe ?? 0), 0);
 }
 
+// ✅ Label contenedor -> MAYÚSCULAS (con fallback)
+function categoryLabelUpper(catKey: string) {
+  const found = CATEGORY_OPTIONS.find((c) => c.key === catKey);
+  // en UI el usuario pidió mayúsculas: lo aplicamos aquí de forma centralizada
+  return (found?.label ?? catKey ?? '').toUpperCase();
+}
+
 // --------------------
 // Tipado route params
 // --------------------
@@ -252,6 +278,20 @@ type MonthToDateCompareUi = {
   message: string;
   bgColor: string;
   borderColor: string;
+};
+
+// ✅ UI: bloque agrupado por contenedor para "Mes en curso" (desplegado)
+type MonthContainerBlock = {
+  categoriaKey: string;
+  labelUpper: string;
+  presupuestoTotal: number;
+  gastadoTotal: number;
+  pct: number;
+  pctSafe: number;
+  overBudget: boolean;
+  hasMultiTypes: boolean;
+  // detalle por tipo (solo cuando hasMultiTypes)
+  typeRows: Array<{ tipoId: string; label: string; gastado: number }>;
 };
 
 // --------------------
@@ -654,7 +694,7 @@ export const DayToDayAnalysisScreen: React.FC = () => {
   }, [data, prevMonthData, baseIso, selectedView]);
 
   // --------------------
-  // Mes en curso: desglose por tipo
+  // Mes en curso: desglose por tipo (se usa para construir bloques por CONTENEDOR)
   // --------------------
 
   const buildMonthBreakdownContextKey = useCallback(() => {
@@ -736,6 +776,109 @@ export const DayToDayAnalysisScreen: React.FC = () => {
       setMonthBreakdownLoading(false);
     }
   }, [buildMonthBreakdownContextKey, getTipoIdsForContext, pagoFiltro]);
+
+  // ✅ NUEVO: construir bloques por contenedor para el UI (Mes en curso desplegado)
+  const monthContainerBlocks: MonthContainerBlock[] = useMemo(() => {
+    if (!monthBreakdownItems.length) return [];
+
+    // Mapa rápido por tipoId (para resolver gasto de tipos incluso si faltan en monthBreakdownItems)
+    const byTipoId = new Map<string, MonthBreakdownItem>();
+    monthBreakdownItems.forEach((it) => byTipoId.set(it.tipoId, it));
+
+    // Agregación por contenedor (categoriaKey)
+    const sums: Record<
+      string,
+      { presupuestoTotal: number; gastadoTotal: number; tipoIds: string[] }
+    > = {};
+
+    monthBreakdownItems.forEach((it) => {
+      const catKey = it.categoriaKey || 'OTROS';
+      if (!sums[catKey]) {
+        sums[catKey] = { presupuestoTotal: 0, gastadoTotal: 0, tipoIds: [] };
+      }
+      sums[catKey].presupuestoTotal += Number(it.presupuesto ?? 0);
+      sums[catKey].gastadoTotal += Number(it.gastado ?? 0);
+      sums[catKey].tipoIds.push(it.tipoId);
+    });
+
+    const categoryOrder = [
+      'SUPERMERCADOS',
+      'SUMINISTROS',
+      'VEHICULOS',
+      'ROPA',
+      'RESTAURACION',
+      'OCIO',
+      'OTROS',
+    ];
+
+    const keys = Object.keys(sums).sort((a, b) => {
+      const ia = categoryOrder.indexOf(a);
+      const ib = categoryOrder.indexOf(b);
+      if (ia !== ib) return ia - ib;
+      // tie-breaker: mayor gasto primero
+      return sums[b].gastadoTotal - sums[a].gastadoTotal;
+    });
+
+    return keys
+      .map((catKey) => {
+        const presupuestoTotal = sums[catKey].presupuestoTotal || 0;
+        const gastadoTotal = sums[catKey].gastadoTotal || 0;
+
+        const pct = presupuestoTotal > 0 ? (gastadoTotal / presupuestoTotal) * 100 : 0;
+        const pctSafe = clamp(pct, 0, 100);
+        const overBudget = presupuestoTotal > 0 && gastadoTotal > presupuestoTotal;
+
+        // Un contenedor “multi-tipo” es aquel con más de 1 tipo real configurado en SUBTIPOS_POR_CATEGORIA
+        const typedOptions = (SUBTIPOS_POR_CATEGORIA[catKey] ?? []).filter((o) => !!o.id);
+        const hasMultiTypes = typedOptions.length > 1;
+
+        // Construimos “typeRows” SOLO si el contenedor es multi-tipo.
+        // Importante: mostramos siempre los tipos configurados aunque el gasto sea 0,
+        // para que quede el bloque “completo” (ej: Mantenimiento 0,00 €).
+        let typeRows: Array<{ tipoId: string; label: string; gastado: number }> = [];
+
+        if (hasMultiTypes) {
+          const optIds = new Set<string>();
+          typeRows = typedOptions.map((opt) => {
+            const tipoId = String(opt.id);
+            optIds.add(tipoId);
+            const found = byTipoId.get(tipoId);
+            return {
+              tipoId,
+              label: opt.label,
+              gastado: Number(found?.gastado ?? 0),
+            };
+          });
+
+          // Por robustez: si el backend devolviera tipos “extra” no contemplados en SUBTIPOS,
+          // los añadimos al final para no ocultarlos.
+          monthBreakdownItems
+            .filter((it) => it.categoriaKey === catKey)
+            .forEach((it) => {
+              if (!optIds.has(it.tipoId)) {
+                typeRows.push({
+                  tipoId: it.tipoId,
+                  label: it.label ?? it.tipoId,
+                  gastado: Number(it.gastado ?? 0),
+                });
+              }
+            });
+        }
+
+        return {
+          categoriaKey: catKey,
+          labelUpper: categoryLabelUpper(catKey),
+          presupuestoTotal,
+          gastadoTotal,
+          pct,
+          pctSafe,
+          overBudget,
+          hasMultiTypes,
+          typeRows,
+        } as MonthContainerBlock;
+      })
+      .filter((b) => b.presupuestoTotal > 0 || b.gastadoTotal > 0);
+  }, [monthBreakdownItems]);
 
   // --------------------
   // Tendencia 7 días del gasto seleccionado
@@ -1017,11 +1160,7 @@ export const DayToDayAnalysisScreen: React.FC = () => {
                         <View style={{ marginTop: 10 }}>
                           <Text style={styles.mtdCompareDeltaLabel}>Diferencia</Text>
 
-                          {/* ✅ CAMBIO: color dinámico según el signo de deltaAbs
-                              - Positivo (gastas más) => rojo
-                              - Negativo (gastas menos) => verde
-                              - Cero => neutro
-                          */}
+                          {/* ✅ color dinámico según signo */}
                           <Text
                             style={[
                               styles.mtdCompareDeltaValue,
@@ -1038,7 +1177,7 @@ export const DayToDayAnalysisScreen: React.FC = () => {
                         </View>
                       </View>
 
-                      {/* Columna derecha: mes anterior + mensaje alineado con diferencia */}
+                      {/* Columna derecha: mes anterior + mensaje alineado */}
                       <View style={[styles.mtdCompareCol, styles.mtdCompareColRight]}>
                         <Text style={styles.mtdCompareKpiLabel}>Mes anterior (a fecha)</Text>
                         <Text style={styles.mtdCompareKpiValue}>
@@ -1060,7 +1199,7 @@ export const DayToDayAnalysisScreen: React.FC = () => {
                   )}
                 </View>
 
-                {/* Tarjeta original de Hoy (sin cambios funcionales) */}
+                {/* Tarjeta original de Hoy */}
                 <View style={panelStyles.card}>
                   <View style={styles.cardHeaderRow}>
                     <View style={styles.todayTextBlock}>
@@ -1208,7 +1347,7 @@ export const DayToDayAnalysisScreen: React.FC = () => {
                 onInfo={() =>
                   info.open(
                     'Mes en curso',
-                    'Presupuesto mensual estimado y gasto acumulado. Toca la tarjeta para desplegar el desglose por tipo de gasto.'
+                    'Presupuesto mensual estimado y gasto acumulado. Toca la tarjeta para desplegar el desglose por contenedor y tipo.'
                   )
                 }
               />
@@ -1273,8 +1412,8 @@ export const DayToDayAnalysisScreen: React.FC = () => {
                 {monthExpanded && (
                   <View style={styles.monthExpandedBlock}>
                     <View style={styles.monthExpandedTopRow}>
-                      <Text style={styles.monthExpandedTitle}>Desglose por tipo de gasto</Text>
-                      <Text style={styles.monthExpandedHint}>Presupuesto vs gastado</Text>
+                      <Text style={styles.monthExpandedTitle}>Desglose por contenedor</Text>
+                      <Text style={styles.monthExpandedHint}>Gastado vs presupuesto</Text>
                     </View>
 
                     {monthBreakdownLoading && (
@@ -1288,45 +1427,91 @@ export const DayToDayAnalysisScreen: React.FC = () => {
                       <Text style={styles.inlineErrorText}>{monthBreakdownError}</Text>
                     )}
 
-                    {!monthBreakdownLoading && !monthBreakdownError && monthBreakdownItems.length === 0 && (
-                      <Text style={analysisStyles.emptyText}>
-                        No hay datos suficientes para desglosar el presupuesto por tipo en este contexto.
-                      </Text>
-                    )}
-
-                    {!monthBreakdownLoading && !monthBreakdownError && monthBreakdownItems.length > 0 && (
-                      <>
-                        {monthBreakdownItems.map((it) => {
-                          const pct = it.presupuesto > 0 ? (it.gastado / it.presupuesto) * 100 : 0;
-                          const pctSafe = clamp(pct, 0, 100);
-                          const overBudget = it.presupuesto > 0 && it.gastado > it.presupuesto;
-
-                          return (
-                            <View key={it.tipoId} style={styles.monthBreakdownRow}>
-                              <View style={styles.monthBreakdownLeft}>
-                                <Text style={styles.monthBreakdownLabel}>{it.label}</Text>
-                                <Text style={styles.monthBreakdownSub}>
-                                  {fmtCurrency(it.gastado)} / {fmtCurrency(it.presupuesto)}
-                                  {overBudget ? ' · excedido' : ''}
-                                </Text>
-                              </View>
-
-                              <View style={styles.monthBreakdownRight}>
-                                <Text style={styles.monthBreakdownPct}>
-                                  {it.presupuesto > 0 ? `${pct.toFixed(0)}%` : '—'}
-                                </Text>
-                                <View style={styles.monthBreakdownBarBg}>
-                                  <View style={[styles.monthBreakdownBarFill, { width: `${pctSafe}%` }]} />
-                                </View>
-                              </View>
-                            </View>
-                          );
-                        })}
-                        <Text style={styles.monthBreakdownFootnote}>
-                          Nota: el presupuesto es estimado por el sistema a partir del histórico.
+                    {!monthBreakdownLoading &&
+                      !monthBreakdownError &&
+                      monthBreakdownItems.length === 0 && (
+                        <Text style={analysisStyles.emptyText}>
+                          No hay datos suficientes para desglosar el presupuesto en este contexto.
                         </Text>
-                      </>
-                    )}
+                      )}
+
+                    {/* ✅ NUEVO RENDER (agrupado por contenedor) */}
+                    {!monthBreakdownLoading &&
+                      !monthBreakdownError &&
+                      monthContainerBlocks.length > 0 && (
+                        <>
+                          {monthContainerBlocks.map((b) => {
+                            const pctText = b.presupuestoTotal > 0 ? fmtPctPlain2(b.pct) : '—';
+
+                            return (
+                              <View key={b.categoriaKey} style={styles.monthContainerBlock}>
+                                {/* Header: nombre contenedor + gastado/presupuesto */}
+                                <View style={styles.monthContainerHeaderRow}>
+                                  <Text style={styles.monthContainerName}>{b.labelUpper}</Text>
+
+                                  <Text
+                                    style={[
+                                      styles.monthContainerAmounts,
+                                      b.overBudget && styles.monthContainerAmountsOver,
+                                    ]}
+                                  >
+                                    {fmtCurrency(b.gastadoTotal)} / {fmtCurrency(b.presupuestoTotal)}
+                                  </Text>
+                                </View>
+
+                                {/* Meta: barra de cumplimiento + % + excedido */}
+                                <View style={styles.monthContainerMetaRow}>
+                                  <Text style={styles.monthContainerMetaLabel}>Barra de cumplimiento</Text>
+
+                                  <View style={styles.monthContainerMetaRight}>
+                                    {b.overBudget && (
+                                      <View style={styles.excedidoPill}>
+                                        <Text style={styles.excedidoPillText}>EXCEDIDO</Text>
+                                      </View>
+                                    )}
+                                    <Text
+                                      style={[
+                                        styles.monthContainerPct,
+                                        b.overBudget && styles.monthContainerPctOver,
+                                      ]}
+                                    >
+                                      {pctText}
+                                    </Text>
+                                  </View>
+                                </View>
+
+                                <View style={styles.monthContainerBarBg}>
+                                  <View
+                                    style={[
+                                      styles.monthContainerBarFill,
+                                      {
+                                        width: `${b.pctSafe}%`,
+                                        backgroundColor: b.overBudget ? colors.danger : colors.primary,
+                                      },
+                                    ]}
+                                  />
+                                </View>
+
+                                {/* Si es multi-tipo => detalle apilado (solo gasto por tipo) */}
+                                {b.hasMultiTypes && (
+                                  <View style={styles.monthTypeList}>
+                                    {b.typeRows.map((t) => (
+                                      <View key={t.tipoId} style={styles.monthTypeRow}>
+                                        <Text style={styles.monthTypeLabel}>{`- ${t.label}:`}</Text>
+                                        <Text style={styles.monthTypeAmount}>{fmtCurrency(t.gastado)}</Text>
+                                      </View>
+                                    ))}
+                                  </View>
+                                )}
+                              </View>
+                            );
+                          })}
+
+                          <Text style={styles.monthBreakdownFootnote}>
+                            Nota: el presupuesto es calculado por el sistema a partir del histórico.
+                          </Text>
+                        </>
+                      )}
                   </View>
                 )}
               </TouchableOpacity>
@@ -1352,7 +1537,8 @@ export const DayToDayAnalysisScreen: React.FC = () => {
                 </Text>
 
                 {categoriasMesConTodos.map((cat: any) => {
-                  const isSelected = effectiveSelectedCategory && cat.key === effectiveSelectedCategory.key;
+                  const isSelected =
+                    effectiveSelectedCategory && cat.key === effectiveSelectedCategory.key;
                   const isAllRow = cat.key === ALL_CATEGORY_KEY;
 
                   return (
@@ -1588,7 +1774,9 @@ export const DayToDayAnalysisScreen: React.FC = () => {
                   >
                     <View style={styles.providerLeft}>
                       <View style={styles.providerAvatar}>
-                        <Text style={styles.providerAvatarText}>{p.nombre.slice(0, 2).toUpperCase()}</Text>
+                        <Text style={styles.providerAvatarText}>
+                          {p.nombre.slice(0, 2).toUpperCase()}
+                        </Text>
                       </View>
                       <View>
                         <Text style={styles.providerName}>{p.nombre}</Text>
@@ -1599,7 +1787,13 @@ export const DayToDayAnalysisScreen: React.FC = () => {
                       <Text style={styles.providerAmount}>{fmtCurrency(p.importe)}</Text>
                       <View style={styles.providerTrendRow}>
                         <Ionicons
-                          name={p.tendencia === 'UP' ? 'arrow-up' : p.tendencia === 'DOWN' ? 'arrow-down' : 'remove'}
+                          name={
+                            p.tendencia === 'UP'
+                              ? 'arrow-up'
+                              : p.tendencia === 'DOWN'
+                              ? 'arrow-down'
+                              : 'remove'
+                          }
                           size={14}
                           color={tendenciaColor(p.tendencia)}
                           style={{ marginRight: 2 }}
@@ -1807,16 +2001,6 @@ const styles = StyleSheet.create({
     fontWeight: '800',
     color: colors.textPrimary,
   },
-  mtdCompareDeltaRow: {
-    marginTop: 10,
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-  },
-  mtdCompareDeltaLeft: {
-    flex: 1,
-    paddingRight: 8,
-  },
   mtdCompareDeltaLabel: {
     fontSize: 11,
     color: colors.textSecondary,
@@ -1825,12 +2009,10 @@ const styles = StyleSheet.create({
     marginTop: 2,
     fontSize: 13,
     fontWeight: '800',
-    color: colors.textPrimary, // base (se sobreescribe con estilos dinámicos abajo)
+    color: colors.textPrimary,
   },
 
-  // ✅ NUEVO: estilos de color dinámico para "Diferencia" (MTD)
-  // Motivo: visualmente, gastar más que el mes anterior se interpreta como "peor" (rojo),
-  // y gastar menos como "mejor" (verde).
+  // ✅ color dinámico para "Diferencia" (MTD)
   mtdCompareDeltaUp: {
     color: colors.danger, // positivo => rojo
   },
@@ -1838,27 +2020,12 @@ const styles = StyleSheet.create({
     color: colors.success, // negativo => verde
   },
   mtdCompareDeltaFlat: {
-    color: colors.textSecondary, // cero => neutro (ajustable a textPrimary si prefieres)
-  },
-
-  mtdCompareMessagePill: {
-    paddingHorizontal: 10,
-    paddingVertical: 6,
-    borderRadius: 999,
-    backgroundColor: colors.surface,
-    borderWidth: StyleSheet.hairlineWidth,
-    borderColor: colors.border,
-  },
-  mtdCompareMessageText: {
-    fontSize: 11,
-    fontWeight: '800',
-    color: colors.textPrimary,
+    color: colors.textSecondary, // cero => neutro
   },
 
   mtdCompareColRight: {
     alignItems: 'flex-end',
   },
-
   mtdCompareMessageInline: {
     marginTop: 2,
     fontSize: 12,
@@ -1927,47 +2094,109 @@ const styles = StyleSheet.create({
     color: colors.danger,
     paddingVertical: 6,
   },
-  monthBreakdownRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    paddingVertical: 6,
+
+  // ✅ NUEVO: bloque por contenedor (Mes en curso desplegado)
+  monthContainerBlock: {
+    paddingVertical: 10,
   },
-  monthBreakdownLeft: {
+  monthContainerHeaderRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'baseline',
+  },
+  monthContainerName: {
+    fontSize: 12,
+    fontWeight: '800',
+    color: colors.textPrimary,
     flex: 1,
     paddingRight: 10,
   },
-  monthBreakdownLabel: {
+  monthContainerAmounts: {
     fontSize: 12,
-    fontWeight: '600',
+    fontWeight: '800',
     color: colors.textPrimary,
   },
-  monthBreakdownSub: {
-    marginTop: 2,
+  monthContainerAmountsOver: {
+    color: colors.danger,
+  },
+  monthContainerMetaRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginTop: 6,
+  },
+  monthContainerMetaLabel: {
     fontSize: 11,
     color: colors.textSecondary,
+    fontWeight: '600',
   },
-  monthBreakdownRight: {
-    width: 90,
-    alignItems: 'flex-end',
+  monthContainerMetaRight: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
   },
-  monthBreakdownPct: {
+  monthContainerPct: {
     fontSize: 11,
-    fontWeight: '700',
+    fontWeight: '800',
     color: colors.textPrimary,
-    marginBottom: 2,
+    // ayuda a alinear números en iOS (si está disponible)
+    fontVariant: ['tabular-nums'],
   },
-  monthBreakdownBarBg: {
+  monthContainerPctOver: {
+    color: colors.danger,
+  },
+  excedidoPill: {
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: 999,
+    backgroundColor: colors.dangerSoft,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: colors.danger,
+  },
+  excedidoPillText: {
+    fontSize: 10,
+    fontWeight: '900',
+    color: colors.danger,
+    letterSpacing: 0.3,
+  },
+  monthContainerBarBg: {
     width: '100%',
     height: 6,
     borderRadius: 999,
     backgroundColor: colors.border,
     overflow: 'hidden',
+    marginTop: 6,
   },
-  monthBreakdownBarFill: {
+  monthContainerBarFill: {
     height: '100%',
     borderRadius: 999,
-    backgroundColor: colors.primary,
   },
+
+  // ✅ Detalle apilado por tipo (solo gasto)
+  monthTypeList: {
+    marginTop: 8,
+    paddingLeft: 6,
+  },
+  monthTypeRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'baseline',
+    paddingVertical: 2,
+  },
+  monthTypeLabel: {
+    fontSize: 12,
+    color: colors.textSecondary,
+    fontWeight: '600',
+    flex: 1,
+    paddingRight: 10,
+  },
+  monthTypeAmount: {
+    fontSize: 12,
+    color: colors.textPrimary,
+    fontWeight: '700',
+    fontVariant: ['tabular-nums'],
+  },
+
   monthBreakdownFootnote: {
     marginTop: 8,
     fontSize: 11,
