@@ -402,12 +402,11 @@ def get_balance_cuentas_mes(
     )
     ingresos_pendientes_por_cuenta = {row.cuenta_id: float(row.importe or 0.0) for row in ingresos_pendientes_q}
 
-    # ✅ CORRECCIÓN: gastos pendientes deben sumar IMPORTE (fallback a IMPORTE_CUOTA).
-    # Esto evita que el "pendiente" se calcule como cuota cuando el negocio espera el total.
+    # ✅ Opción A: pendientes = SUM(importe) (nunca importe_cuota)
     gastos_pendientes_q = (
         db.query(
             models.Gasto.cuenta_id,
-            func.sum(func.coalesce(models.Gasto.importe, 0.0))
+            func.coalesce(func.sum(func.coalesce(models.Gasto.importe, 0.0)), 0.0).label("importe"),
         )
         .filter(
             models.Gasto.user_id == current_user.id,
@@ -419,6 +418,7 @@ def get_balance_cuentas_mes(
         .group_by(models.Gasto.cuenta_id)
         .all()
     )
+
     gastos_pendientes_por_cuenta = {row.cuenta_id: float(row.importe or 0.0) for row in gastos_pendientes_q}
 
     # ✅ NUEVO: gastos cotidianos pendientes (si aplican en tu modelo).
