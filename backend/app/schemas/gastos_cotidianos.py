@@ -14,9 +14,16 @@ gastosCotidianos.py, manteniendo:
   * importe: Money (Decimal alias) en modelos, float en JSON.
   * evento: normalizado/validado contra ALLOWED_EVENTOS.
 
-Solo se ha adaptado:
-- Imports a la nueva estructura backend.app.*
-- Compatibilidad Pydantic v1/v2 (field_serializer / field_validator).
+✅ Cambio V3 (sin romper V2):
+- Se añaden campos nuevos opcionales:
+  * tipo_pago (1..4)
+  * importe_total (total real del ticket)
+  * cantidad (personas para dividir)
+
+Motivo:
+- Antes el schema no los declaraba, por lo que Pydantic los descartaba y nunca
+  llegaban al router/modelo. Eso provocaba que al consultar el gasto el frontend
+  hiciera fallback a V2 (tipoPago=1, importe_total=importe, cantidad=1).
 """
 
 from __future__ import annotations
@@ -25,7 +32,8 @@ from typing import Optional
 from datetime import date
 from decimal import Decimal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
+
 from pydantic import ConfigDict
 
 # Compatibilidad Pydantic v1/v2
@@ -85,6 +93,8 @@ class GastoCotidianoBase(BaseModel):
     - En create/update, fecha se maneja como str (la API móvil manda texto).
     - En lectura, se devolverá como date (ver GastoCotidianoRead).
     """
+
+    # --------- Campos base (V2/V3) ----------
     fecha: str
     tipo_id: str
     proveedor_id: str
@@ -92,15 +102,25 @@ class GastoCotidianoBase(BaseModel):
     importe: Money
     cuenta_id: Optional[str] = None
 
-    # Campos opcionales para gasolina
+    # --------- Opcionales gasolina ----------
     litros: Optional[float] = None
     km: Optional[float] = None
     precio_litro: Optional[float] = None
 
-    # Campos de contexto (restaurantes / ocio / etc.)
+    # --------- Contexto ----------
     evento: Optional[str] = None
     observaciones: Optional[str] = None
 
+    # ============================================================
+    # ✅ Campos V3 (opcionales para compatibilidad con registros V2)
+    # ============================================================
+    tipo_pago: Optional[int] = None        # 1..4
+    importe_total: Optional[Money] = None  # total real del ticket
+    cantidad: Optional[int] = None         # nº personas para dividir
+
+    # --------------------------
+    # Serialización Money -> float
+    # --------------------------
     @field_serializer("importe", when_used="json")
     def _ser_money(cls, v: Decimal | None):
         """
@@ -108,6 +128,16 @@ class GastoCotidianoBase(BaseModel):
         """
         return float(v) if v is not None else None
 
+    @field_serializer("importe_total", when_used="json")
+    def _ser_money_total(cls, v: Decimal | None):
+        """
+        Convierte Money (Decimal) a float en JSON (para el total del ticket).
+        """
+        return float(v) if v is not None else None
+
+    # --------------------------
+    # Validación de evento (igual que en v2)
+    # --------------------------
     @field_validator("evento", mode="before")
     def _val_evento(cls, v):
         """
@@ -139,6 +169,8 @@ class GastoCotidianoUpdate(BaseModel):
 
     Todos los campos son opcionales, se actualiza sólo lo que venga informado.
     """
+
+    # --------- Campos base ----------
     fecha: Optional[str] = None
     tipo_id: Optional[str] = None
     proveedor_id: Optional[str] = None
@@ -146,14 +178,28 @@ class GastoCotidianoUpdate(BaseModel):
     importe: Optional[Money] = None
     cuenta_id: Optional[str] = None
 
+    # --------- Opcionales gasolina ----------
     litros: Optional[float] = None
     km: Optional[float] = None
     precio_litro: Optional[float] = None
+
+    # --------- Contexto ----------
     evento: Optional[str] = None
     observaciones: Optional[str] = None
 
+    # ============================================================
+    # ✅ Campos V3 (opcionales)
+    # ============================================================
+    tipo_pago: Optional[int] = None
+    importe_total: Optional[Money] = None
+    cantidad: Optional[int] = None
+
     @field_serializer("importe", when_used="json")
     def _ser_money_upd(cls, v: Decimal | None):
+        return float(v) if v is not None else None
+
+    @field_serializer("importe_total", when_used="json")
+    def _ser_money_total_upd(cls, v: Decimal | None):
         return float(v) if v is not None else None
 
     @field_validator("evento", mode="before")
@@ -174,6 +220,7 @@ class GastoCotidianoRead(BaseModel):
     - importe como float.
     - incluye todos los campos relevantes.
     """
+
     id: str
     fecha: Optional[date] = None
     tipo_id: Optional[str] = None
@@ -187,6 +234,13 @@ class GastoCotidianoRead(BaseModel):
     pagado: Optional[bool] = None
     evento: Optional[str] = None
     observaciones: Optional[str] = None
+
+    # ============================================================
+    # ✅ Campos V3 devueltos al cliente
+    # ============================================================
+    tipo_pago: Optional[int] = None
+    importe_total: Optional[float] = None
+    cantidad: Optional[int] = None
 
     model_config = ConfigDict(from_attributes=True)
 

@@ -36,6 +36,13 @@ NUEVO (alertas, sin tablas nuevas):
     * Si el importe del gasto insertado/actualizado > presupuesto (gastos.importe_cuota del contenedor),
       notifica HIGH.
     * Electricidad queda excluida de alertas 75/90.
+
+✅ FIX V3 (reparto):
+- El frontend envía tipo_pago, importe_total y cantidad.
+- Antes Pydantic (schemas) los descartaba y/o el router no los aplicaba en UPDATE,
+  provocando que al consultar el gasto el frontend hiciera fallback a V2.
+- Este router asume que los schemas ya incluyen tipo_pago/importe_total/cantidad.
+  (si no, añádelos en backend/app/schemas/gastos_cotidianos.py)
 """
 
 from __future__ import annotations
@@ -205,7 +212,7 @@ def _apply_delta_to_gasto_importe(
 
     nombre = getattr(target, "nombre", None) or target.id
 
-    # ✅ Confirmado por ti: presupuesto total del contenedor = gastos.importe_cuota
+    # ✅ Confirmado: presupuesto total del contenedor = gastos.importe_cuota
     budget_total = safe_float(getattr(target, "importe_cuota", None))
 
     return {
@@ -293,18 +300,14 @@ def _compute_alerts(
     expense_amount: float,
 ) -> List[dict]:
     """
-    Reglas según tu decisión:
-
+    Reglas:
     - Presupuesto general (NO electricidad):
         * Si % consumido >= 75% -> notificar SIEMPRE en cada inserción/actualización.
         * >= 90% => HIGH; entre 75% y 90% => MEDIUM.
         * Si se supera presupuesto (contenedor restante < 0) => HIGH con euros excedidos.
-
     - Electricidad (E3):
         * Si expense_amount > budget_total (importe_cuota del contenedor) => HIGH.
         * Electricidad NO aplica 75/90.
-
-    Nota: Sin tablas nuevas no hay dedupe mensual; es intencional.
     """
     if not info:
         return []
@@ -507,12 +510,30 @@ def create_gasto_cotidiano(
     if not payload["pagado"]:
         payload["cuenta_id"] = None
 
+    # Normalizaciones de texto/IDs
     if payload.get("tipo_id") is not None:
         payload["tipo_id"] = normalize_upper(payload["tipo_id"])
     if payload.get("proveedor_id") is not None:
         payload["proveedor_id"] = normalize_upper(payload["proveedor_id"])
     if payload.get("evento") is not None:
         payload["evento"] = normalize_upper(payload["evento"])
+
+    # ============================================================
+    # ✅ Normalización/Robustez V3 (sin romper V2)
+    # - tipo_pago y cantidad: si llegan como texto, intentamos convertir a int.
+    # - importe_total viene como Money/Decimal (si schema lo define), no tocamos.
+    # ============================================================
+    if payload.get("tipo_pago") is not None:
+        try:
+            payload["tipo_pago"] = int(payload["tipo_pago"])
+        except Exception:
+            raise HTTPException(status_code=422, detail="tipo_pago inválido (debe ser int).")
+
+    if payload.get("cantidad") is not None:
+        try:
+            payload["cantidad"] = int(payload["cantidad"])
+        except Exception:
+            raise HTTPException(status_code=422, detail="cantidad inválida (debe ser int).")
 
     payload["user_id"] = current_user.id
 
@@ -601,6 +622,7 @@ def update_gasto_cotidiano(
 
     data = gasto_in.model_dump(exclude_unset=True)
 
+    # Normalizaciones de texto/IDs
     if "tipo_id" in data and data["tipo_id"]:
         data["tipo_id"] = normalize_upper(data["tipo_id"])
     if "proveedor_id" in data and data["proveedor_id"]:
@@ -612,30 +634,75 @@ def update_gasto_cotidiano(
     old_cuenta_id = db_obj.cuenta_id
     old_importe = safe_float(db_obj.importe)
 
+    # --------------------------
+    # Aplicar cambios base
+    # --------------------------
     if "pagado" in data:
         db_obj.pagado = bool(data.get("pagado"))
+
     if "fecha" in data and data["fecha"] is not None:
         db_obj.fecha = data["fecha"]
+
     if "tipo_id" in data and data["tipo_id"]:
         _ensure_tipo_in_cotidianos(db, data["tipo_id"])
         db_obj.tipo_id = data["tipo_id"]
+
     if "proveedor_id" in data and data["proveedor_id"]:
         db_obj.proveedor_id = data["proveedor_id"]
+
     if "importe" in data and data["importe"] is not None:
         db_obj.importe = safe_float(data["importe"])
+
     if "litros" in data:
         db_obj.litros = None if data["litros"] is None else safe_float(data["litros"])
+
     if "km" in data:
         db_obj.km = None if data["km"] is None else safe_float(data["km"])
+
     if "precio_litro" in data:
         db_obj.precio_litro = None if data["precio_litro"] is None else safe_float(data["precio_litro"])
+
     if "evento" in data:
         db_obj.evento = data["evento"]
+
     if "observaciones" in data:
         db_obj.observaciones = data["observaciones"]
+
     if "cuenta_id" in data:
         db_obj.cuenta_id = data["cuenta_id"] or None
 
+    # ============================================================
+    # ✅ CAMPOS V3 (tipo_pago, importe_total, cantidad)
+    # Si llegan en el payload, se guardan.
+    # ============================================================
+    if "tipo_pago" in data:
+        # Puede venir como int o string numérico; lo normalizamos.
+        try:
+            db_obj.tipo_pago = None if data.get("tipo_pago") is None else int(data.get("tipo_pago"))
+        except Exception:
+            raise HTTPException(status_code=422, detail="tipo_pago inválido (debe ser int).")
+
+    if "importe_total" in data:
+        # Si el schema lo define como Money/Decimal, lo asignamos tal cual.
+        # Si viniera como number, SQLAlchemy lo convertirá a Money/NUMERIC según tu modelo.
+        db_obj.importe_total = data.get("importe_total")
+
+    if "cantidad" in data:
+        try:
+            db_obj.cantidad = None if data.get("cantidad") is None else int(data.get("cantidad"))
+        except Exception:
+            raise HTTPException(status_code=422, detail="cantidad inválida (debe ser int).")
+
+    # ============================================================
+    # ✅ Coherencia igual que en CREATE:
+    # Si pagado = False, nunca debe haber cuenta_id.
+    # ============================================================
+    if db_obj.pagado is False:
+        db_obj.cuenta_id = None
+
+    # --------------------------
+    # Recalcular para ajuste de contenedor/liquidez
+    # --------------------------
     new_tipo_id = db_obj.tipo_id
     new_cuenta_id = db_obj.cuenta_id
     new_importe = safe_float(db_obj.importe)
