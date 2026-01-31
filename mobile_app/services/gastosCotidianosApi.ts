@@ -15,6 +15,11 @@ import {
   fetchViviendas,
 } from './utilsApi';
 
+// =====================================================
+// ✅ FLAG (actívalo/desactívalo sin tocar lógica)
+// =====================================================
+export const DEBUG_GASTOS_COTIDIANOS_V3 = true;
+
 // Endpoints de backend para COTIDIANOS (v3)
 const ENDPOINT_GASTOS_COTIDIANOS = '/api/v1/gastos-cotidianos/';
 
@@ -28,7 +33,7 @@ const ENDPOINT_GASTOS_COTIDIANOS = '/api/v1/gastos-cotidianos/';
  * - POST/PUT (según tu router) devuelven un "envelope": { message, data }.
  * Para no romper nada, soportamos ambas formas.
  */
-type ApiEnvelope<T> = T | { message?: string; data: T };
+type ApiEnvelope<T> = T | { message?: string; data: T; alerts?: any };
 
 /**
  * Type guard: detecta si la respuesta viene en envelope {data: ...}
@@ -139,11 +144,11 @@ function parseCantidad(val: number | string | undefined | null): number | null {
 /**
  * Normaliza y valida el payload antes de enviarlo al backend.
  *
- * Cambios clave (para tu caso):
+ * Cambios clave:
  * - En V3, si el formulario envía 'pagado' e 'importe' (mi parte),
  *   el normalizador los respeta. Ya NO los fuerza por tipoPago.
- * - TipoPago=2 (INVITADO) ahora permite cantidad >= 1 (p.ej. 4).
- * - Si pagado=false, forzamos cuenta_id=null para evitar ajustes de liquidez.
+ * - TipoPago=2 (INVITADO) permite cantidad >= 1.
+ * - Si pagado=false, forzamos cuenta_id=null.
  */
 function normalizarPayloadGastoCotidiano(payload: CrearGastoCotidianoPayload) {
   const isV3 =
@@ -209,7 +214,7 @@ function normalizarPayloadGastoCotidiano(payload: CrearGastoCotidianoPayload) {
       throw new Error("Modo V3: 'importeTotal' debe ser un número > 0.");
     }
 
-    // Cantidad efectiva según reglas actualizadas:
+    // Cantidad efectiva según reglas:
     // - tipoPago=1 => cantidad=1
     // - tipoPago=2 => cantidad >= 1 (editable)
     // - tipoPago=3 => cantidad=2
@@ -219,7 +224,6 @@ function normalizarPayloadGastoCotidiano(payload: CrearGastoCotidianoPayload) {
     if (tipoPago === 1) {
       cantidadEfectiva = 1;
     } else if (tipoPago === 2) {
-      // Invitado: dejamos que el usuario defina entre cuántos era el ticket (>=1)
       const c = parseCantidad(payload.cantidad);
       cantidadEfectiva = c && c >= 1 ? c : 1;
     } else if (tipoPago === 3) {
@@ -238,7 +242,7 @@ function normalizarPayloadGastoCotidiano(payload: CrearGastoCotidianoPayload) {
     // -------------------------
     // "importe" (mi parte) en V3
     // -------------------------
-    // Si el formulario envía payload.importe (texto) lo respetamos (caso edición manual).
+    // Si el formulario envía payload.importe lo respetamos (caso edición manual).
     // Si no viene, derivamos por defecto: importe_total / cantidad.
     let importeParteNum: number;
 
@@ -255,10 +259,9 @@ function normalizarPayloadGastoCotidiano(payload: CrearGastoCotidianoPayload) {
     // -------------------------
     // "pagado" en V3
     // -------------------------
-    // Reglas:
-    // - tipoPago=1 => pagado=true (siempre)
-    // - tipoPago=2 => pagado=false (siempre)
-    // - tipoPago=3/4 => si el formulario manda pagado, se respeta; si no, por defecto true
+    // - tipoPago=1 => pagado=true
+    // - tipoPago=2 => pagado=false
+    // - tipoPago=3/4 => si viene, se respeta; si no, por defecto true
     let pagadoFinal: boolean;
 
     if (tipoPago === 1) pagadoFinal = true;
@@ -331,15 +334,10 @@ export async function fetchGastosCotidianos(
   if (typeof offset === 'number') params.offset = offset;
 
   try {
-    console.log(
-      '[gastosCotidianosApi] GET gastos cotidianos ->',
-      ENDPOINT_GASTOS_COTIDIANOS,
-      'params:',
-      params
-    );
-    const res = await api.get<GastoCotidiano[]>(ENDPOINT_GASTOS_COTIDIANOS, {
-      params,
-    });
+    if (DEBUG_GASTOS_COTIDIANOS_V3) {
+      console.log('[gastosCotidianosApi] GET gastos cotidianos ->', ENDPOINT_GASTOS_COTIDIANOS, 'params:', params);
+    }
+    const res = await api.get<GastoCotidiano[]>(ENDPOINT_GASTOS_COTIDIANOS, { params });
     return res.data ?? [];
   } catch (err) {
     console.error(
@@ -359,23 +357,38 @@ export async function crearGastoCotidiano(
 ): Promise<GastoCotidiano> {
   const body = normalizarPayloadGastoCotidiano(payload);
 
-  console.log(
-    '[gastosCotidianosApi] POST crear gasto cotidiano ->',
-    ENDPOINT_GASTOS_COTIDIANOS,
-    body
-  );
+  if (DEBUG_GASTOS_COTIDIANOS_V3) {
+    console.log('[gastosCotidianosApi] POST crear gasto cotidiano ->', ENDPOINT_GASTOS_COTIDIANOS, body);
+  }
 
   const res = await api.post<ApiEnvelope<GastoCotidiano>>(ENDPOINT_GASTOS_COTIDIANOS, body);
-  return unwrapResponse<GastoCotidiano>(res.data);
+
+  if (DEBUG_GASTOS_COTIDIANOS_V3) {
+    console.log('[gastosCotidianosApi] POST response raw ->', res.data);
+  }
+
+  const unwrapped = unwrapResponse<GastoCotidiano>(res.data);
+
+  if (DEBUG_GASTOS_COTIDIANOS_V3) {
+    console.log('[gastosCotidianosApi] POST response unwrapped ->', unwrapped);
+  }
+
+  return unwrapped;
 }
 
-export async function obtenerGastoCotidiano(
-  id: string
-): Promise<GastoCotidiano> {
+export async function obtenerGastoCotidiano(id: string): Promise<GastoCotidiano> {
   const url = `${ENDPOINT_GASTOS_COTIDIANOS}${id}`;
-  console.log('[gastosCotidianosApi] GET gasto cotidiano ->', url);
+
+  if (DEBUG_GASTOS_COTIDIANOS_V3) {
+    console.log('[gastosCotidianosApi] GET gasto cotidiano ->', url);
+  }
 
   const res = await api.get<GastoCotidiano>(url);
+
+  if (DEBUG_GASTOS_COTIDIANOS_V3) {
+    console.log('[gastosCotidianosApi] GET gasto cotidiano response ->', res.data);
+  }
+
   return res.data;
 }
 
@@ -386,19 +399,30 @@ export async function actualizarGastoCotidiano(
   const body = normalizarPayloadGastoCotidiano(payload);
   const url = `${ENDPOINT_GASTOS_COTIDIANOS}${id}`;
 
-  console.log(
-    '[gastosCotidianosApi] PUT actualizar gasto cotidiano ->',
-    url,
-    body
-  );
+  if (DEBUG_GASTOS_COTIDIANOS_V3) {
+    console.log('[gastosCotidianosApi] PUT actualizar gasto cotidiano ->', url, body);
+  }
 
   const res = await api.put<ApiEnvelope<GastoCotidiano>>(url, body);
-  return unwrapResponse<GastoCotidiano>(res.data);
+
+  if (DEBUG_GASTOS_COTIDIANOS_V3) {
+    console.log('[gastosCotidianosApi] PUT response raw ->', res.data);
+  }
+
+  const unwrapped = unwrapResponse<GastoCotidiano>(res.data);
+
+  if (DEBUG_GASTOS_COTIDIANOS_V3) {
+    console.log('[gastosCotidianosApi] PUT response unwrapped ->', unwrapped);
+  }
+
+  return unwrapped;
 }
 
 export async function eliminarGastoCotidiano(id: string): Promise<void> {
   const url = `${ENDPOINT_GASTOS_COTIDIANOS}${id}`;
-  console.log('[gastosCotidianosApi] DELETE gasto cotidiano ->', url);
+  if (DEBUG_GASTOS_COTIDIANOS_V3) {
+    console.log('[gastosCotidianosApi] DELETE gasto cotidiano ->', url);
+  }
   await api.delete(url);
 }
 
@@ -411,16 +435,12 @@ export async function sugerirCuentaParaGastoCotidiano(
   importe: number
 ): Promise<Cuenta | null> {
   const url = `${ENDPOINT_GASTOS_COTIDIANOS}sugerir_cuenta`;
-
   const params = { tipo_id: tipoId, importe };
 
   try {
-    console.log(
-      '[gastosCotidianosApi] GET sugerir_cuenta ->',
-      url,
-      'params:',
-      params
-    );
+    if (DEBUG_GASTOS_COTIDIANOS_V3) {
+      console.log('[gastosCotidianosApi] GET sugerir_cuenta ->', url, 'params:', params);
+    }
     const res = await api.get<Cuenta | null>(url, { params });
     return res.data ?? null;
   } catch (err) {

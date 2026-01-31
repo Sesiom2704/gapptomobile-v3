@@ -18,6 +18,11 @@
  * Corrección de concepto:
  *   - "Importe" es MI PARTE correspondiente (no mi pago).
  *   - Si Participo = NO, se guarda pagado=false pero el importe se mantiene (referencia de invitación).
+ *
+ * ✅ DEBUG V3 (diagnóstico):
+ *   - Flag para verificar tras guardar si backend devuelve/persiste:
+ *       tipo_pago, importe_total, cantidad
+ *   - Hace GET por id inmediatamente después de POST/PUT y avisa si faltan.
  */
 
 import React, { useEffect, useMemo, useState } from 'react';
@@ -41,10 +46,12 @@ import {
   CrearGastoCotidianoPayload,
   crearGastoCotidiano,
   actualizarGastoCotidiano,
+  obtenerGastoCotidiano,
   fetchProveedores,
   fetchCuentas,
   Proveedor,
   Cuenta,
+  DEBUG_GASTOS_COTIDIANOS_V3,
 } from '../../services/gastosCotidianosApi';
 
 import {
@@ -62,6 +69,11 @@ type Props = {
   route: any;
 };
 
+// =====================================================
+// ✅ FLAG UI (puedes dejarlo ligado al del service)
+// =====================================================
+const DEBUG_GASTOS_COTIDIANOS_V3_UI = true;
+
 export const GastoCotidianoFormScreen: React.FC<Props> = ({ navigation, route }) => {
   const styles = commonFormStyles;
 
@@ -78,20 +90,23 @@ export const GastoCotidianoFormScreen: React.FC<Props> = ({ navigation, route })
   const returnToParams: any | undefined = route?.params?.returnToParams;
 
   const doNavigateBack = () => {
+    // ✅ Trigger “soft refresh” para pantallas anteriores si lo desean usar
+    const refreshKey = Date.now();
+
     if (returnToTab) {
       if (returnToScreen) {
         navigation.navigate(returnToTab, {
           screen: returnToScreen,
-          params: returnToParams,
+          params: { ...(returnToParams ?? {}), refreshKey },
         });
       } else {
-        navigation.navigate(returnToTab);
+        navigation.navigate(returnToTab, { refreshKey });
       }
       return;
     }
 
     if (fromHome) {
-      navigation.navigate('HomeTab');
+      navigation.navigate('HomeTab', { refreshKey });
       return;
     }
 
@@ -439,13 +454,12 @@ export const GastoCotidianoFormScreen: React.FC<Props> = ({ navigation, route })
    * - Tipo1: fija 1
    * - Tipo3: fija 2
    * - Tipo4: editable >= 3
-   * - Tipo2: editable >= 1 (para reflejar "me invitan mi parte", ej 55/4)
+   * - Tipo2: editable >= 1
    */
   const cantidadBloqueada = isTipo1 || isTipo3;
 
   /**
-   * Importe (mi parte) siempre visible y editable (salvo readOnly).
-   * Importante: ya NO lo bloqueamos cuando participo = NO.
+   * Importe (mi parte) editable siempre (salvo readOnly).
    */
   const importeParteBloqueado = false;
 
@@ -465,7 +479,6 @@ export const GastoCotidianoFormScreen: React.FC<Props> = ({ navigation, route })
       return;
     }
     if (isTipo2) {
-      // INVITADO => participo NO, pero mantenemos importe (mi parte) como referencia
       setParticipo(false);
       setCuentaId(null);
       if (!String(cantidad ?? '').trim()) setCantidad('2');
@@ -473,7 +486,6 @@ export const GastoCotidianoFormScreen: React.FC<Props> = ({ navigation, route })
     }
     if (isTipo3) {
       setCantidad('2');
-      // En A PACHAS normalmente participas, pero lo permitimos editable en UI.
       if (!String(cantidad ?? '').trim()) setCantidad('2');
       return;
     }
@@ -491,8 +503,6 @@ export const GastoCotidianoFormScreen: React.FC<Props> = ({ navigation, route })
    * - invitadoRef:
    *    - si participo = NO => invitadoRef = miParte (me invitan mi parte)
    *    - si participo = SÍ  => invitadoRef = max(parteAuto - miParte, 0) (invitación parcial)
-   *
-   * Regla clave: editar importeParte NO recalcula el total.
    */
   const calcReparto = useMemo(() => {
     const totalNum = parseEuroToNumber(importeTotal) ?? 0;
@@ -530,9 +540,7 @@ export const GastoCotidianoFormScreen: React.FC<Props> = ({ navigation, route })
   }, [importeTotal, cantidad, tipoPago, participo, importeParte]);
 
   /**
-   * Auto-rellenar "importeParte" SOLO si el usuario NO lo ha tocado manualmente.
-   * - Si no está editado manualmente, se sincroniza con la parte automática.
-   * - Si el usuario lo edita, se respeta.
+   * Auto-rellenar importeParte SOLO si el usuario NO lo ha tocado manualmente.
    */
   useEffect(() => {
     if (readOnly) return;
@@ -549,15 +557,12 @@ export const GastoCotidianoFormScreen: React.FC<Props> = ({ navigation, route })
     if (readOnly) return;
 
     setImporteParte(text);
-    setImporteParteEdited(true); // -> rojo (edición manual)
-
-    // REGRA CLAVE: no recalculamos importeTotal (no norma inversa)
+    setImporteParteEdited(true);
   };
 
   const handleBlurImporteParte = () => {
     if (readOnly) return;
 
-    // Si vuelve exactamente al valor automático, quitamos el rojo
     const t = (importeParte ?? '').trim();
     const auto = (calcReparto.parteAutoStr ?? '').trim();
     if (t !== '' && auto !== '' && t === auto) {
@@ -576,8 +581,6 @@ export const GastoCotidianoFormScreen: React.FC<Props> = ({ navigation, route })
 
     setParticipo(next);
 
-    // Si pasas a NO, solo anulamos cuenta (no afecta a liquidez).
-    // Importante: NO tocamos importeParte, porque es tu parte (referencia).
     if (!next) {
       setCuentaId(null);
     }
@@ -662,13 +665,39 @@ export const GastoCotidianoFormScreen: React.FC<Props> = ({ navigation, route })
           text: 'Salir',
           style: 'destructive',
           onPress: () => {
-            // UX: al confirmar salida, dejamos limpio el formulario.
             resetFormToNew();
             doNavigateBack();
           },
         },
       ]
     );
+  };
+
+  // =====================================================
+  // ✅ Helper de verificación V3: comprueba que backend devuelve campos V3
+  // =====================================================
+  const verifyBackendV3 = async (id: string) => {
+    const shouldDebug = DEBUG_GASTOS_COTIDIANOS_V3_UI && DEBUG_GASTOS_COTIDIANOS_V3;
+    if (!shouldDebug) return;
+
+    try {
+      const fetched = await obtenerGastoCotidiano(id);
+      console.log('[DEBUG V3] FETCHED AFTER SAVE ->', fetched);
+
+      const hasV3 =
+        fetched?.tipo_pago != null &&
+        fetched?.importe_total != null &&
+        fetched?.cantidad != null;
+
+      if (!hasV3) {
+        Alert.alert(
+          'Diagnóstico V3',
+          'El backend NO está devolviendo tipo_pago / importe_total / cantidad.\n\nEsto confirma que el problema está en el backend (schema/router/modelo/BD) o en el deploy.',
+        );
+      }
+    } catch (e) {
+      console.log('[DEBUG V3] Error en verifyBackendV3', e);
+    }
   };
 
   // ========================
@@ -724,13 +753,13 @@ export const GastoCotidianoFormScreen: React.FC<Props> = ({ navigation, route })
       cantidadEff = c;
     }
 
-    // Cuenta requerida SOLO si participas (afecta a tu liquidez)
+    // Cuenta requerida SOLO si participas
     if (participo && !cuentaId) {
       Alert.alert('Campo requerido', 'Debes seleccionar la cuenta desde la que pagas este gasto.');
       return;
     }
 
-    // Mi parte (siempre se guarda, participes o no)
+    // Mi parte (siempre se guarda)
     const miParteNum = parseEuroToNumber(importeParte) ?? 0;
     if (miParteNum < 0) {
       Alert.alert('Importe inválido', 'El importe (mi parte) no puede ser negativo.');
@@ -744,7 +773,7 @@ export const GastoCotidianoFormScreen: React.FC<Props> = ({ navigation, route })
 
     /**
      * Guardado:
-     * - importe = mi parte (si pagado=false, es referencia de invitación)
+     * - importe = mi parte
      * - pagado = participo
      * - cuentaId = null si no participo
      */
@@ -758,7 +787,6 @@ export const GastoCotidianoFormScreen: React.FC<Props> = ({ navigation, route })
       importeTotal,
       cantidad: cantidadEff,
 
-      // NUEVO (compat): mi parte siempre
       importe: format2(miParteNum),
       pagado: participo,
 
@@ -776,7 +804,15 @@ export const GastoCotidianoFormScreen: React.FC<Props> = ({ navigation, route })
 
     try {
       if (isEdit && gastoEdit?.id) {
-        await actualizarGastoCotidiano(gastoEdit.id, payload);
+        const updated = await actualizarGastoCotidiano(gastoEdit.id, payload);
+
+        if (DEBUG_GASTOS_COTIDIANOS_V3_UI && DEBUG_GASTOS_COTIDIANOS_V3) {
+          console.log('[DEBUG V3] UPDATED FROM PUT ->', updated);
+        }
+
+        // ✅ Verificación inmediata (GET por id)
+        await verifyBackendV3(gastoEdit.id);
+
         Alert.alert('Éxito', 'Gasto actualizado correctamente.', [
           {
             text: 'OK',
@@ -787,7 +823,16 @@ export const GastoCotidianoFormScreen: React.FC<Props> = ({ navigation, route })
           },
         ]);
       } else {
-        await crearGastoCotidiano(payload);
+        const created = await crearGastoCotidiano(payload);
+
+        if (DEBUG_GASTOS_COTIDIANOS_V3_UI && DEBUG_GASTOS_COTIDIANOS_V3) {
+          console.log('[DEBUG V3] CREATED FROM POST ->', created);
+        }
+
+        if (created?.id) {
+          await verifyBackendV3(created.id);
+        }
+
         Alert.alert('Éxito', 'Gasto guardado correctamente.', [
           {
             text: 'OK',
@@ -957,11 +1002,6 @@ export const GastoCotidianoFormScreen: React.FC<Props> = ({ navigation, route })
         <View style={styles.field}>
           <Text style={styles.label}>Reparto</Text>
 
-          {/* Reparto personalizado:
-              - "Importe (mi parte)" rojo si editado
-              - Participo editable
-              - Sin norma inversa al editar importe
-          */}
           <View style={{ flexDirection: 'row', gap: 10, alignItems: 'flex-start' }}>
             {/* Cantidad */}
             <View style={{ flex: 1 }}>
@@ -984,7 +1024,6 @@ export const GastoCotidianoFormScreen: React.FC<Props> = ({ navigation, route })
                   styles.input,
                   importeParte && styles.inputFilled,
                   (readOnly || importeParteBloqueado) && styles.inputDisabled,
-                  // ROJO si editado manualmente
                   importeParteEdited && { color: colors.danger },
                 ]}
                 keyboardType="decimal-pad"
@@ -1158,10 +1197,15 @@ export const GastoCotidianoFormScreen: React.FC<Props> = ({ navigation, route })
       <FormSection title="Fecha y detalle">
         <View style={styles.field}>
           <Text style={styles.label}>Fecha</Text>
-
           <FormDateButton valueText={formatFechaCorta(fecha)} onPress={handleOpenDatePicker} disabled={readOnly} />
-
-          {showDatePicker && <DateTimePicker value={new Date(fecha)} mode="date" display="default" onChange={handleDateChange} />}
+          {showDatePicker && (
+            <DateTimePicker
+              value={new Date(fecha)}
+              mode="date"
+              display="default"
+              onChange={handleDateChange}
+            />
+          )}
         </View>
 
         {esRestaurante && (

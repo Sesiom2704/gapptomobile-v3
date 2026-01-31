@@ -530,25 +530,47 @@ class GastoCotidiano(Base):
     tipo_id      = Column(String, ForeignKey("tipo_gasto.id"), index=True)
     proveedor_id = Column(String, ForeignKey("proveedores.id"), index=True)
     cuenta_id    = Column(String, ForeignKey("cuentas_bancarias.id"), index=True, nullable=True)
-    # 👇 Nuevo: dueño del gasto cotidiano
+
+    # 👇 Dueño del gasto cotidiano
     user_id      = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
 
-    importe      = Column(Float)
+    # ============================
+    # Importes / gasolina / estado
+    # ============================
+    importe      = Column(Float)  # "mi parte" (la que te corresponde)
     litros       = Column(Float)
     km           = Column(Float)
     precio_litro = Column(Float)
     pagado       = Column(Boolean, server_default=text("true"), index=True)
 
-    # Campos de conTexto
+    # ============================
+    # ✅ V3 - Reparto / ticket real
+    # ============================
+    # Estos campos son los que el front envía:
+    # - tipo_pago: 1..4 (pagado por mí, invitado, a pachas, entre varios)
+    # - importe_total: total del ticket real (ej. 56)
+    # - cantidad: personas para dividir (ej. 4)
+    #
+    # Sin estas columnas en el modelo ORM:
+    # - el backend NO puede persistirlas
+    # - el GET las devuelve como null (porque no existen como atributos)
+    tipo_pago     = Column(Integer, nullable=True, index=True)
+    importe_total = Column(Numeric(12, 2), nullable=True)
+    cantidad      = Column(Integer, nullable=True)
+
+    # ============================
+    # Campos de contexto
+    # ============================
     evento        = Column(String(120), nullable=True)
     observaciones = Column(sa.Text, nullable=True)
 
+    # ============================
+    # Relaciones
+    # ============================
     tipo_rel      = relationship("TipoGasto", back_populates="gastos_cotidianos")
     proveedor_rel = relationship("Proveedor", back_populates="gastos_cotidianos")
     cuenta        = relationship("CuentaBancaria", back_populates="gastos_cotidianos", lazy="joined")
-    # 👇 Relación inversa al usuario
     user          = relationship("User", back_populates="gastos_cotidianos")
-
 
 # =============================================
 # 4.1 ROLES
