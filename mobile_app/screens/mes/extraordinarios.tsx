@@ -326,38 +326,36 @@ const ExtraordinariosScreen: React.FC = () => {
             </TouchableOpacity>
           </View>
 
-          {/* Resumen superior */}
-          <View style={styles.summaryRow}>
-            <View style={styles.summaryItem}>
+          {/* Resumen superior: 3 columnas en la misma fila */}
+          <View style={styles.summaryRow3}>
+            <View style={styles.summaryItemCentered}>
               <Text style={styles.summaryLabel}>Ingresos extraord.</Text>
               <Text style={[styles.summaryValue, styles.summaryPositive]}>
                 {formatCurrency(totalIngresos)}
               </Text>
             </View>
 
-            <View style={styles.summaryItem}>
+            <View style={styles.summaryItemCentered}>
               <Text style={styles.summaryLabel}>Gastos extraord.</Text>
               <Text style={[styles.summaryValue, styles.summaryNegative]}>
                 {formatCurrency(totalGastosExtra)}
               </Text>
             </View>
-          </View>
 
-          <View style={[styles.summaryRow, { marginTop: 8 }]}>
-            <View style={styles.summaryItem}>
+            <View style={styles.summaryItemCentered}>
               <Text style={styles.summaryLabel}>Gastos omitidos</Text>
-              <Text style={[styles.summaryValue, styles.summaryNegative]}>
+              <Text style={[styles.summaryValue, styles.summaryOmitidos]}>
                 {formatCurrency(totalGastosOmitidos)}
               </Text>
             </View>
-            <View style={styles.summaryItem} />
           </View>
 
-          <View style={styles.balanceRow}>
-            <Text style={styles.balanceLabel}>Balance extraordinario</Text>
+          {/* Balance debajo, centrado y más grande */}
+          <View style={styles.balanceBlock}>
+            <Text style={styles.balanceLabelBig}>Balance extraordinario</Text>
             <Text
               style={[
-                styles.balanceValue,
+                styles.balanceValueBig,
                 balance >= 0 ? styles.balancePositive : styles.balanceNegative,
               ]}
             >
@@ -475,6 +473,41 @@ const styles = StyleSheet.create({
     justifyContent: 'space-between',
     gap: 12,
     marginTop: 4,
+  },
+  summaryRow3: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    gap: 12,
+    marginTop: 6,
+  },
+
+  summaryItemCentered: {
+    flex: 1,
+    alignItems: 'center',
+  },
+
+  summaryOmitidos: {
+    // Amarillo-naranja (si tienes colors.warning úsalo)
+    color: '#f59e0b',
+  },
+
+  balanceBlock: {
+    marginTop: 10,
+    alignItems: 'center',
+  },
+
+  balanceLabelBig: {
+    fontSize: 12,
+    color: colors.textSecondary,
+    marginBottom: 2,
+    textAlign: 'center',
+    fontWeight: '700',
+  },
+
+  balanceValueBig: {
+    fontSize: 22,
+    fontWeight: '800',
+    textAlign: 'center',
   },
   summaryItem: {
     flex: 1,
