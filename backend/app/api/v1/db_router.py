@@ -23,11 +23,20 @@ from backend.app.utils.db.dbsync.sheets_adapter import SheetsAdapter
 # ------------------------------
 PRIORITY = [
     "public.users",
+
+    # Catálogos / tipos
     "public.tipo_segmentos_gasto",
     "public.tipo_ramas_proveedores",
     "public.tipo_ramas_gasto",
     "public.tipo_ingreso",
     "public.tipo_gasto",
+
+    # ✅ Ubicaciones (FK de proveedores.localidad_id -> localidades.id)
+    "public.paises",
+    "public.regiones",
+    "public.localidades",
+
+    # Dependientes
     "public.proveedores",
     "public.cuentas_bancarias",
     "public.patrimonio",
@@ -35,8 +44,12 @@ PRIORITY = [
     "public.ingresos",
     "public.gastos",
     "public.gastos_cotidianos",
+
+    # Cierres
     "public.cierre_mensual",
     "public.cierre_mensual_detalle",
+
+    # Otros
     "public.log_general",
     "public.prestamo",
     "public.prestamo_cuota",
