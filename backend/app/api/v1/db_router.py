@@ -143,6 +143,45 @@ def make_adapter(name: str):
     raise HTTPException(status_code=400, detail=f"Adapter desconocido: {name}")
 
 
+# ------------------------------
+# Normalización de nombres de tablas
+# ------------------------------
+def _clean_table_name(name: str) -> str:
+    """
+    Normaliza un nombre de tabla/sheet:
+    - trim
+    - lower
+    - reemplaza espacios por underscore
+    - quita dobles underscores
+    """
+    s = (name or "").strip()
+    if not s:
+        return s
+    s = s.replace(" ", "_").strip()
+    while "__" in s:
+        s = s.replace("__", "_")
+    return s.lower()
+
+
+def _to_public(name: str) -> str:
+    """
+    Convierte:
+      - "users" -> "public.users"
+      - "public.users" -> "public.users"
+    """
+    s = (name or "").strip()
+    if not s:
+        return s
+    if "." in s:
+        # respeta schema si ya viene
+        return s
+    return f"public.{s}"
+
+
+def _short(name: str) -> str:
+    return (name or "").split(".", 1)[-1]
+
+
 def _normalize_requested_tables(all_tables: List[str], requested: Optional[List[str]]) -> List[str]:
     """
     Convierte payload.tables a full_names existentes.
@@ -174,12 +213,11 @@ def _normalize_exclude(exclude: Optional[List[str]]) -> Set[str]:
         e2 = e.strip()
         if not e2:
             continue
+
         ex.add(e2)
-        # si viene "public.x", añadimos "x"
         if "." in e2:
             ex.add(e2.split(".", 1)[-1])
         else:
-            # si viene "x", añadimos "public.x" como comodín típico
             ex.add(f"public.{e2}")
     return ex
 
@@ -210,7 +248,6 @@ def _expand_with_fk_dependencies(
     expanded: Set[str] = set(initial_set)
     added: Set[str] = set()
 
-    # BFS/DFS: por cada tabla, incluir sus parents, y los parents de esos parents, etc.
     stack = list(initial_set)
     while stack:
         t = stack.pop()
@@ -220,7 +257,6 @@ def _expand_with_fk_dependencies(
                 added.add(p)
                 stack.append(p)
 
-    # Mantener orden determinista (PRIORITY primero si aplica)
     def sort_key(x: str):
         return (PRIORITY_INDEX.get(x, 10_000), x)
 
@@ -238,22 +274,18 @@ def _toposort_with_priority(
     Ordena nodes de forma que:
       parent -> child (padres antes que hijos)
 
-    edges_child_parent viene como (child, parent), lo convertimos internamente a parent->child.
-
     Desempate:
       - PRIORITY primero
       - luego alfabético
     """
     node_set = set(nodes)
 
-    # Build adjacency parent -> children, and indegree
     children: Dict[str, Set[str]] = {n: set() for n in node_set}
     indeg: Dict[str, int] = {n: 0 for n in node_set}
 
     for child, parent in edges_child_parent:
         if child not in node_set or parent not in node_set:
             continue
-        # parent -> child
         if child not in children[parent]:
             children[parent].add(child)
             indeg[child] += 1
@@ -261,7 +293,6 @@ def _toposort_with_priority(
     def pick_key(x: str):
         return (PRIORITY_INDEX.get(x, 10_000), x)
 
-    # Ready = indegree 0
     ready = sorted([n for n in node_set if indeg[n] == 0], key=pick_key)
     out: List[str] = []
 
@@ -271,12 +302,9 @@ def _toposort_with_priority(
         for ch in sorted(children.get(n, set()), key=pick_key):
             indeg[ch] -= 1
             if indeg[ch] == 0:
-                # insert in order keeping ready sorted by pick_key
                 ready.append(ch)
                 ready.sort(key=pick_key)
 
-    # Si hay ciclo (raro), hacemos fallback: PRIORITY + alpha,
-    # y dejamos visible que hubo ciclo.
     if len(out) != len(node_set):
         remaining = [n for n in nodes if n not in set(out)]
         remaining_sorted = sorted(set(remaining), key=pick_key)
@@ -296,57 +324,72 @@ def _build_final_plan(
     Devuelve:
       (final_target_tables, info_lines)
 
-    - Si src es PostgresAdapter:
+    - Postgres source:
         - normaliza requested
         - filtra public.*
-        - aplica exclude (pero NO bloquea dependencias; auto-incluir manda)
+        - aplica exclude sobre base
         - expande dependencias FK
         - toposort por FKs con PRIORITY tie-break
-    - Si src NO es PostgresAdapter:
-        - fallback: PRIORITY primero + resto estable
+    - NO Postgres source (Sheets):
+        - NO filtra por public.*
+        - normaliza nombres de sheet a public.<name_normalizado>
+        - aplica exclude (flexible)
+        - ordena con PRIORITY tie-break
     """
     info: List[str] = []
-
-    # 1) Candidate base
-    base = _normalize_requested_tables(all_tables, requested_tables)
-    base = [t for t in base if t.startswith("public.")]
-    info.append(f"[plan] Tablas base seleccionadas: {len(base)}")
-
     ex = _normalize_exclude(exclude)
 
-    # 2) Apply exclude a base (solo para lo “pedido”)
-    base_excluded = [t for t in base if (t not in ex and t.split(".", 1)[-1] not in ex)]
-    if len(base_excluded) != len(base):
-        info.append(f"[plan] Exclude aplicado sobre base: {len(base) - len(base_excluded)} removidas")
-    base = base_excluded
-
-    # 3) Blindaje FK si source es Postgres
+    # ----------------------
+    # Caso 1: source Postgres
+    # ----------------------
     if isinstance(src, PostgresAdapter):
+        base = _normalize_requested_tables(all_tables, requested_tables)
+        base = [t for t in base if t.startswith("public.")]
+        info.append(f"[plan] Tablas base seleccionadas: {len(base)}")
+
+        base_excluded = [t for t in base if (t not in ex and _short(t) not in ex)]
+        if len(base_excluded) != len(base):
+            info.append(f"[plan] Exclude aplicado sobre base: {len(base) - len(base_excluded)} removidas")
+        base = base_excluded
+
         expanded, added = _expand_with_fk_dependencies(src=src, initial_tables=base, public_only=True)
         if added:
             info.append(f"[plan] Dependencias FK auto-incluidas: {len(added)}")
             info.append("[plan] Added: " + " -> ".join(added))
 
-        # Re-aplicar exclude SOLO si el usuario insiste:
-        # Pero tú pediste “auto incluir” para blindar. Así que:
-        # - si una tabla requerida está en exclude, la mantenemos y lo avisamos.
-        forced = [t for t in expanded if (t in ex or t.split(".", 1)[-1] in ex)]
+        forced = [t for t in expanded if (t in ex or _short(t) in ex)]
         if forced:
-            info.append(
-                f"[plan] AVISO: {len(forced)} tablas estaban en exclude pero se fuerzan por dependencias FK."
-            )
+            info.append(f"[plan] AVISO: {len(forced)} tablas estaban en exclude pero se fuerzan por dependencias FK.")
 
         edges = src.list_fk_edges(schema="public")
         ordered = _toposort_with_priority(nodes=expanded, edges_child_parent=edges)
-
         info.append(f"[plan] Orden final (FK): {len(ordered)}")
         return ordered, info
 
-    # 4) Fallback (Sheets como source, etc.)
+    # ----------------------
+    # Caso 2: source Sheets (u otro)
+    # ----------------------
+    # all_tables en sheets suelen ser "users", "gastos", ...
+    raw = _normalize_requested_tables(all_tables, requested_tables)
+    info.append(f"[plan] Tablas base seleccionadas (raw source): {len(raw)}")
+
+    # normalizamos a public.<sheet_name_clean>
+    normalized = []
+    for t in raw:
+        t_clean = _clean_table_name(t)
+        if not t_clean:
+            continue
+        t_pub = _to_public(t_clean)
+        normalized.append(t_pub)
+
+    # aplicar exclude flexible (admite "users" o "public.users")
+    normalized = [t for t in normalized if (t not in ex and _short(t) not in ex)]
+    info.append(f"[plan] Tablas normalizadas a public.*: {len(normalized)}")
+
     def pr_key(x: str):
         return (PRIORITY_INDEX.get(x, 10_000), x)
 
-    ordered = sorted(set(base), key=pr_key)
+    ordered = sorted(set(normalized), key=pr_key)
     info.append(f"[plan] Orden final (fallback PRIORITY): {len(ordered)}")
     return ordered, info
 
@@ -369,10 +412,10 @@ def _run_job(job: Job):
         src = make_adapter(payload.source)
         dst = make_adapter(payload.dest)
 
-        # 1) Tablas candidatas desde source (puede incluir views/matviews)
+        # 1) Tablas candidatas desde source
         all_tables = src.list_tables()
 
-        # 2) Plan blindado (auto deps + topo sort)
+        # 2) Plan
         target, plan_info = _build_final_plan(
             src=src,
             all_tables=all_tables,
@@ -380,15 +423,12 @@ def _run_job(job: Job):
             exclude=payload.exclude,
         )
 
-        # Logs del plan (muy útiles para depurar FKs)
         print(f"[order] Selección inicial (plan): {len(target)} tablas.")
         for line in plan_info:
             print(line)
         print("[order] Orden plan:", " -> ".join(target))
 
-        # 2.b) Filtrar views/matviews si vamos a ESCRIBIR a Postgres o truncar
-        # - Pre-truncate: solo tablas reales en destino
-        # - Mirror: solo tablas (no views/matviews) si src es Postgres
+        # 2.b) Filtrar views/matviews si source es Postgres
         target_write = list(target)
 
         if isinstance(src, PostgresAdapter):
@@ -401,8 +441,6 @@ def _run_job(job: Job):
                         skipped_views.append(t)
                         continue
                 except Exception:
-                    # Si no podemos saberlo, mejor no arriesgar en escrituras a Postgres
-                    # pero lo dejamos pasar (source puede ser Sheets)
                     pass
                 filtered.append(t)
             target_write = filtered
@@ -416,7 +454,6 @@ def _run_job(job: Job):
             real_dest = set(dst.list_real_tables(schema="public"))
             target_truncate = [t for t in target_write if t in real_dest]
 
-        # Ajustar totales y progreso en base a lo que realmente se va a procesar
         job.total_tables = len(target_write)
         job.processed_tables = 0
         job.progress = 0.0
@@ -427,7 +464,6 @@ def _run_job(job: Job):
             config={
                 "include": ["public.*"],
                 "exclude": ["public.alembic_version"],
-                # Tras pre-truncate global, no truncar en cada tabla:
                 "clear_first_per_table": False,
             },
         )
@@ -438,9 +474,6 @@ def _run_job(job: Job):
             f"execute={payload.execute}, destructive={payload.allow_destructive}"
         )
 
-        # --- PRE-CLEAR DEST (Postgres): truncar todas las TABLAS a la vez ---
-        # Esto evita: "cannot truncate a table referenced in a foreign key constraint"
-        # y evita intentar truncar vistas (vw_financiaciones, etc.)
         if payload.execute and isinstance(dst, PostgresAdapter):
             job.write_log(
                 f"[pre] Truncating destination REAL tables: {len(target_truncate)} (single statement) ..."
@@ -448,7 +481,6 @@ def _run_job(job: Job):
             dst.truncate_tables(target_truncate, allow_destructive=payload.allow_destructive)
             job.write_log("[pre] Destination truncated OK.")
 
-        # 3) Ejecutar tabla a tabla (solo write list)
         for idx, full in enumerate(target_write, start=1):
             if job._cancel:
                 job.status = "canceled"
@@ -468,7 +500,6 @@ def _run_job(job: Job):
             job.processed_tables = idx
             job.progress = round((idx / (job.total_tables or 1)) * 100.0, 2)
 
-            # Si el destino es Sheets y estás ejecutando, micro pausa para repartir cuota
             if payload.dest == "sheets" and payload.execute:
                 time.sleep(0.4)
 
@@ -491,6 +522,7 @@ def _run_job(job: Job):
 
     finally:
         sys.stdout = old_stdout
+
 
 # ------------------------------
 # Endpoints
@@ -545,13 +577,6 @@ def cancel_job(job_id: str):
 
 @router.get("/sheets/check")
 def sheets_check():
-    """
-    Chequeo rápido para confirmar:
-      - GOOGLE_SHEETS_ID
-      - GOOGLE_APPLICATION_CREDENTIALS
-      - acceso real al spreadsheet
-      - número de worksheets encontradas
-    """
     sid = _get_env("GOOGLE_SHEETS_ID")
     creds = _get_env("GOOGLE_APPLICATION_CREDENTIALS")
 
