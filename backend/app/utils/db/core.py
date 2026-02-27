@@ -49,7 +49,11 @@ class SyncEngine:
                     print(
                         f"{full_name} es VIEW/MATVIEW. allow_drop=False → skip para evitar conflictos"
                     )
-                    print(f"[mirror] {full_name}: DRY-RUN (no write)" if not execute else f"[mirror] {full_name}: skip view")
+                    print(
+                        f"[mirror] {full_name}: DRY-RUN (no write)"
+                        if not execute
+                        else f"[mirror] {full_name}: skip view"
+                    )
                     print("[mirror] done")
                     continue
 
@@ -61,10 +65,49 @@ class SyncEngine:
 
             if isinstance(self.source, PostgresAdapter):
                 headers, rows = self.source.read_table(full_name)
+
             elif isinstance(self.source, SheetsAdapter):
                 headers, rows = self.source.read_table(full_name)
+
             else:
                 raise RuntimeError(f"source adapter no soportado: {type(self.source)}")
+
+            # --- Normalización CRÍTICA Sheets -> Postgres ---
+            # Sheets no tiene NULL: los campos vacíos llegan como "" y Postgres no puede castear "" a uuid/int/timestamp/numeric/bool.
+            # Además, algunas filas pueden venir más cortas que headers (celdas vacías al final).
+            if isinstance(self.source, SheetsAdapter) and isinstance(self.dest, PostgresAdapter):
+                hlen = len(headers)
+
+                def _coerce(v: Any) -> Any:
+                    if v is None:
+                        return None
+                    if isinstance(v, str):
+                        s = v.strip()
+                        if s == "":
+                            return None
+                        sl = s.lower()
+                        # boolean típicos de Sheets
+                        if sl in ("true", "false"):
+                            return sl == "true"
+                        # deja timestamps ISO / números como string; Postgres suele castear bien
+                        return s
+                    return v
+
+                norm_rows: List[Tuple[Any, ...]] = []
+                for r in rows:
+                    rr = list(r)
+
+                    # si la fila viene más corta que headers, rellenamos con None
+                    if len(rr) < hlen:
+                        rr += [None] * (hlen - len(rr))
+
+                    # si viene más larga, truncamos
+                    if len(rr) > hlen:
+                        rr = rr[:hlen]
+
+                    norm_rows.append(tuple(_coerce(x) for x in rr))
+
+                rows = norm_rows
 
             # --- Ensure destination structure ---
             if isinstance(self.dest, PostgresAdapter) and isinstance(self.source, PostgresAdapter):
@@ -105,6 +148,7 @@ class SyncEngine:
                 )
                 if execute:
                     print(f"[Sheets] {full_name}: wrote {len(rows)} rows")
+
             else:
                 raise RuntimeError(f"dest adapter no soportado: {type(self.dest)}")
 
