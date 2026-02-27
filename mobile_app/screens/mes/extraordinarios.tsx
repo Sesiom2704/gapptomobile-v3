@@ -7,6 +7,9 @@ import {
   TouchableOpacity,
   ActivityIndicator,
   RefreshControl,
+  LayoutAnimation,
+  Platform,
+  UIManager,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { useNavigation, useRoute } from '@react-navigation/native';
@@ -58,25 +61,38 @@ const ExtraordinariosScreen: React.FC = () => {
       navigation.navigate(returnToTab, { screen: returnToScreen });
       return;
     }
-    if (navigation.canGoBack()) {
-      navigation.goBack();
-    }
+    if (navigation.canGoBack()) navigation.goBack();
   }, [navigation, returnToTab, returnToScreen]);
 
-  // Mes seleccionado en front (0-11)
-  const [selectedYear, setSelectedYear] = useState(2025);
-  const [selectedMonth, setSelectedMonth] = useState(11); // diciembre
+  // ✅ Mes actual por defecto
+  const [selectedYear, setSelectedYear] = useState(() => new Date().getFullYear());
+  const [selectedMonth, setSelectedMonth] = useState(() => new Date().getMonth()); // 0-11
 
   const [data, setData] = useState<ExtraordinariosResponseDto | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  // Plegables
+  const [showIngresos, setShowIngresos] = useState(true);
+  const [showGastos, setShowGastos] = useState(true);
+  const [showOmitidos, setShowOmitidos] = useState(true);
+
+  useEffect(() => {
+    if (Platform.OS === 'android' && UIManager.setLayoutAnimationEnabledExperimental) {
+      UIManager.setLayoutAnimationEnabledExperimental(true);
+    }
+  }, []);
+
+  const animateToggle = () => {
+    LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
+  };
 
   const loadData = useCallback(async () => {
     try {
       setLoading(true);
       setError(null);
 
-      const apiMonth = selectedMonth + 1; // backend usa 1-12
+      const apiMonth = selectedMonth + 1; // backend 1-12
       const res = await fetchExtraordinarios(selectedYear, apiMonth);
       setData(res);
     } catch (err) {
@@ -120,20 +136,93 @@ const ExtraordinariosScreen: React.FC = () => {
     [selectedMonth, selectedYear]
   );
 
+  // Totales
   const totalIngresos = data?.total_ingresos ?? 0;
-  const totalGastos = data?.total_gastos ?? 0;
-  const balance = data?.balance ?? 0;
+  const totalGastosExtra = data?.total_gastos ?? 0;
+  const totalGastosOmitidos = data?.total_gastos_omitidos ?? 0;
 
-  const gastos = data?.gastos ?? [];
-  const ingresos = data?.ingresos ?? [];
+  // ✅ Balance según tu regla
+  const balance = data?.balance ?? (totalIngresos + totalGastosOmitidos - totalGastosExtra);
 
-  const renderGastoCard = (gasto: ExtraordinarioItemDto) => {
+  const gastosExtra = data?.gastos ?? [];
+  const ingresosExtra = data?.ingresos ?? [];
+  const gastosOmitidos = data?.gastos_omitidos ?? [];
+
+  // --------------------------
+  // Navegación a forms (punto 4)
+  // --------------------------
+  const navigateToGastoForm = useCallback(
+    (item: ExtraordinarioItemDto, preset?: 'extra') => {
+      navigation.navigate('DayToDayTab', {
+        screen: 'GastoGestionableForm',
+        params: {
+          gasto: {
+            id: item.id,
+            nombre: item.nombre,
+            tipo_id: item.tipo_id ?? null,
+            segmento_id: item.segmento_id ?? null,
+            proveedor_id: item.proveedor_id ?? null,
+            cuenta_id: item.cuenta_id ?? null,
+            referencia_vivienda_id: item.referencia_vivienda_id ?? null,
+            periodicidad: item.periodicidad ?? null,
+            importe: item.importe,
+            importe_cuota: item.importe_cuota ?? null,
+            cuotas: item.cuotas ?? null,
+            fecha: item.fecha ?? null,
+            rango_pago: item.rango_pago ?? null,
+            activo: item.activo,
+            pagado: item.pagado ?? false,
+            kpi: item.kpi,
+            comentarios: item.comentarios ?? null,
+          },
+          preset: preset,
+          returnToTab: 'MonthTab',
+          returnToScreen: 'MonthExtraordinariosScreen',
+        },
+      });
+    },
+    [navigation]
+  );
+
+  const navigateToIngresoForm = useCallback(
+    (item: ExtraordinarioItemDto) => {
+      navigation.navigate('DayToDayTab', {
+        screen: 'IngresoForm',
+        params: {
+          mode: 'extraordinario',
+          ingreso: {
+            id: item.id,
+            concepto: item.nombre,
+            tipo_id: item.tipo_id ?? null,
+            cuenta_id: item.cuenta_id ?? null,
+            referencia_vivienda_id: item.referencia_vivienda_id ?? null,
+            periodicidad: item.periodicidad ?? 'PAGO UNICO',
+            importe: item.importe,
+            fecha_inicio: item.fecha_inicio ?? null,
+            rango_cobro: item.rango_cobro ?? null,
+            activo: item.activo,
+            cobrado: item.cobrado ?? false,
+            kpi: item.kpi,
+            ultimo_ingreso_on: item.fecha_referencia,
+          },
+          returnToTab: 'MonthTab',
+          returnToScreen: 'MonthExtraordinariosScreen',
+        },
+      });
+    },
+    [navigation]
+  );
+
+  // --------------------------
+  // Render cards
+  // --------------------------
+  const renderGastoCard = (gasto: ExtraordinarioItemDto, onPress: () => void) => {
     const fecha = gasto.fecha_referencia
       ? new Date(gasto.fecha_referencia).toISOString().substring(0, 10)
       : '';
 
     return (
-      <View key={gasto.id} style={styles.card}>
+      <TouchableOpacity key={gasto.id} style={styles.card} activeOpacity={0.85} onPress={onPress}>
         <View style={styles.cardRowMain}>
           <View style={styles.cardTextBlock}>
             <Text style={styles.cardTitle}>{gasto.nombre}</Text>
@@ -141,15 +230,13 @@ const ExtraordinariosScreen: React.FC = () => {
               <Text style={styles.cardSubtitle}>{gasto.categoria_nombre}</Text>
             ) : null}
           </View>
-          <Text style={styles.cardAmountNegative}>
-            {formatCurrency(gasto.importe)}
-          </Text>
+          <Text style={styles.cardAmountNegative}>{formatCurrency(gasto.importe)}</Text>
         </View>
         <View style={styles.cardRowMeta}>
-          <Text style={styles.cardMetaLabel}>Último pago</Text>
+          <Text style={styles.cardMetaLabel}>Referencia</Text>
           <Text style={styles.cardMetaValue}>{fecha}</Text>
         </View>
-      </View>
+      </TouchableOpacity>
     );
   };
 
@@ -159,7 +246,12 @@ const ExtraordinariosScreen: React.FC = () => {
       : '';
 
     return (
-      <View key={ingreso.id} style={styles.card}>
+      <TouchableOpacity
+        key={ingreso.id}
+        style={styles.card}
+        activeOpacity={0.85}
+        onPress={() => navigateToIngresoForm(ingreso)}
+      >
         <View style={styles.cardRowMain}>
           <View style={styles.cardTextBlock}>
             <Text style={styles.cardTitle}>{ingreso.nombre}</Text>
@@ -167,15 +259,47 @@ const ExtraordinariosScreen: React.FC = () => {
               <Text style={styles.cardSubtitle}>{ingreso.categoria_nombre}</Text>
             ) : null}
           </View>
-          <Text style={styles.cardAmountPositive}>
-            {formatCurrency(ingreso.importe)}
-          </Text>
+          <Text style={styles.cardAmountPositive}>{formatCurrency(ingreso.importe)}</Text>
         </View>
         <View style={styles.cardRowMeta}>
           <Text style={styles.cardMetaLabel}>Último cobro</Text>
           <Text style={styles.cardMetaValue}>{fecha}</Text>
         </View>
-      </View>
+      </TouchableOpacity>
+    );
+  };
+
+  const SectionHeader = ({
+    title,
+    open,
+    onToggle,
+    rightText,
+  }: {
+    title: string;
+    open: boolean;
+    onToggle: () => void;
+    rightText?: string;
+  }) => {
+    return (
+      <TouchableOpacity
+        activeOpacity={0.85}
+        onPress={() => {
+          animateToggle();
+          onToggle();
+        }}
+        style={styles.sectionHeaderRow}
+      >
+        <View style={styles.sectionHeaderLeft}>
+          <Ionicons
+            name={open ? 'chevron-down' : 'chevron-forward'}
+            size={16}
+            color={colors.textSecondary}
+          />
+          <Text style={panelStyles.sectionTitle}>{title}</Text>
+        </View>
+
+        {rightText ? <Text style={styles.sectionHeaderRight}>{rightText}</Text> : null}
+      </TouchableOpacity>
     );
   };
 
@@ -191,31 +315,18 @@ const ExtraordinariosScreen: React.FC = () => {
       <View style={panelStyles.screen}>
         <View style={styles.summaryHeader}>
           <View style={styles.monthSelectorRow}>
-            <TouchableOpacity
-              style={styles.monthArrowButton}
-              onPress={goToPrevMonth}
-            >
-              <Ionicons
-                name="chevron-back"
-                size={18}
-                color={colors.textSecondary}
-              />
+            <TouchableOpacity style={styles.monthArrowButton} onPress={goToPrevMonth}>
+              <Ionicons name="chevron-back" size={18} color={colors.textSecondary} />
             </TouchableOpacity>
 
             <Text style={styles.monthLabel}>{monthLabel}</Text>
 
-            <TouchableOpacity
-              style={styles.monthArrowButton}
-              onPress={goToNextMonth}
-            >
-              <Ionicons
-                name="chevron-forward"
-                size={18}
-                color={colors.textSecondary}
-              />
+            <TouchableOpacity style={styles.monthArrowButton} onPress={goToNextMonth}>
+              <Ionicons name="chevron-forward" size={18} color={colors.textSecondary} />
             </TouchableOpacity>
           </View>
 
+          {/* Resumen superior */}
           <View style={styles.summaryRow}>
             <View style={styles.summaryItem}>
               <Text style={styles.summaryLabel}>Ingresos extraord.</Text>
@@ -227,9 +338,19 @@ const ExtraordinariosScreen: React.FC = () => {
             <View style={styles.summaryItem}>
               <Text style={styles.summaryLabel}>Gastos extraord.</Text>
               <Text style={[styles.summaryValue, styles.summaryNegative]}>
-                {formatCurrency(totalGastos)}
+                {formatCurrency(totalGastosExtra)}
               </Text>
             </View>
+          </View>
+
+          <View style={[styles.summaryRow, { marginTop: 8 }]}>
+            <View style={styles.summaryItem}>
+              <Text style={styles.summaryLabel}>Gastos omitidos</Text>
+              <Text style={[styles.summaryValue, styles.summaryNegative]}>
+                {formatCurrency(totalGastosOmitidos)}
+              </Text>
+            </View>
+            <View style={styles.summaryItem} />
           </View>
 
           <View style={styles.balanceRow}>
@@ -237,9 +358,7 @@ const ExtraordinariosScreen: React.FC = () => {
             <Text
               style={[
                 styles.balanceValue,
-                balance >= 0
-                  ? styles.balancePositive
-                  : styles.balanceNegative,
+                balance >= 0 ? styles.balancePositive : styles.balanceNegative,
               ]}
             >
               {formatCurrency(balance)}
@@ -250,47 +369,67 @@ const ExtraordinariosScreen: React.FC = () => {
         {loading ? (
           <View style={styles.loadingContainer}>
             <ActivityIndicator size="small" color={colors.primary} />
-            <Text style={styles.loadingText}>
-              Cargando extraordinarios…
-            </Text>
+            <Text style={styles.loadingText}>Cargando extraordinarios…</Text>
           </View>
         ) : (
           <ScrollView
             contentContainerStyle={panelStyles.scrollContent}
-            refreshControl={
-              <RefreshControl refreshing={loading} onRefresh={onRefresh} />
-            }
+            refreshControl={<RefreshControl refreshing={loading} onRefresh={onRefresh} />}
           >
             {error ? (
               <View style={panelStyles.section}>
                 <Text style={styles.errorText}>{error}</Text>
               </View>
             ) : null}
-            
+
             <View style={panelStyles.section}>
-              <Text style={panelStyles.sectionTitle}>
-                Ingresos extraordinarios
-              </Text>
-              {ingresos.length === 0 ? (
-                <Text style={styles.emptyText}>
-                  No hay ingresos extraordinarios en este mes.
-                </Text>
-              ) : (
-                ingresos.map(renderIngresoCard)
-              )}
+              <SectionHeader
+                title="Ingresos extraordinarios"
+                open={showIngresos}
+                onToggle={() => setShowIngresos((v) => !v)}
+                rightText={formatCurrency(totalIngresos)}
+              />
+              {showIngresos ? (
+                ingresosExtra.length === 0 ? (
+                  <Text style={styles.emptyText}>No hay ingresos extraordinarios en este mes.</Text>
+                ) : (
+                  ingresosExtra.map(renderIngresoCard)
+                )
+              ) : null}
+            </View>
+
+            <View style={panelStyles.section}>
+              <SectionHeader
+                title="Gastos extraordinarios"
+                open={showGastos}
+                onToggle={() => setShowGastos((v) => !v)}
+                rightText={formatCurrency(totalGastosExtra)}
+              />
+              {showGastos ? (
+                gastosExtra.length === 0 ? (
+                  <Text style={styles.emptyText}>No hay gastos extraordinarios en este mes.</Text>
+                ) : (
+                  gastosExtra.map((g) =>
+                    renderGastoCard(g, () => navigateToGastoForm(g, 'extra'))
+                  )
+                )
+              ) : null}
             </View>
 
             <View style={[panelStyles.section, { marginBottom: 24 }]}>
-              <Text style={panelStyles.sectionTitle}>
-                Gastos extraordinarios
-              </Text>
-              {gastos.length === 0 ? (
-                <Text style={styles.emptyText}>
-                  No hay gastos extraordinarios en este mes.
-                </Text>
-              ) : (
-                gastos.map(renderGastoCard)
-              )}
+              <SectionHeader
+                title="Gastos omitidos"
+                open={showOmitidos}
+                onToggle={() => setShowOmitidos((v) => !v)}
+                rightText={formatCurrency(totalGastosOmitidos)}
+              />
+              {showOmitidos ? (
+                gastosOmitidos.length === 0 ? (
+                  <Text style={styles.emptyText}>No hay gastos omitidos en este mes.</Text>
+                ) : (
+                  gastosOmitidos.map((g) => renderGastoCard(g, () => navigateToGastoForm(g)))
+                )
+              ) : null}
             </View>
           </ScrollView>
         )}
@@ -393,6 +532,24 @@ const styles = StyleSheet.create({
   emptyText: {
     fontSize: 12,
     color: colors.textMuted,
+  },
+
+  sectionHeaderRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingVertical: 6,
+    marginBottom: 6,
+  },
+  sectionHeaderLeft: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+  },
+  sectionHeaderRight: {
+    fontSize: 12,
+    color: colors.textSecondary,
+    fontWeight: '600',
   },
 
   card: {
