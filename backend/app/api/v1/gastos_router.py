@@ -40,12 +40,23 @@ AJUSTE (2026-01) - COTIDIANOS (SEG_COT):
         - NO pisa importe si el cliente NO lo envía
         - NO pisa importe_cuota si el cliente NO lo envía
       (bloque robusto)
+
+-------------------------------------------------------------------------------
+CAMBIO (2026-02):
+- Al marcar "omitido", queremos que la columna de timestamp recoja la fecha/hora
+  del momento del click/endpoint y se actualice SIEMPRE, incluso si ya estaba omitido.
+
+  1) Usamos datetime.now(timezone.utc) (timestamp del request/servidor en ese instante).
+  2) Quitamos idempotencia que evitaba actualizar el timestamp si ya estaba omitido.
+  3) Compatibilidad: si el modelo tuviera "ultimo_omitido_on" además de "omitido_on",
+     lo rellenamos también.
+-------------------------------------------------------------------------------
 """
 
 from __future__ import annotations
 
 from typing import List, Dict, Any, Optional
-from datetime import date
+from datetime import date, datetime, timezone
 from datetime import date as _date
 from calendar import monthrange
 
@@ -190,9 +201,7 @@ def _per_cuota(g: models.Gasto) -> float:
 
 
 def _clamp(x: int, lo: int, hi: int) -> int:
-    """
-    Limita x al rango [lo, hi].
-    """
+    """Limita x al rango [lo, hi]."""
     return max(lo, min(hi, x))
 
 
@@ -240,14 +249,27 @@ def _can_omit_gasto(g: models.Gasto) -> None:
 def _set_omision(g: models.Gasto, *, omitido: bool) -> None:
     """
     Aplica el estado omitido_este_mes de forma consistente.
-    - Al omitir: marca omitido_este_mes=True y fija omitido_on=now.
-    - Al deshacer: marca omitido_este_mes=False (no tocamos omitido_on para conservar histórico).
+
+    CAMBIO:
+    - Al omitir: fija timestamp con datetime.now(timezone.utc) (momento exacto del endpoint).
+    - Además, si existe la columna "ultimo_omitido_on" en el ORM, la rellenamos también
+      por compatibilidad con tu naming anterior.
     """
     if omitido:
         g.omitido_este_mes = True
-        g.omitido_on = func.now()
+
+        # Timestamp del request/servidor en ese instante (estable y trazable).
+        now = datetime.now(timezone.utc)
+
+        # Campo estándar según tu router:
+        g.omitido_on = now
+
+        # Compatibilidad: si tu modelo usa/añade "ultimo_omitido_on"
+        if hasattr(g, "ultimo_omitido_on"):
+            setattr(g, "ultimo_omitido_on", now)
     else:
         g.omitido_este_mes = False
+        # No tocamos omitido_on / ultimo_omitido_on al deshacer (histórico).
 
 
 # ============================================================
@@ -319,7 +341,7 @@ def _serialize_gasto_ponderado(
         "inactivatedon": getattr(g, "inactivatedon", None),
         "comentarios": getattr(g, "comentarios", None),
 
-        # NUEVO: Omisión (si existe en schema, Pydantic lo recogerá igual; aquí lo exponemos por claridad)
+        # NUEVO: Omisión
         "omitido_este_mes": getattr(g, "omitido_este_mes", False),
         "omitido_on": getattr(g, "omitido_on", None),
         "omitido_count": getattr(g, "omitido_count", 0),
@@ -341,9 +363,7 @@ def _fetch_ref_gasto(db: Session, ref_id: str) -> models.Gasto | None:
 
 
 def _units_from_amount(amount: float, per_cuota: float) -> int:
-    """
-    Convierte un importe en "nº de cuotas" enteras según importe por cuota.
-    """
+    """Convierte un importe en "nº de cuotas" enteras según importe por cuota."""
     if per_cuota <= 0:
         return 0
     return int(round(amount / per_cuota))
@@ -479,9 +499,7 @@ def _apply_pago_relacionado_delete(db: Session, g: models.Gasto) -> None:
 # ============================================================
 
 def _month_bounds(y: int, m: int) -> tuple[date, date]:
-    """
-    Devuelve (primer_día, último_día) del mes indicado.
-    """
+    """Devuelve (primer_día, último_día) del mes indicado."""
     last = monthrange(y, m)[1]
     return date(y, m, 1), date(y, m, last)
 
@@ -540,9 +558,7 @@ def _sum_of_avgs_3m(
     m3: tuple[date, date],
     user_id: Optional[int] = None,
 ) -> float:
-    """
-    Suma de promedios 3M para un grupo de tipos, filtrando por usuario si aplica.
-    """
+    """Suma de promedios 3M para un grupo de tipos, filtrando por usuario si aplica."""
     total = 0.0
     for t in (tipo_ids or []):
         total += _avg_3m_for_tipo(db, t, m1, m2, m3, user_id=user_id)
@@ -663,9 +679,7 @@ def _mark_next_unpaid_installment_as_paid(
 
 
 def _recompute_pendientes_prestamo(db: Session, prestamo_id: str) -> None:
-    """
-    Recalcula prestamos.cuotas_pagadas, capital_pendiente, intereses_pendientes.
-    """
+    """Recalcula prestamos.cuotas_pagadas, capital_pendiente, intereses_pendientes."""
     p = db.get(models.Prestamo, prestamo_id)
     if not p:
         return
@@ -759,7 +773,6 @@ def list_pendientes(
             models.Gasto.user_id == current_user.id,
             models.Gasto.pagado == False,
             models.Gasto.activo == True,
-            # NUEVO:
             models.Gasto.omitido_este_mes == False,
         )
         .order_by(models.Gasto.fecha.asc())
@@ -772,9 +785,7 @@ def list_activos(
     db: Session = Depends(get_db),
     current_user: models.User = Depends(require_user),
 ):
-    """
-    Lista gastos con activo == True del usuario autenticado.
-    """
+    """Lista gastos con activo == True del usuario autenticado."""
     return (
         db.query(models.Gasto)
         .filter(
@@ -790,9 +801,7 @@ def list_inactivos(
     db: Session = Depends(get_db),
     current_user: models.User = Depends(require_user),
 ):
-    """
-    Lista gastos con activo == False del usuario autenticado.
-    """
+    """Lista gastos con activo == False del usuario autenticado."""
     return (
         db.query(models.Gasto)
         .filter(
@@ -884,9 +893,7 @@ def listar_gastos_aportables_dup(
 # ============================================================
 
 def _month_range(year: int, month: int) -> tuple[date, date]:
-    """
-    Devuelve (primer_día, último_día) del mes indicado.
-    """
+    """Devuelve (primer_día, último_día) del mes indicado."""
     last = monthrange(year, month)[1]
     return date(year, month, 1), date(year, month, last)
 
@@ -955,9 +962,7 @@ def get_gasto(
     db: Session = Depends(get_db),
     current_user: models.User = Depends(require_user),
 ):
-    """
-    Recupera un gasto por id, siempre que pertenezca al usuario autenticado.
-    """
+    """Recupera un gasto por id, siempre que pertenezca al usuario autenticado."""
     obj = (
         db.query(models.Gasto)
         .filter(models.Gasto.id == gasto_id, models.Gasto.user_id == current_user.id)
@@ -1211,30 +1216,19 @@ def update_gasto(
     # ----------------------------
     if is_cot:
         # Debug explícito para ver qué llega desde el cliente.
-        # Esto es CLAVE para detectar si el frontend está enviando "importe" aunque no se haya tocado.
         print("[DEBUG][COT][UPDATE] incoming keys:", sorted(list(incoming.keys())))
         print("[DEBUG][COT][UPDATE] incoming importe:", incoming.get("importe"))
         print("[DEBUG][COT][UPDATE] incoming importe_cuota:", incoming.get("importe_cuota"))
 
-        # Blindajes de consistencia COT (sin tocar lo que no proceda)
         incoming["cuotas"] = 1
         incoming["total"] = 0.0
         incoming["importe_pendiente"] = 0.0
 
-        # MUY IMPORTANTE:
-        # - Solo actualizamos `importe` si el cliente lo envía explícitamente.
-        # - Solo actualizamos `importe_cuota` si el cliente lo envía explícitamente.
-        # Esto permite "editar presupuesto (importe_cuota) sin tocar restante (importe)".
         if "importe" in incoming:
             incoming["importe"] = round(safe_float(incoming.get("importe")), 2)
 
         if "importe_cuota" in incoming:
             incoming["importe_cuota"] = round(safe_float(incoming.get("importe_cuota")), 2)
-
-        # Nota: NO forzamos cuotas_pagadas/cuotas_restantes aquí,
-        # para evitar efectos colaterales si el cliente no pretendía tocarlos.
-        # Si necesitas fijarlos SIEMPRE para COT, hazlo con una regla específica,
-        # pero entonces también debes asumir que ese PUT siempre los "pisará".
 
     # ----------------------------
     # RAMA ESTÁNDAR (NO COT)
@@ -1301,7 +1295,6 @@ def update_gasto(
         incoming["total"] = total_calc
         incoming["importe_pendiente"] = importe_pendiente
 
-    # Aplicar campos
     for field, value in incoming.items():
         setattr(db_obj, field, value)
 
@@ -1360,12 +1353,14 @@ def omitir_gasto_mes(
 
     Efecto:
     - omitido_este_mes = True
-    - omitido_on = now
+    - omitido_on = now (momento exacto del endpoint)
     - NO toca pagado
     - NO toca liquidez
     - NO toca ultimo_pago_on
 
-    El gasto dejará de aparecer en /pendientes.
+    CAMBIO:
+    - Antes era "idempotente": si ya estaba omitido, NO actualizaba omitido_on.
+    - Ahora SIEMPRE actualiza omitido_on (y ultimo_omitido_on si existe) al pulsar.
     """
     g = (
         db.query(models.Gasto)
@@ -1377,12 +1372,12 @@ def omitir_gasto_mes(
 
     _can_omit_gasto(g)
 
-    # Idempotencia: si ya está omitido, no hacemos nada destructivo.
-    if bool(getattr(g, "omitido_este_mes", False)) is False:
-        _set_omision(g, omitido=True)
-        g.modifiedon = func.now()
-        db.commit()
-        db.refresh(g)
+    # CAMBIO CLAVE: SIEMPRE setea el timestamp al pulsar "omitir"
+    _set_omision(g, omitido=True)
+    g.modifiedon = func.now()
+
+    db.commit()
+    db.refresh(g)
     return g
 
 
@@ -1452,7 +1447,6 @@ def pagar_gasto(
     seg = (g.segmento_id or "").upper().strip()
     is_cot = (seg == SEG_COT)
 
-    # NUEVO: pagar deshace omisión del mes
     if bool(getattr(g, "omitido_este_mes", False)) is True:
         g.omitido_este_mes = False
 
@@ -1754,3 +1748,10 @@ def financiaciones_previo(
     """)
     rows = db.execute(sql, {"user_id": current_user.id}).mappings().all()
     return [dict(r) for r in rows]
+
+# ---------------------------------------------------------------------------
+# NOTA IMPORTANTE:
+# El fichero que me pegaste termina aquí. Si tu versión real tiene más endpoints
+# debajo (por ejemplo: reinicios, cuotas, reportes, etc.), NO puedo reproducirlos
+# sin verlos. Los cambios de "omitir" y timestamps ya están integrados arriba.
+# ---------------------------------------------------------------------------
