@@ -140,7 +140,7 @@ class Patrimonio(Base):
     ingresos      = relationship("Ingreso", back_populates="vivienda_rel")
     gastos        = relationship("Gasto", back_populates="vivienda_rel")
     rendimientos  = relationship("RendimientoPatrimonio", back_populates="patrimonio", cascade="all, delete-orphan")
-    # 👇 Relación inversa hacia el usuario dueño
+    contratos     = relationship("Contrato", back_populates="patrimonio_rel", cascade="all, delete-orphan")
     user          = relationship("User", back_populates="patrimonios")
 
 class PatrimonioCompra(Base):
@@ -171,6 +171,15 @@ class PatrimonioCompra(Base):
 def gen_rendpat_id() -> str:
     return "rendpat-" + uuid4().hex[:8]
 
+def gen_persona_id() -> str:
+    return "PER-" + uuid4().hex[:10].upper()
+
+
+def gen_contrato_id() -> str:
+    return "CON-" + uuid4().hex[:10].upper()
+
+def gen_contrato_participante_id() -> str:
+    return "CPR-" + uuid4().hex[:10].upper()
 
 class RendimientoPatrimonio(Base):
     __tablename__ = "rendimiento_patrimonio"
@@ -208,6 +217,152 @@ class RendimientoPatrimonio(Base):
     modifiedon          = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
 
     patrimonio = relationship("Patrimonio", back_populates="rendimientos")
+
+
+# =============================================
+# 2.1 GESTIÓN DE ALQUILERES
+# =============================================
+
+class Persona(Base):
+    """
+    Tabla maestra de personas vinculables a contratos:
+    - inquilinos
+    - avalistas
+    - gestores
+
+    Nota:
+    - Se gestiona por user_id para mantener aislamiento multiusuario.
+    - DNI y teléfono se validarán a nivel de API/servicio.
+    """
+
+    __tablename__ = "personas"
+    __table_args__ = (
+        Index("ix_personas_user_dni", "user_id", "dni"),
+        Index("ix_personas_user_telefono", "user_id", "telefono"),
+        {"extend_existing": True},
+    )
+
+    id = Column(String, primary_key=True, index=True, default=gen_persona_id)
+
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+
+    nombre_completo = Column(String, nullable=False, index=True)
+    dni = Column(String, nullable=True, index=True)
+    telefono = Column(String, nullable=True, index=True)
+    email = Column(String, nullable=True, index=True)
+    fecha_nacimiento = Column(Date, nullable=True)
+    observaciones = Column(Text, nullable=True)
+
+    createon = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    modifiedon = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
+    inactivatedon = Column(DateTime(timezone=True), nullable=True)
+
+    user = relationship("User", back_populates="personas")
+
+    contratos_participaciones = relationship(
+        "ContratoParticipante",
+        back_populates="persona",
+        cascade="all, delete-orphan",
+    )
+
+
+class Contrato(Base):
+    """
+    Contrato asociado a una vivienda/patrimonio.
+
+    Reglas funcionales previstas:
+    - Una vivienda puede tener varios contratos históricos.
+    - Solo uno debería estar activo al mismo tiempo.
+    - Esa regla fuerte se puede reforzar por BD con índice parcial
+      o por servicio/API.
+    """
+
+    __tablename__ = "contratos"
+    __table_args__ = (
+        CheckConstraint(
+            "estado IN ('activo', 'pendiente', 'finalizado', 'cancelado')",
+            name="ck_contratos_estado"
+        ),
+        Index("ix_contratos_user_estado", "user_id", "estado"),
+        Index("ix_contratos_patrimonio_estado", "patrimonio_id", "estado"),
+        {"extend_existing": True},
+    )
+
+    id = Column(String, primary_key=True, index=True, default=gen_contrato_id)
+
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    patrimonio_id = Column(String, ForeignKey("patrimonio.id", ondelete="CASCADE"), nullable=False, index=True)
+
+    fecha_inicio = Column(Date, nullable=False)
+    fecha_fin = Column(Date, nullable=True)
+
+    renta_mensual = Column(Numeric(12, 2), nullable=True)
+    fianza = Column(Numeric(12, 2), nullable=True)
+
+    estado = Column(String, nullable=False, server_default=text("'activo'"), index=True)
+
+    incluye_luz = Column(Boolean, nullable=False, server_default=text("false"))
+    incluye_agua = Column(Boolean, nullable=False, server_default=text("false"))
+    incluye_internet = Column(Boolean, nullable=False, server_default=text("false"))
+
+    observaciones = Column(Text, nullable=True)
+
+    createon = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    modifiedon = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
+    inactivatedon = Column(DateTime(timezone=True), nullable=True)
+
+    user = relationship("User", back_populates="contratos")
+    patrimonio_rel = relationship("Patrimonio", back_populates="contratos")
+
+    participantes = relationship(
+        "ContratoParticipante",
+        back_populates="contrato",
+        cascade="all, delete-orphan",
+    )
+
+
+class ContratoParticipante(Base):
+    """
+    Relación entre contrato y persona con rol.
+
+    Roles previstos:
+    - inquilino
+    - avalista
+    - gestor
+
+    Nota funcional:
+    - es_principal solo debería tener sentido real para inquilino,
+      pero esa validación la haremos mejor en servicio/API.
+    """
+
+    __tablename__ = "contratos_participantes"
+    __table_args__ = (
+        CheckConstraint(
+            "rol IN ('inquilino', 'avalista', 'gestor')",
+            name="ck_contratos_participantes_rol"
+        ),
+        Index("ix_contrato_participante_contrato_rol", "contrato_id", "rol"),
+        Index("ix_contrato_participante_persona", "persona_id"),
+        {"extend_existing": True},
+    )
+
+    id = Column(String, primary_key=True, index=True, default=gen_contrato_participante_id)
+
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    contrato_id = Column(String, ForeignKey("contratos.id", ondelete="CASCADE"), nullable=False, index=True)
+    persona_id = Column(String, ForeignKey("personas.id", ondelete="CASCADE"), nullable=False, index=True)
+
+    rol = Column(String, nullable=False, index=True)
+    es_principal = Column(Boolean, nullable=False, server_default=text("false"))
+    observaciones = Column(Text, nullable=True)
+
+    createon = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    modifiedon = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
+    inactivatedon = Column(DateTime(timezone=True), nullable=True)
+
+    user = relationship("User", back_populates="contratos_participantes")
+    contrato = relationship("Contrato", back_populates="participantes")
+    persona = relationship("Persona", back_populates="contratos_participaciones")
 
 class Pais(Base):
     __tablename__ = "paises"
@@ -616,12 +771,17 @@ class User(Base):
     prestamos         = relationship("Prestamo", back_populates="user")
     proveedores       = relationship("Proveedor", back_populates="user")
     movimientos_cuenta = relationship("MovimientoCuenta", back_populates="user")
+
+    personas = relationship("Persona", back_populates="user")
+    contratos = relationship("Contrato", back_populates="user")
+    contratos_participantes = relationship("ContratoParticipante", back_populates="user")
+
     inversiones = relationship(
-    "Inversion",
-    back_populates="user",
-    cascade="all, delete-orphan",
-    passive_deletes=True,
-)
+        "Inversion",
+        back_populates="user",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+    )
 
 # =============================================
 # 5. CIERRES MENSUALES (cabecera + detalle)

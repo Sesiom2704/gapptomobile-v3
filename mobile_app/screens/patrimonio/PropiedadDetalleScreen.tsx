@@ -1,6 +1,6 @@
 // mobile_app/screens/patrimonio/PropiedadDetalleScreen.tsx
 //
-// Detalle de propiedad (v3)
+// Detalle de propiedad (v5)
 //
 // Cambios incluidos:
 // - Selector de periodo con flechas (UX tipo DayToDayKpisScreen).
@@ -8,17 +8,25 @@
 //     1) LAST_12  (default) -> "Últimos 12 meses"
 //     2) ALL_TIME           -> "Todos los tiempos" (desde adquisición)
 //     3) YEAR               -> "Resumen {YYYY}"
+// - Nuevo bloque "Alquiler" dentro del detalle de propiedad.
+//   - Muestra estado contractual de la vivienda.
+//   - Permite crear contrato si no existe contrato activo.
+//   - Permite ver contrato y gestionar participantes si existe.
 //
-// Orden con flechas (de más antiguo a más reciente):
-//   YEAR(minYear) ... YEAR(currentYear) -> ALL_TIME -> LAST_12
+// Cambios de esta versión:
+// - El bloque Alquiler ya no usa llamada directa con api.get(...)
+// - Se conecta con mobile_app/services/gestionAlquilerApi.ts
+// - Se reutiliza el tipo ContratoResumenActivo del servicio
 //
-// Por tanto:
-// - Desde "Resumen 2026" puedes volver con flecha derecha a "Todos los tiempos" y "Últimos 12 meses".
-// - Y con flecha izquierda navegas a años anteriores.
+// Backend esperado:
+// - GET /api/v1/gestion-alquiler/patrimonios/:patrimonioId/resumen-activo
 //
-// Backend requerido:
-// - analytics endpoints aceptan params: { year, mode } con mode = LAST_12 | ALL_TIME | YEAR
-// - Cálculo correcto por ultimo_pago_on/ultimo_ingreso_on + cuotas_pagadas/ingresos_cobrados
+// Notas:
+// - Si no existe contrato activo, el backend devuelve null.
+// - Las rutas de navegación activas son:
+//     - ContratoCreate
+//     - ContratoDetalle
+//     - ContratoParticipantes
 
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
@@ -41,6 +49,11 @@ import patrimonioApi, {
   type PatrimonioRow,
   type PatrimonioCompraOut,
 } from '../../services/patrimonioApi';
+
+import {
+  getContratoActivoResumenByPatrimonio,
+  type ContratoResumenActivo,
+} from '../../services/gestionAlquilerApi';
 
 import { EuroformatEuro, formatFechaCorta } from '../../utils/format';
 import { api } from '../../services/api';
@@ -89,7 +102,6 @@ type Kpis = {
   dscr: number | null;
   ocupacion_pct: number | null;
 
-  // si tu backend lo trae:
   deuda_anual?: number | null;
   cashflow_anual?: number | null;
   cashflow_mensual?: number | null;
@@ -112,6 +124,44 @@ function pctOf(value: number | null | undefined, total: number | null | undefine
   const t = safeNum(total);
   if (v == null || t == null || t <= 0) return '—';
   return `${((v / t) * 100).toFixed(2)}%`;
+}
+
+function formatEstadoContrato(estado?: string | null): string {
+  if (!estado) return 'Sin contrato activo';
+  const e = String(estado).trim().toLowerCase();
+
+  if (e === 'activo') return 'Activo';
+  if (e === 'finalizado') return 'Finalizado';
+  if (e === 'pendiente') return 'Pendiente';
+  if (e === 'cancelado') return 'Cancelado';
+
+  return estado.charAt(0).toUpperCase() + estado.slice(1);
+}
+
+function getEstadoBadgeStyle(estado?: string | null) {
+  const e = String(estado || '').trim().toLowerCase();
+
+  if (e === 'activo') {
+    return {
+      backgroundColor: colors.successSoft ?? '#EAF8EF',
+      borderColor: colors.success ?? '#2E9B61',
+      textColor: colors.success ?? '#2E9B61',
+    };
+  }
+
+  if (e === 'finalizado' || e === 'cancelado') {
+    return {
+      backgroundColor: colors.neutralSoft,
+      borderColor: colors.border,
+      textColor: colors.textSecondary,
+    };
+  }
+
+  return {
+    backgroundColor: colors.warningSoft ?? '#FFF6E8',
+    borderColor: colors.warning ?? '#D38A00',
+    textColor: colors.warning ?? '#D38A00',
+  };
 }
 
 // Textos KPI (modal)
@@ -160,7 +210,6 @@ const KPI_INFO: Record<string, { title: string; desc: string }> = {
 
 function parseYearFromYYYYMMDD(s?: string | null): number | null {
   if (!s || typeof s !== 'string') return null;
-  // "YYYY-MM-DD"
   const y = Number(String(s).slice(0, 4));
   return Number.isFinite(y) ? y : null;
 }
@@ -183,6 +232,10 @@ export default function PropiedadDetalleScreen({ route, navigation }: Props) {
   const [breakdownI, setBreakdownI] = useState<Breakdown | null>(null);
   const [kpi, setKpi] = useState<Kpis | null>(null);
 
+  // ---- Alquiler ----
+  const [alquilerLoading, setAlquilerLoading] = useState(false);
+  const [alquilerResumen, setAlquilerResumen] = useState<ContratoResumenActivo | null>(null);
+
   // KPI info modal
   const [kpiInfoOpen, setKpiInfoOpen] = useState(false);
   const [kpiInfoKey, setKpiInfoKey] = useState<string>('cap_rate_pct');
@@ -190,17 +243,18 @@ export default function PropiedadDetalleScreen({ route, navigation }: Props) {
   // -------------------------
   // Period selector state
   // -------------------------
-  const [periodMode, setPeriodMode] = useState<PeriodMode>('LAST_12'); // default requerido
+  const [periodMode, setPeriodMode] = useState<PeriodMode>('LAST_12');
   const [selectedYear, setSelectedYear] = useState<number>(currentYear);
 
-  const adquisicionYear = useMemo(() => parseYearFromYYYYMMDD(base?.fecha_adquisicion) ?? null, [base?.fecha_adquisicion]);
+  const adquisicionYear = useMemo(
+    () => parseYearFromYYYYMMDD(base?.fecha_adquisicion) ?? null,
+    [base?.fecha_adquisicion]
+  );
+
   const minYear = useMemo(() => {
-    // Si hay adquisición, ese será el mínimo año navegable.
-    // Si no, fallback conservador.
     return adquisicionYear ?? (currentYear - 10);
   }, [adquisicionYear, currentYear]);
 
-  // Garantía: no quedarnos con selectedYear fuera de rango tras cargar la vivienda
   useEffect(() => {
     setSelectedYear((y) => {
       if (y < minYear) return minYear;
@@ -215,9 +269,6 @@ export default function PropiedadDetalleScreen({ route, navigation }: Props) {
     return `Resumen ${selectedYear}`;
   }, [periodMode, selectedYear]);
 
-  // Param year para backend:
-  // - En YEAR usamos selectedYear
-  // - En otros modos mandamos currentYear (backend lo ignora para LAST_12/ALL_TIME, pero el param sigue existiendo)
   const analyticsYear = useMemo(() => {
     return periodMode === 'YEAR' ? selectedYear : currentYear;
   }, [periodMode, selectedYear, currentYear]);
@@ -227,17 +278,15 @@ export default function PropiedadDetalleScreen({ route, navigation }: Props) {
   }, [analyticsYear, periodMode]);
 
   const canGoLeft = useMemo(() => {
-    if (periodMode === 'LAST_12') return true;       // LAST_12 -> ALL_TIME
-    if (periodMode === 'ALL_TIME') return true;      // ALL_TIME -> YEAR(current)
-    // YEAR:
-    return selectedYear > minYear;                   // YEAR(y) -> YEAR(y-1)
+    if (periodMode === 'LAST_12') return true;
+    if (periodMode === 'ALL_TIME') return true;
+    return selectedYear > minYear;
   }, [periodMode, selectedYear, minYear]);
 
   const canGoRight = useMemo(() => {
-    if (periodMode === 'LAST_12') return false;      // tope (más reciente)
-    if (periodMode === 'ALL_TIME') return true;      // ALL_TIME -> LAST_12
-    // YEAR:
-    return true;                                    // YEAR(y) -> YEAR(y+1) o -> ALL_TIME si y==current
+    if (periodMode === 'LAST_12') return false;
+    if (periodMode === 'ALL_TIME') return true;
+    return true;
   }, [periodMode]);
 
   const goLeft = useCallback(() => {
@@ -250,7 +299,6 @@ export default function PropiedadDetalleScreen({ route, navigation }: Props) {
       setSelectedYear(currentYear);
       return;
     }
-    // YEAR
     setSelectedYear((y) => Math.max(minYear, y - 1));
   }, [periodMode, currentYear, minYear]);
 
@@ -262,7 +310,6 @@ export default function PropiedadDetalleScreen({ route, navigation }: Props) {
     if (periodMode === 'YEAR') {
       setSelectedYear((y) => {
         if (y < currentYear) return y + 1;
-        // YEAR(current) -> ALL_TIME
         setPeriodMode('ALL_TIME');
         return y;
       });
@@ -322,6 +369,21 @@ export default function PropiedadDetalleScreen({ route, navigation }: Props) {
     }
   }, [patrimonioId, analyticsParams]);
 
+  const loadAlquiler = useCallback(async () => {
+    setAlquilerLoading(true);
+
+    try {
+      const response = await getContratoActivoResumenByPatrimonio(patrimonioId);
+      setAlquilerResumen(response ?? null);
+    } catch {
+      // Silencioso a propósito: si la vivienda no tiene contrato activo
+      // o si hay cualquier incidencia puntual, no rompemos la pantalla.
+      setAlquilerResumen(null);
+    } finally {
+      setAlquilerLoading(false);
+    }
+  }, [patrimonioId]);
+
   const reload = useCallback(
     async (isPull = false) => {
       if (!isPull) setLoading(true);
@@ -337,7 +399,7 @@ export default function PropiedadDetalleScreen({ route, navigation }: Props) {
         setBase(p);
         setCompra(c);
 
-        await loadAnalytics();
+        await Promise.all([loadAnalytics(), loadAlquiler()]);
       } catch {
         setErr('No se pudo cargar el detalle de la propiedad.');
       } finally {
@@ -345,17 +407,15 @@ export default function PropiedadDetalleScreen({ route, navigation }: Props) {
         if (isPull) setRefreshing(false);
       }
     },
-    [patrimonioId, loadAnalytics]
+    [patrimonioId, loadAnalytics, loadAlquiler]
   );
 
-  // Carga inicial
   useEffect(() => {
     reload(false);
   }, [reload]);
 
-  // Recarga analytics al cambiar el periodo (sin volver a pedir base/compra)
   useEffect(() => {
-    if (!base) return; // evita llamar antes de tener propiedad
+    if (!base) return;
     loadAnalytics();
   }, [periodMode, selectedYear, base, loadAnalytics]);
 
@@ -363,11 +423,41 @@ export default function PropiedadDetalleScreen({ route, navigation }: Props) {
     navigation?.navigate?.('PropiedadKpis', { patrimonioId });
   }, [navigation, patrimonioId]);
 
+  const goCrearContrato = useCallback(() => {
+    navigation?.navigate?.('ContratoCreate', { patrimonioId });
+  }, [navigation, patrimonioId]);
+
+  const goVerContrato = useCallback(() => {
+    if (!alquilerResumen?.contrato_id) return;
+    navigation?.navigate?.('ContratoDetalle', {
+      patrimonioId,
+      contratoId: alquilerResumen.contrato_id,
+    });
+  }, [navigation, patrimonioId, alquilerResumen]);
+
+  const goParticipantes = useCallback(() => {
+    if (!alquilerResumen?.contrato_id) return;
+    navigation?.navigate?.('ContratoParticipantes', {
+      patrimonioId,
+      contratoId: alquilerResumen.contrato_id,
+    });
+  }, [navigation, patrimonioId, alquilerResumen]);
+
   const totalInv = safeNum(compra?.total_inversion) ?? null;
 
   const handleBack = () => {
     navigation.navigate('PropiedadesRanking');
   };
+
+  const hasContratoActivo = useMemo(() => {
+    return !!alquilerResumen?.contrato_id && String(alquilerResumen?.estado || '').toLowerCase() === 'activo';
+  }, [alquilerResumen]);
+
+  const badgeStyle = useMemo(() => {
+    return getEstadoBadgeStyle(alquilerResumen?.estado);
+  }, [alquilerResumen?.estado]);
+
+  const participantes = alquilerResumen?.participantes_resumen;
 
   // -------------------------
   // Componentes UI locales
@@ -386,7 +476,6 @@ export default function PropiedadDetalleScreen({ route, navigation }: Props) {
     </View>
   );
 
-  // Row3: (label | € (+%))
   const Row3 = ({
     label,
     value,
@@ -462,6 +551,45 @@ export default function PropiedadDetalleScreen({ route, navigation }: Props) {
     </View>
   );
 
+  const ActionButton = ({
+    label,
+    icon,
+    onPress,
+    variant = 'secondary',
+    disabled = false,
+  }: {
+    label: string;
+    icon: keyof typeof Ionicons.glyphMap;
+    onPress: () => void;
+    variant?: 'primary' | 'secondary';
+    disabled?: boolean;
+  }) => (
+    <TouchableOpacity
+      activeOpacity={0.9}
+      onPress={onPress}
+      disabled={disabled}
+      style={[
+        styles.actionBtn,
+        variant === 'primary' ? styles.actionBtnPrimary : styles.actionBtnSecondary,
+        disabled && styles.actionBtnDisabled,
+      ]}
+    >
+      <Ionicons
+        name={icon}
+        size={16}
+        color={variant === 'primary' ? colors.surface : colors.primary}
+      />
+      <Text
+        style={[
+          styles.actionBtnText,
+          variant === 'primary' ? styles.actionBtnTextPrimary : styles.actionBtnTextSecondary,
+        ]}
+      >
+        {label}
+      </Text>
+    </TouchableOpacity>
+  );
+
   return (
     <>
       <Header
@@ -501,7 +629,6 @@ export default function PropiedadDetalleScreen({ route, navigation }: Props) {
             <Meta label="Trastero" value={base?.trastero ? 'Sí' : 'No'} />
           </View>
 
-          {/* Participación + Adquisición */}
           <View style={styles.metaRow2Cols}>
             <View style={styles.metaHalf}>
               <Text style={styles.metaLabel}>Participación</Text>
@@ -520,6 +647,137 @@ export default function PropiedadDetalleScreen({ route, navigation }: Props) {
               </Text>
             </View>
           </View>
+        </View>
+
+        {/* ALQUILER */}
+        <View style={styles.card}>
+          <CardTitle icon="document-text-outline" text="Alquiler" />
+
+          {alquilerLoading ? (
+            <ActivityIndicator style={{ marginVertical: spacing.sm }} />
+          ) : hasContratoActivo && alquilerResumen ? (
+            <>
+              <View style={styles.alquilerHeaderRow}>
+                <View
+                  style={[
+                    styles.estadoBadge,
+                    {
+                      backgroundColor: badgeStyle.backgroundColor,
+                      borderColor: badgeStyle.borderColor,
+                    },
+                  ]}
+                >
+                  <Text style={[styles.estadoBadgeText, { color: badgeStyle.textColor }]}>
+                    {formatEstadoContrato(alquilerResumen.estado)}
+                  </Text>
+                </View>
+
+                <Text style={styles.alquilerRenta}>
+                  {alquilerResumen.renta_mensual != null
+                    ? `${EuroformatEuro(alquilerResumen.renta_mensual)} / mes`
+                    : 'Renta no informada'}
+                </Text>
+              </View>
+
+              <View style={styles.metaGrid}>
+                <Meta
+                  label="Inicio"
+                  value={
+                    alquilerResumen.fecha_inicio
+                      ? formatFechaCorta(alquilerResumen.fecha_inicio)
+                      : '—'
+                  }
+                />
+                <Meta
+                  label="Fin"
+                  value={
+                    alquilerResumen.fecha_fin ? formatFechaCorta(alquilerResumen.fecha_fin) : '—'
+                  }
+                />
+                <Meta
+                  label="Fianza"
+                  value={
+                    alquilerResumen.fianza != null
+                      ? EuroformatEuro(alquilerResumen.fianza)
+                      : '—'
+                  }
+                />
+                <Meta label="Contrato" value={alquilerResumen.contrato_id} />
+              </View>
+
+              <View style={styles.alquilerParticipantesBox}>
+                <Text style={styles.alquilerSectionTitle}>Participantes</Text>
+
+                <MiniRow
+                  label="Inquilino principal"
+                  value={participantes?.inquilino_principal || '—'}
+                />
+                <MiniRow
+                  label="Otros inquilinos"
+                  value={
+                    participantes?.inquilinos?.length
+                      ? participantes.inquilinos.join(', ')
+                      : '—'
+                  }
+                />
+                <MiniRow
+                  label="Avalistas"
+                  value={
+                    participantes?.avalistas?.length
+                      ? participantes.avalistas.join(', ')
+                      : '—'
+                  }
+                />
+                <MiniRow label="Gestor" value={participantes?.gestor || '—'} />
+              </View>
+
+              <View style={styles.actionsRow}>
+                <ActionButton
+                  label="Ver contrato"
+                  icon="eye-outline"
+                  onPress={goVerContrato}
+                  variant="secondary"
+                />
+                <ActionButton
+                  label="Participantes"
+                  icon="people-outline"
+                  onPress={goParticipantes}
+                  variant="primary"
+                />
+              </View>
+            </>
+          ) : (
+            <>
+              <View style={styles.emptyAlquilerBox}>
+                <View
+                  style={[
+                    styles.estadoBadge,
+                    {
+                      backgroundColor: colors.neutralSoft,
+                      borderColor: colors.border,
+                    },
+                  ]}
+                >
+                  <Text style={[styles.estadoBadgeText, { color: colors.textSecondary }]}>
+                    Sin contrato activo
+                  </Text>
+                </View>
+
+                <Text style={styles.emptyAlquilerText}>
+                  Esta vivienda no tiene un contrato activo asociado.
+                </Text>
+              </View>
+
+              <View style={styles.actionsRow}>
+                <ActionButton
+                  label="Crear contrato"
+                  icon="add-outline"
+                  onPress={goCrearContrato}
+                  variant="primary"
+                />
+              </View>
+            </>
+          )}
         </View>
 
         {/* ADQUISICIÓN */}
@@ -588,7 +846,11 @@ export default function PropiedadDetalleScreen({ route, navigation }: Props) {
               />
               <KpiTile
                 label="Rend. bruto"
-                value={kpi.rendimiento_bruto_pct != null ? `${kpi.rendimiento_bruto_pct.toFixed(2)} %` : '—'}
+                value={
+                  kpi.rendimiento_bruto_pct != null
+                    ? `${kpi.rendimiento_bruto_pct.toFixed(2)} %`
+                    : '—'
+                }
                 infoKey="rendimiento_bruto_pct"
               />
               <KpiTile
@@ -603,26 +865,49 @@ export default function PropiedadDetalleScreen({ route, navigation }: Props) {
               />
             </View>
           ) : (
-            <Text style={styles.smallMuted}>Sin KPIs (se activará cuando analytics v3 esté listo).</Text>
+            <Text style={styles.smallMuted}>
+              Sin KPIs (se activará cuando analytics v3 esté listo).
+            </Text>
           )}
         </View>
 
         {/* Resumen */}
         <View style={styles.card}>
-          <CardTitle icon="calendar-number-outline" text={periodMode === 'YEAR' ? `Resumen ${selectedYear}` : 'Resumen'} />
+          <CardTitle
+            icon="calendar-number-outline"
+            text={periodMode === 'YEAR' ? `Resumen ${selectedYear}` : 'Resumen'}
+          />
 
           {resumen ? (
             <>
               <View style={styles.kpiGrid}>
-                <KpiTile label="Ingresos" value={EuroformatEuro(resumen.ingresos_ytd)} infoKey="ingresos_ytd" />
-                <KpiTile label="Gastos" value={EuroformatEuro(resumen.gastos_ytd)} infoKey="gastos_ytd" />
-                <KpiTile label="Cash-flow" value={EuroformatEuro(resumen.cashflow_ytd)} infoKey="cashflow_ytd" />
-                <KpiTile label="Promedio" value={EuroformatEuro(resumen.promedio_mensual)} infoKey="promedio_mensual" />
+                <KpiTile
+                  label="Ingresos"
+                  value={EuroformatEuro(resumen.ingresos_ytd)}
+                  infoKey="ingresos_ytd"
+                />
+                <KpiTile
+                  label="Gastos"
+                  value={EuroformatEuro(resumen.gastos_ytd)}
+                  infoKey="gastos_ytd"
+                />
+                <KpiTile
+                  label="Cash-flow"
+                  value={EuroformatEuro(resumen.cashflow_ytd)}
+                  infoKey="cashflow_ytd"
+                />
+                <KpiTile
+                  label="Promedio"
+                  value={EuroformatEuro(resumen.promedio_mensual)}
+                  infoKey="promedio_mensual"
+                />
               </View>
               <Text style={styles.smallMuted}>Meses contados: {resumen.meses_contados}</Text>
             </>
           ) : (
-            <Text style={styles.smallMuted}>Sin resumen (se activará cuando analytics v3 esté listo).</Text>
+            <Text style={styles.smallMuted}>
+              Sin resumen (se activará cuando analytics v3 esté listo).
+            </Text>
           )}
         </View>
 
@@ -665,6 +950,15 @@ function Meta({ label, value }: { label: string; value: any }) {
   );
 }
 
+function MiniRow({ label, value }: { label: string; value: string }) {
+  return (
+    <View style={styles.miniRow}>
+      <Text style={styles.miniRowLabel}>{label}</Text>
+      <Text style={styles.miniRowValue}>{value || '—'}</Text>
+    </View>
+  );
+}
+
 function BreakdownTable({ rows, totalYtd }: { rows: BreakdownRow[]; totalYtd: number }) {
   return (
     <View>
@@ -681,9 +975,15 @@ function BreakdownTable({ rows, totalYtd }: { rows: BreakdownRow[]; totalYtd: nu
             <Text style={styles.td}>{r.tipo || '—'}</Text>
             {!!r.periodicidad && <Text style={styles.tdMuted}>{r.periodicidad}</Text>}
           </View>
-          <Text style={[styles.td, { flex: 0.22, textAlign: 'right' }]}>{EuroformatEuro(r.cuota ?? 0)}</Text>
-          <Text style={[styles.td, { flex: 0.10, textAlign: 'right' }]}>{String(r.meses ?? 0)}</Text>
-          <Text style={[styles.td, { flex: 0.24, textAlign: 'right', fontWeight: '900' }]}>{EuroformatEuro(r.total ?? 0)}</Text>
+          <Text style={[styles.td, { flex: 0.22, textAlign: 'right' }]}>
+            {EuroformatEuro(r.cuota ?? 0)}
+          </Text>
+          <Text style={[styles.td, { flex: 0.10, textAlign: 'right' }]}>
+            {String(r.meses ?? 0)}
+          </Text>
+          <Text style={[styles.td, { flex: 0.24, textAlign: 'right', fontWeight: '900' }]}>
+            {EuroformatEuro(r.total ?? 0)}
+          </Text>
         </View>
       ))}
 
@@ -691,7 +991,9 @@ function BreakdownTable({ rows, totalYtd }: { rows: BreakdownRow[]; totalYtd: nu
         <Text style={[styles.th, { flex: 0.44 }]}>Total</Text>
         <Text style={[styles.th, { flex: 0.22, textAlign: 'right' }]}>—</Text>
         <Text style={[styles.th, { flex: 0.10, textAlign: 'right' }]}>—</Text>
-        <Text style={[styles.th, { flex: 0.24, textAlign: 'right' }]}>{EuroformatEuro(totalYtd ?? 0)}</Text>
+        <Text style={[styles.th, { flex: 0.24, textAlign: 'right' }]}>
+          {EuroformatEuro(totalYtd ?? 0)}
+        </Text>
       </View>
     </View>
   );
@@ -752,6 +1054,104 @@ const styles = StyleSheet.create({
     padding: spacing.sm,
   },
 
+  // ---- Alquiler ----
+  alquilerHeaderRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: spacing.sm,
+    gap: spacing.sm,
+  },
+  estadoBadge: {
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 999,
+    borderWidth: 1,
+    alignSelf: 'flex-start',
+  },
+  estadoBadgeText: {
+    fontSize: 11,
+    fontWeight: '900',
+  },
+  alquilerRenta: {
+    flex: 1,
+    textAlign: 'right',
+    fontSize: 12,
+    fontWeight: '900',
+    color: colors.textPrimary,
+  },
+  alquilerParticipantesBox: {
+    marginTop: spacing.xs,
+    backgroundColor: colors.background,
+    borderWidth: 1,
+    borderColor: colors.border,
+    borderRadius: radius.md,
+    padding: spacing.sm,
+  },
+  alquilerSectionTitle: {
+    fontSize: 12,
+    fontWeight: '900',
+    color: colors.textPrimary,
+    marginBottom: spacing.xs,
+  },
+  miniRow: {
+    paddingVertical: 4,
+  },
+  miniRowLabel: {
+    fontSize: 10,
+    color: colors.textSecondary,
+    fontWeight: '700',
+    marginBottom: 2,
+  },
+  miniRowValue: {
+    fontSize: 12,
+    color: colors.textPrimary,
+  },
+  emptyAlquilerBox: {
+    gap: spacing.sm,
+  },
+  emptyAlquilerText: {
+    fontSize: 12,
+    color: colors.textSecondary,
+  },
+  actionsRow: {
+    flexDirection: 'row',
+    gap: spacing.sm,
+    marginTop: spacing.md,
+  },
+  actionBtn: {
+    flex: 1,
+    minHeight: 44,
+    borderRadius: radius.md,
+    alignItems: 'center',
+    justifyContent: 'center',
+    flexDirection: 'row',
+    gap: 8,
+    paddingHorizontal: spacing.sm,
+    borderWidth: 1.25,
+  },
+  actionBtnPrimary: {
+    backgroundColor: colors.primary,
+    borderColor: colors.primary,
+  },
+  actionBtnSecondary: {
+    backgroundColor: colors.surface,
+    borderColor: colors.primary,
+  },
+  actionBtnDisabled: {
+    opacity: 0.45,
+  },
+  actionBtnText: {
+    fontSize: 12,
+    fontWeight: '900',
+  },
+  actionBtnTextPrimary: {
+    color: colors.surface,
+  },
+  actionBtnTextSecondary: {
+    color: colors.primary,
+  },
+
   // fila adquisición alineada (label | [€ + %] con ancho fijo)
   rowBetween3: {
     flexDirection: 'row',
@@ -805,7 +1205,7 @@ const styles = StyleSheet.create({
   kpiLabel: { fontSize: 11, color: colors.textSecondary, fontWeight: '800' },
   kpiValue: { marginTop: 4, fontSize: 14, color: colors.textPrimary, fontWeight: '900' },
 
-  // Period selector (flechas estilo DayToDay, sin mayúsculas obligatorias)
+  // Period selector
   periodRow: {
     flexDirection: 'row',
     alignItems: 'center',

@@ -7,7 +7,11 @@ Aquí definimos:
 - Endpoints base: /, /health, /api/health, /ready.
 - Endpoint debug: /__routes.
 - Middleware debug de Authorization en gastos-cotidianos.
-- Routers de negocio (api/v1).
+- Routers de negocio (api/v1), incluyendo:
+    * patrimonio
+    * préstamos
+    * inversiones
+    * gestión de alquileres
 - Router técnico de gestión de BD (api/db): sync Neon/Supabase/Sheets.
 
 IMPORTANTE:
@@ -229,7 +233,8 @@ from backend.app.api.v1 import (
     db_router,
     reinicio_router,
     inversiones_router,
-    endeudamiento_router,  # ✅ NUEVO
+    endeudamiento_router,
+    gestion_alquiler_router,  # ✅ NUEVO
 )
 
 API_V1 = "/api/v1"
@@ -240,13 +245,13 @@ app.include_router(gastos_router.router,            prefix=f"{API_V1}/gastos")
 app.include_router(ingresos_router.router,          prefix=f"{API_V1}/ingresos")
 app.include_router(gastos_cotidianos_router.router, prefix=f"{API_V1}/gastos-cotidianos")
 
-app.include_router(cuentas_router.router,      prefix=API_V1)
-app.include_router(proveedores_router.router,  prefix=API_V1)
-app.include_router(tipos_router.router,        prefix=API_V1)
-app.include_router(ramas_router.router,        prefix=API_V1)
-app.include_router(patrimonio_router.router,   prefix=API_V1)
-app.include_router(prestamos_router.router,    prefix=API_V1)
-app.include_router(users_router.router,        prefix=API_V1)
+app.include_router(cuentas_router.router, prefix=API_V1)
+app.include_router(proveedores_router.router, prefix=API_V1)
+app.include_router(tipos_router.router, prefix=API_V1)
+app.include_router(ramas_router.router, prefix=API_V1)
+app.include_router(patrimonio_router.router, prefix=API_V1)
+app.include_router(prestamos_router.router, prefix=API_V1)
+app.include_router(users_router.router, prefix=API_V1)
 app.include_router(day_to_day_analysis_router.router, prefix=API_V1)
 app.include_router(balance_router.router, prefix=API_V1)
 app.include_router(extraordinarios_router.router, prefix=API_V1)
@@ -262,6 +267,9 @@ app.include_router(inversiones_router.router, prefix=API_V1)
 
 # ✅ NUEVO: endeudamiento
 app.include_router(endeudamiento_router.router, prefix=API_V1)
+
+# ✅ NUEVO: gestión de alquileres
+app.include_router(gestion_alquiler_router.router, prefix=API_V1)
 
 # Router técnico BD: /api/db/*
 # OJO: db_router.router ya tiene prefix="/db"
