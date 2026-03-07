@@ -173,6 +173,7 @@ def _contrato_to_schema(row: models.Contrato) -> ContratoSchema:
         renta_mensual=float(row.renta_mensual) if row.renta_mensual is not None else None,
         fianza=float(row.fianza) if row.fianza is not None else None,
         estado=row.estado,
+        incremento_ipc=bool(getattr(row, "incremento_ipc", False)),
         incluye_luz=bool(row.incluye_luz),
         incluye_agua=bool(row.incluye_agua),
         incluye_internet=bool(row.incluye_internet),
@@ -377,7 +378,6 @@ def crear_contrato(
 
     estado = _validate_estado_contrato(payload.estado)
 
-    # Regla mínima: no permitir otro contrato activo para la misma vivienda
     if estado == "activo":
         existing = (
             db.query(models.Contrato)
@@ -403,6 +403,7 @@ def crear_contrato(
         renta_mensual=payload.renta_mensual,
         fianza=payload.fianza,
         estado=estado,
+        incremento_ipc=bool(payload.incremento_ipc),
         incluye_luz=bool(payload.incluye_luz),
         incluye_agua=bool(payload.incluye_agua),
         incluye_internet=bool(payload.incluye_internet),
@@ -448,7 +449,6 @@ def actualizar_contrato(
     if payload.estado is not None:
         next_estado = _validate_estado_contrato(payload.estado)
 
-    # Si pasa a activo, comprobamos que no exista otro activo en la misma vivienda
     if next_estado == "activo":
         existing = (
             db.query(models.Contrato)
@@ -477,6 +477,8 @@ def actualizar_contrato(
         row.fianza = payload.fianza
     if payload.estado is not None:
         row.estado = next_estado
+    if payload.incremento_ipc is not None:
+        row.incremento_ipc = bool(payload.incremento_ipc)
     if payload.incluye_luz is not None:
         row.incluye_luz = bool(payload.incluye_luz)
     if payload.incluye_agua is not None:
@@ -532,6 +534,7 @@ def get_resumen_contrato_activo_por_patrimonio(
         fecha_fin=row.fecha_fin,
         renta_mensual=float(row.renta_mensual) if row.renta_mensual is not None else None,
         fianza=float(row.fianza) if row.fianza is not None else None,
+        incremento_ipc=bool(getattr(row, "incremento_ipc", False)),
         participantes_resumen=_build_participantes_resumen(row),
     )
 
@@ -584,8 +587,6 @@ def crear_participante_contrato(
     rol = _validate_rol_participante(payload.rol)
     es_principal = bool(payload.es_principal)
 
-    # Reglas mínimas:
-    # - solo un inquilino principal activo por contrato
     if es_principal:
         if rol != "inquilino":
             raise HTTPException(
@@ -610,7 +611,6 @@ def crear_participante_contrato(
                 detail="Ya existe un inquilino principal para este contrato",
             )
 
-    # evitar duplicado exacto activo contrato-persona-rol
     duplicated = (
         db.query(models.ContratoParticipante)
         .filter(

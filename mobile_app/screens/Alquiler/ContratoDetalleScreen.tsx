@@ -1,7 +1,7 @@
 /**
  * Archivo: mobile_app/screens/Alquiler/ContratoDetalleScreen.tsx
  *
- * Detalle de contrato de alquiler (v2)
+ * Detalle de contrato de alquiler (v3)
  *
  * Objetivo de esta versión:
  * - Mantener la pantalla de detalle de contrato dentro del flujo de patrimonio.
@@ -14,6 +14,10 @@
  * - Estado loading / error
  * - Soporte a dato inicial recibido por navegación para transición más fluida
  * - Enlace real a edición y participantes
+ * - Nuevo campo mostrado:
+ *     * incremento_ipc
+ * - Fix visual:
+ *     * “Otros inquilinos” ya no repite al inquilino principal
  *
  * Próximo paso previsto:
  * - Conectar participantes reales.
@@ -58,6 +62,7 @@ type ContratoDetalleView = {
 
   renta_mensual: number | null;
   fianza: number | null;
+  incremento_ipc: boolean;
 
   incluye_luz: boolean;
   incluye_agua: boolean;
@@ -122,6 +127,12 @@ function yesNo(value: boolean): string {
   return value ? 'Sí' : 'No';
 }
 
+function samePersonName(a?: string | null, b?: string | null): boolean {
+  const na = String(a ?? '').trim().toLowerCase();
+  const nb = String(b ?? '').trim().toLowerCase();
+  return !!na && !!nb && na === nb;
+}
+
 function mapContratoToView(
   contratoId: string,
   patrimonioId: string,
@@ -138,6 +149,7 @@ function mapContratoToView(
     fecha_fin: incoming?.fecha_fin ?? null,
     renta_mensual: incoming?.renta_mensual ?? null,
     fianza: incoming?.fianza ?? null,
+    incremento_ipc: !!incoming?.incremento_ipc,
     incluye_luz: incoming?.incluye_luz ?? false,
     incluye_agua: incoming?.incluye_agua ?? false,
     incluye_internet: incoming?.incluye_internet ?? false,
@@ -186,7 +198,6 @@ export default function ContratoDetalleScreen({ navigation, route }: Props) {
 
       setErr(String(detail));
 
-      // mantenemos lo que venga por navegación si existía
       if (!contratoInicial) {
         setContrato(mapContratoToView(contratoId, patrimonioId, null));
       }
@@ -201,6 +212,12 @@ export default function ContratoDetalleScreen({ navigation, route }: Props) {
   }, [loadContrato]);
 
   const badgeStyle = useMemo(() => getEstadoBadgeStyle(contrato.estado), [contrato.estado]);
+
+  const otrosInquilinos = useMemo(() => {
+    const principal = contrato.participantes_resumen?.inquilino_principal ?? null;
+    const lista = contrato.participantes_resumen?.inquilinos ?? [];
+    return lista.filter((nombre) => !samePersonName(nombre, principal));
+  }, [contrato.participantes_resumen]);
 
   const handleBack = useCallback(() => {
     navigation.goBack();
@@ -219,6 +236,7 @@ export default function ContratoDetalleScreen({ navigation, route }: Props) {
         fecha_fin: contrato.fecha_fin,
         renta_mensual: contrato.renta_mensual,
         fianza: contrato.fianza,
+        incremento_ipc: contrato.incremento_ipc,
         incluye_luz: contrato.incluye_luz,
         incluye_agua: contrato.incluye_agua,
         incluye_internet: contrato.incluye_internet,
@@ -397,6 +415,10 @@ export default function ContratoDetalleScreen({ navigation, route }: Props) {
               label="Fianza"
               value={contrato.fianza != null ? EuroformatEuro(contrato.fianza) : '—'}
             />
+            <Meta
+              label="Actualiza IPC"
+              value={contrato.incremento_ipc ? 'Sí' : 'No'}
+            />
           </View>
         </View>
 
@@ -432,11 +454,7 @@ export default function ContratoDetalleScreen({ navigation, route }: Props) {
           />
           <MiniRow
             label="Otros inquilinos"
-            value={
-              contrato.participantes_resumen?.inquilinos?.length
-                ? contrato.participantes_resumen.inquilinos.join(', ')
-                : '—'
-            }
+            value={otrosInquilinos.length ? otrosInquilinos.join(', ') : '—'}
           />
           <MiniRow
             label="Avalistas"

@@ -5,6 +5,14 @@
 // - Este archivo se centra solo en navegación.
 // - No se elimina ninguna funcionalidad; solo se separa UI vs navegación.
 // -----------------------------------------------------------------------------
+//
+// Cambios incluidos (v2):
+// - Registro del nuevo módulo de Personas dentro del HomeStack.
+// - Nuevas rutas:
+//     * PersonasList
+//     * PersonaForm
+// - Se mantiene la navegación actual sin romper funcionalidades existentes.
+// -----------------------------------------------------------------------------
 
 import React from 'react';
 import { StyleSheet } from 'react-native';
@@ -42,6 +50,9 @@ import ExtraordinariosScreen from '../screens/mes/extraordinarios';
 import { AuxTablesHomeScreen } from '../screens/auxiliares/AuxTablesHomeScreen';
 import { AuxEntityListScreen } from '../screens/auxiliares/AuxEntityListScreen';
 import { AuxEntityFormScreen } from '../screens/auxiliares/AuxEntityFormScreen';
+
+import PersonasListScreen from '../screens/personas/PersonasListScreen';
+import PersonaFormScreen from '../screens/personas/PersonaFormScreen';
 
 import PropiedadesStack from './PropiedadesStack';
 import LocalidadFormScreen from '../screens/ubicaciones/LocalidadFormScreen';
@@ -112,6 +123,18 @@ export type HomeStackParamList = {
   CuentasBancariasList: undefined;
   CuentaBancariaForm: undefined;
   DatabaseTools: undefined;
+
+  // -------------------------
+  // Nuevo módulo Personas
+  // -------------------------
+  PersonasList: undefined;
+  PersonaForm:
+    | {
+        persona?: any;
+        personaId?: string;
+        readOnly?: boolean;
+      }
+    | undefined;
 };
 
 export type DayToDayStackParamList = {
@@ -329,6 +352,10 @@ function HomeStackNavigator() {
       <HomeStack.Screen name="CuentasBancariasList" component={CuentasBancariasListScreen} />
       <HomeStack.Screen name="CuentaBancariaForm" component={CuentaBancariaFormScreen} />
       <HomeStack.Screen name="DatabaseTools" component={GestionDbScreen} />
+
+      {/* Nuevo módulo Personas */}
+      <HomeStack.Screen name="PersonasList" component={PersonasListScreen} />
+      <HomeStack.Screen name="PersonaForm" component={PersonaFormScreen} />
     </HomeStack.Navigator>
   );
 }

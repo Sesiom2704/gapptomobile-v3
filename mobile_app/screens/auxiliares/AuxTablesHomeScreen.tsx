@@ -29,6 +29,18 @@ export const AuxTablesHomeScreen: React.FC<Props> = ({ navigation }) => {
       <View style={panelStyles.screen}>
         <ScrollView contentContainerStyle={panelStyles.scrollContent}>
           <View style={panelStyles.section}>
+
+            <View style={panelStyles.section}>
+            <Text style={panelStyles.sectionTitle}>Alquiler</Text>
+
+            <AuxMenuItem
+              label="Personas"
+              subtitle="Inquilinos, avalistas y gestores."
+              icon="people-outline"
+              onPress={() => navigation.navigate('PersonasList')}
+            />
+          </View>
+
             <Text style={panelStyles.sectionTitle}>Cuentas</Text>
 
             <AuxMenuItem

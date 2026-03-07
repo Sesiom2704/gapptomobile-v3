@@ -1,7 +1,7 @@
 /**
  * Archivo: mobile_app/screens/Alquiler/ContratoCreateScreen.tsx
  *
- * Formulario de contrato de alquiler (v2)
+ * Formulario de contrato de alquiler (v3)
  *
  * Objetivo de esta versión:
  * - Mantener el diseño y la UX base del alta/edición de contratos.
@@ -16,6 +16,8 @@
  * - Conversión segura de importes string -> number.
  * - Navegación al detalle del contrato tras crear/editar.
  * - Actualización del baseline tras guardado correcto.
+ * - Nuevo campo funcional:
+ *     * incremento_ipc
  *
  * Reglas funcionales:
  * - patrimonioId llega desde la ficha de propiedad.
@@ -158,6 +160,10 @@ const ContratoCreateScreen: React.FC<Props> = ({ navigation, route }) => {
     contratoSource?.fianza != null ? String(contratoSource.fianza) : ''
   );
 
+  const [incrementoIpc, setIncrementoIpc] = useState<boolean>(
+    !!contratoSource?.incremento_ipc
+  );
+
   const [incluyeLuz, setIncluyeLuz] = useState<boolean>(!!contratoSource?.incluye_luz);
   const [incluyeAgua, setIncluyeAgua] = useState<boolean>(!!contratoSource?.incluye_agua);
   const [incluyeInternet, setIncluyeInternet] = useState<boolean>(!!contratoSource?.incluye_internet);
@@ -183,6 +189,7 @@ const ContratoCreateScreen: React.FC<Props> = ({ navigation, route }) => {
     fechaFin: string;
     rentaMensual: string;
     fianza: string;
+    incrementoIpc: boolean;
     incluyeLuz: boolean;
     incluyeAgua: boolean;
     incluyeInternet: boolean;
@@ -196,6 +203,7 @@ const ContratoCreateScreen: React.FC<Props> = ({ navigation, route }) => {
       fechaFin,
       rentaMensual,
       fianza,
+      incrementoIpc,
       incluyeLuz,
       incluyeAgua,
       incluyeInternet,
@@ -207,6 +215,7 @@ const ContratoCreateScreen: React.FC<Props> = ({ navigation, route }) => {
     fechaFin,
     rentaMensual,
     fianza,
+    incrementoIpc,
     incluyeLuz,
     incluyeAgua,
     incluyeInternet,
@@ -333,6 +342,7 @@ const ContratoCreateScreen: React.FC<Props> = ({ navigation, route }) => {
         renta_mensual: rentaMensualNum,
         fianza: fianzaNum,
         estado,
+        incremento_ipc: incrementoIpc,
         incluye_luz: incluyeLuz,
         incluye_agua: incluyeAgua,
         incluye_internet: incluyeInternet,
@@ -348,6 +358,7 @@ const ContratoCreateScreen: React.FC<Props> = ({ navigation, route }) => {
           renta_mensual: payload.renta_mensual,
           fianza: payload.fianza,
           estado: payload.estado,
+          incremento_ipc: payload.incremento_ipc,
           incluye_luz: payload.incluye_luz,
           incluye_agua: payload.incluye_agua,
           incluye_internet: payload.incluye_internet,
@@ -537,6 +548,33 @@ const ContratoCreateScreen: React.FC<Props> = ({ navigation, route }) => {
                 editable={!readOnly}
                 style={[styles.input, fianza.trim() !== '' && styles.inputFilled]}
               />
+            </View>
+          </View>
+
+          <View style={styles.field}>
+            <Text style={styles.label}>Actualización por IPC</Text>
+            <View style={styles.segmentosRow}>
+              <View style={styles.segmentoWrapper}>
+                <PillButton
+                  label="Sí"
+                  selected={incrementoIpc}
+                  onPress={() => {
+                    if (readOnly) return;
+                    setIncrementoIpc(true);
+                  }}
+                />
+              </View>
+
+              <View style={styles.segmentoWrapper}>
+                <PillButton
+                  label="No"
+                  selected={!incrementoIpc}
+                  onPress={() => {
+                    if (readOnly) return;
+                    setIncrementoIpc(false);
+                  }}
+                />
+              </View>
             </View>
           </View>
         </FormSection>

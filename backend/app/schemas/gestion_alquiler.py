@@ -1,5 +1,5 @@
 """
-Schemas Pydantic para el módulo de GESTIÓN DE ALQUILERES en GapptoMobile v1.
+Schemas Pydantic para el módulo de GESTIÓN DE ALQUILERES en GapptoMobile v2.
 
 Incluye:
 - Personas:
@@ -134,6 +134,7 @@ class ContratoBase(BaseModel):
     renta_mensual: Optional[float] = Field(None, description="Renta mensual.")
     fianza: Optional[float] = Field(None, description="Fianza.")
     estado: Optional[str] = Field(None, description="activo | pendiente | finalizado | cancelado")
+    incremento_ipc: Optional[bool] = Field(False, description="Indica si el contrato contempla actualización por IPC.")
     incluye_luz: Optional[bool] = Field(False, description="Si la luz está incluida.")
     incluye_agua: Optional[bool] = Field(False, description="Si el agua está incluida.")
     incluye_internet: Optional[bool] = Field(False, description="Si internet está incluido.")
@@ -144,6 +145,7 @@ class ContratoCreate(ContratoBase):
     patrimonio_id: str
     fecha_inicio: date
     estado: Optional[str] = "activo"
+    incremento_ipc: Optional[bool] = False
 
 
 class ContratoUpdate(BaseModel):
@@ -152,6 +154,7 @@ class ContratoUpdate(BaseModel):
     renta_mensual: Optional[float] = None
     fianza: Optional[float] = None
     estado: Optional[str] = None
+    incremento_ipc: Optional[bool] = None
     incluye_luz: Optional[bool] = None
     incluye_agua: Optional[bool] = None
     incluye_internet: Optional[bool] = None
@@ -182,4 +185,5 @@ class ContratoResumenActivoOut(BaseModel):
     fecha_fin: Optional[date] = None
     renta_mensual: Optional[float] = None
     fianza: Optional[float] = None
+    incremento_ipc: Optional[bool] = False
     participantes_resumen: Optional[ParticipantesResumenOut] = None

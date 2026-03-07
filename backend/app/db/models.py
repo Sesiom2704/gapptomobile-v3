@@ -304,6 +304,7 @@ class Contrato(Base):
     incluye_luz = Column(Boolean, nullable=False, server_default=text("false"))
     incluye_agua = Column(Boolean, nullable=False, server_default=text("false"))
     incluye_internet = Column(Boolean, nullable=False, server_default=text("false"))
+    incremento_ipc = Column(Boolean, nullable=False, server_default=text("false"))
 
     observaciones = Column(Text, nullable=True)
 

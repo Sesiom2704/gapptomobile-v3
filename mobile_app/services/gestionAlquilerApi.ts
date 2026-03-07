@@ -167,6 +167,7 @@ export type ContratoRow = {
   incluye_luz?: boolean | null;
   incluye_agua?: boolean | null;
   incluye_internet?: boolean | null;
+  incremento_ipc?: boolean | null;
 
   observaciones?: string | null;
 
@@ -191,6 +192,7 @@ export type ContratoCreate = {
   incluye_agua?: boolean | null;
   incluye_internet?: boolean | null;
   observaciones?: string | null;
+  incremento_ipc?: boolean | null;
 };
 
 export type ContratoUpdate = {
@@ -204,6 +206,7 @@ export type ContratoUpdate = {
   incluye_internet?: boolean | null;
   observaciones?: string | null;
   inactivatedon?: string | null;
+  incremento_ipc?: boolean | null;
 };
 
 export type ContratoResumenActivo = {
@@ -232,6 +235,7 @@ function normalizeContratoRow(r: ContratoRow): ContratoRow {
     incluye_luz: r.incluye_luz ?? false,
     incluye_agua: r.incluye_agua ?? false,
     incluye_internet: r.incluye_internet ?? false,
+    incremento_ipc: r.incremento_ipc ?? false,
   };
 }
 

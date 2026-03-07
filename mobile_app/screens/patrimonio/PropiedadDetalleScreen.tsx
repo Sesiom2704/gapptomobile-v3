@@ -138,6 +138,12 @@ function formatEstadoContrato(estado?: string | null): string {
   return estado.charAt(0).toUpperCase() + estado.slice(1);
 }
 
+function samePersonName(a?: string | null, b?: string | null): boolean {
+  const na = String(a ?? '').trim().toLowerCase();
+  const nb = String(b ?? '').trim().toLowerCase();
+  return !!na && !!nb && na === nb;
+}
+
 function getEstadoBadgeStyle(estado?: string | null) {
   const e = String(estado || '').trim().toLowerCase();
 
@@ -459,6 +465,13 @@ export default function PropiedadDetalleScreen({ route, navigation }: Props) {
 
   const participantes = alquilerResumen?.participantes_resumen;
 
+  const otrosInquilinos = useMemo(() => {
+  const principal = participantes?.inquilino_principal ?? null;
+  const lista = participantes?.inquilinos ?? [];
+
+    return lista.filter((nombre) => !samePersonName(nombre, principal));
+  }, [participantes]);
+
   // -------------------------
   // Componentes UI locales
   // -------------------------
@@ -714,11 +727,7 @@ export default function PropiedadDetalleScreen({ route, navigation }: Props) {
                 />
                 <MiniRow
                   label="Otros inquilinos"
-                  value={
-                    participantes?.inquilinos?.length
-                      ? participantes.inquilinos.join(', ')
-                      : '—'
-                  }
+                  value={otrosInquilinos.length ? otrosInquilinos.join(', ') : '—'}
                 />
                 <MiniRow
                   label="Avalistas"
