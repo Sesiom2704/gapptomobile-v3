@@ -18,6 +18,11 @@ Añadido v3 (2026-01):
     * Permite "resolver" este mes sin marcar cobrado y sin mover liquidez.
     * Se excluye de /pendientes.
     * Se puede revertir con "deshacer omisión".
+
+Añadido v3 (2026-03):
+- Campo contrato_alquiler:
+    * Permite vincular un ingreso recurrente al contrato de alquiler que lo origina.
+    * Se expone en serialización para frontend y trazabilidad.
 """
 
 from typing import List, Optional, Any, Dict
@@ -99,6 +104,7 @@ def _serialize_ingreso(obj: Any) -> Dict[str, Any]:
 
     v3:
     - Incluye campos de omitidos para consistencia de UI.
+    - Incluye contrato_alquiler para trazabilidad del ingreso de renta.
     """
     return {
         "id": obj.id,
@@ -122,6 +128,9 @@ def _serialize_ingreso(obj: Any) -> Dict[str, Any]:
         "omitido_este_mes": getattr(obj, "omitido_este_mes", False),
         "ultimo_omitido_on": getattr(obj, "ultimo_omitido_on", None),
         "omitido_count": getattr(obj, "omitido_count", 0),
+
+        # v3 alquiler
+        "contrato_alquiler": getattr(obj, "contrato_alquiler", None),
 
         "cuenta_id": extract_cuenta_id(obj),
 
@@ -474,6 +483,9 @@ def update_ingreso(
     - No permite cobrado=True y omitido_este_mes=True simultáneamente.
     - Si se marca cobrado=True, se limpia omitido_este_mes (coherencia).
     - Si se marca omitido_este_mes=True, setea ultimo_omitido_on=now().
+
+    Nota:
+    - contrato_alquiler no se toca aquí salvo que venga explícitamente en el schema.
     """
     obj = _get_ingreso_for_user(db, ingreso_id, current_user)
 

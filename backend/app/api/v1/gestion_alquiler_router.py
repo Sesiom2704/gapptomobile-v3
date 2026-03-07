@@ -16,6 +16,7 @@ Reglas generales:
 from __future__ import annotations
 
 from typing import List, Optional
+from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session, joinedload
@@ -37,6 +38,7 @@ from backend.app.schemas.gestion_alquiler import (
     ParticipantesResumenOut,
 )
 from backend.app.utils.text_utils import normalize_upper_ascii
+from backend.app.utils.id_utils import generate_ingreso_id
 from backend.app.api.v1.auth_router import require_user
 
 router = APIRouter(
@@ -62,6 +64,20 @@ def _normalize_email(value: Optional[str]) -> Optional[str]:
     if not value:
         return None
     return str(value).strip().lower() or None
+
+
+def _get_default_tipo_ingreso_alquiler_id() -> str:
+    """
+    Tipo ingreso fijo solicitado para rentas de alquiler.
+    """
+    return "VIV-TIPO_INGRESO-FKV95F"
+
+
+def _get_default_cuenta_alquiler_id() -> str:
+    """
+    Cuenta bancaria por defecto solicitada para crear ingresos automáticos de alquiler.
+    """
+    return "BANCO-679A92B7"
 
 
 def _get_owned_patrimonio(db: Session, patrimonio_id: str, user_id: int) -> models.Patrimonio:
@@ -105,6 +121,22 @@ def _get_owned_contrato(db: Session, contrato_id: str, user_id: int) -> models.C
     return row
 
 
+def _get_ingreso_by_contrato(
+    db: Session,
+    contrato_id: str,
+    user_id: int,
+) -> Optional[models.Ingreso]:
+    return (
+        db.query(models.Ingreso)
+        .filter(
+            models.Ingreso.user_id == user_id,
+            models.Ingreso.contrato_alquiler == contrato_id,
+            models.Ingreso.inactivatedon.is_(None),
+        )
+        .first()
+    )
+
+
 def _build_participantes_resumen(contrato: models.Contrato) -> ParticipantesResumenOut:
     participantes = [
         p for p in (contrato.participantes or [])
@@ -120,9 +152,10 @@ def _build_participantes_resumen(contrato: models.Contrato) -> ParticipantesResu
         nombre = p.persona.nombre_completo or p.persona.id
 
         if p.rol == "inquilino":
-            inquilinos.append(nombre)
             if bool(p.es_principal):
                 inquilino_principal = nombre
+            else:
+                inquilinos.append(nombre)
 
         elif p.rol == "avalista":
             avalistas.append(nombre)
@@ -207,6 +240,83 @@ def _validate_rol_participante(rol: Optional[str]) -> str:
             detail="Rol de participante no válido",
         )
     return value
+
+
+def _create_ingreso_for_contrato(
+    db: Session,
+    contrato: models.Contrato,
+    user_id: int,
+) -> models.Ingreso:
+    """
+    Crea el ingreso recurrente de alquiler asociado al contrato.
+
+    Reglas fijadas por negocio:
+    - rango_cobro: 1-3
+    - periodicidad: MENSUAL
+    - tipo_id: VIV-TIPO_INGRESO-FKV95F
+    - concepto: ALQUILER VIVIENDAS
+    - cuenta_id: BANCO-679A92B7
+    - contrato_alquiler: id del contrato
+    """
+    ingreso = models.Ingreso(
+        id=generate_ingreso_id(db),
+        rango_cobro="1-3",
+        periodicidad="MENSUAL",
+        tipo_id=_get_default_tipo_ingreso_alquiler_id(),
+        referencia_vivienda_id=contrato.patrimonio_id,
+        contrato_alquiler=contrato.id,
+        concepto="ALQUILER VIVIENDAS",
+        importe=float(contrato.renta_mensual) if contrato.renta_mensual is not None else 0.0,
+        activo=True,
+        cobrado=False,
+        createon=datetime.utcnow(),
+        modifiedon=datetime.utcnow(),
+        fecha_inicio=contrato.fecha_inicio,
+        kpi=True,
+        ingresos_cobrados=0,
+        inactivatedon=None,
+        cuenta_id=_get_default_cuenta_alquiler_id(),
+        user_id=user_id,
+        ultimo_ingreso_on=None,
+        omitido_este_mes=False,
+        ultimo_omitido_on=None,
+        omitido_count=0,
+    )
+    db.add(ingreso)
+    return ingreso
+
+
+def _sync_ingreso_for_contrato(
+    db: Session,
+    contrato: models.Contrato,
+    user_id: int,
+) -> models.Ingreso:
+    """
+    Sincroniza el ingreso automático vinculado al contrato.
+    Si no existe, lo crea.
+    Si existe, actualiza los campos operativos.
+    """
+    ingreso = _get_ingreso_by_contrato(db, contrato.id, user_id)
+
+    if ingreso is None:
+        ingreso = _create_ingreso_for_contrato(db, contrato, user_id)
+        return ingreso
+
+    ingreso.rango_cobro = "1-3"
+    ingreso.periodicidad = "MENSUAL"
+    ingreso.tipo_id = _get_default_tipo_ingreso_alquiler_id()
+    ingreso.referencia_vivienda_id = contrato.patrimonio_id
+    ingreso.contrato_alquiler = contrato.id
+    ingreso.concepto = "ALQUILER VIVIENDAS"
+    ingreso.importe = float(contrato.renta_mensual) if contrato.renta_mensual is not None else 0.0
+    ingreso.fecha_inicio = contrato.fecha_inicio
+    ingreso.cuenta_id = _get_default_cuenta_alquiler_id()
+    ingreso.modifiedon = datetime.utcnow()
+
+    estado = (contrato.estado or "").strip().lower()
+    ingreso.activo = estado not in {"finalizado", "cancelado"} and contrato.inactivatedon is None
+
+    return ingreso
 
 
 # ==========================================================
@@ -411,6 +521,14 @@ def crear_contrato(
     )
 
     db.add(row)
+    db.flush()
+
+    _create_ingreso_for_contrato(
+        db=db,
+        contrato=row,
+        user_id=current_user.id,
+    )
+
     db.commit()
     db.refresh(row)
 
@@ -489,6 +607,12 @@ def actualizar_contrato(
         row.observaciones = payload.observaciones
     if payload.inactivatedon is not None:
         row.inactivatedon = payload.inactivatedon
+
+    _sync_ingreso_for_contrato(
+        db=db,
+        contrato=row,
+        user_id=current_user.id,
+    )
 
     db.commit()
     db.refresh(row)
@@ -754,7 +878,6 @@ def eliminar_participante_contrato(
             detail="Participante no encontrado",
         )
 
-    from datetime import datetime
     row.inactivatedon = datetime.utcnow()
 
     db.commit()

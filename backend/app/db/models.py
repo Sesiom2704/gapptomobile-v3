@@ -557,6 +557,15 @@ class Ingreso(Base):
     periodicidad           = Column(String)
     tipo_id                = Column(String, ForeignKey("tipo_ingreso.id"))
     referencia_vivienda_id = Column(String, ForeignKey("patrimonio.id"))
+
+    # ✅ NUEVO: vínculo opcional al contrato de alquiler origen
+    contrato_alquiler      = Column(
+        PGUUID(as_uuid=False),
+        ForeignKey("contratos.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+
     concepto               = Column(String)
     importe                = Column(Float)
     activo                 = Column(Boolean, server_default=text("true"))
@@ -585,10 +594,13 @@ class Ingreso(Base):
     ultimo_omitido_on = Column(DateTime(timezone=True), nullable=True)
     omitido_count     = Column(Integer, nullable=False, server_default=sa.text("0"))
 
-
     tipo_rel     = relationship("TipoIngreso", back_populates="ingresos")
     cuenta       = relationship("CuentaBancaria", back_populates="ingresos", lazy="joined")
     vivienda_rel = relationship("Patrimonio", back_populates="ingresos")
+
+    # ✅ NUEVO: relación opcional al contrato creador del ingreso
+    contrato_rel = relationship("Contrato", foreign_keys=[contrato_alquiler])
+
     # 👇 Relación inversa al usuario
     user         = relationship("User", back_populates="ingresos")
 

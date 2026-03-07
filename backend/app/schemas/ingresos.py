@@ -22,11 +22,17 @@ Cambios v3 (omitidos):
     * ultimo_omitido_on
     * omitido_count
 - Se permite update parcial de omitido_este_mes (para "Omitir mes"/"Deshacer omisión").
+
+Cambios v3 (alquiler):
+- Se añade en lectura:
+    * contrato_alquiler
+  para exponer el vínculo entre un ingreso y el contrato de alquiler que lo originó.
+- NO se añade en create/update porque debe gestionarlo el backend automáticamente.
 """
 
 from __future__ import annotations
 
-from typing import Optional  # , Union
+from typing import Optional
 from datetime import date, datetime
 from decimal import Decimal
 
@@ -80,6 +86,7 @@ class IngresoCreateSchema(IngresoBase):
 
     - El ID puede venir informado o generarse en el backend.
     - Activo/cobrado/kpi se ajustan según la lógica de periodicidad en el router.
+    - contrato_alquiler NO se expone aquí: lo debe setear backend.
     """
     id: Optional[str] = None
     activo: Optional[bool] = True
@@ -101,6 +108,9 @@ class IngresoUpdateSchema(BaseModel):
         * Deshacer    -> omitido_este_mes = False
       La lógica de ultimo_omitido_on y omitido_count se recomienda gestionarla
       en backend (router/service), no desde el cliente.
+
+    Nota:
+    - contrato_alquiler NO se expone aquí: debe mantenerse controlado por backend.
     """
     fecha_inicio: Optional[str] = None
     rango_cobro: Optional[str] = None
@@ -145,6 +155,10 @@ class IngresoSchema(BaseModel):
         * omitido_este_mes
         * ultimo_omitido_on
         * omitido_count
+
+    v3 (alquiler):
+    - Se expone:
+        * contrato_alquiler
     """
     id: str
     fecha_inicio: Optional[date] = None
@@ -166,6 +180,11 @@ class IngresoSchema(BaseModel):
     omitido_este_mes: Optional[bool] = None
     ultimo_omitido_on: Optional[datetime] = None
     omitido_count: Optional[int] = None
+
+    # -----------------------
+    # v3: alquiler
+    # -----------------------
+    contrato_alquiler: Optional[str] = None
 
     createon: Optional[datetime] = None
     modifiedon: Optional[datetime] = None
