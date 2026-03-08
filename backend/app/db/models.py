@@ -601,7 +601,7 @@ class Ingreso(Base):
     # Ajuste de consistencia:
     # contratos.id es String, por tanto aquí también debe ser String
     contrato_alquiler = Column(
-        PGUUID(as_uuid=False),
+        String,
         ForeignKey("contratos.id", ondelete="SET NULL"),
         nullable=True,
         index=True,

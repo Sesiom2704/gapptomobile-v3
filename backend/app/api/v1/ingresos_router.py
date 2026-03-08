@@ -848,16 +848,55 @@ def delete_ingreso(
 ):
     obj = _get_ingreso_for_user(db, ingreso_id, current_user)
 
-    periodicidad = (getattr(obj, "periodicidad", "") or "").strip().upper()
-    if periodicidad == PERIODICIDAD_PAGO_UNICO:
+    try:
+        periodicidad = (getattr(obj, "periodicidad", "") or "").strip().upper()
         importe = safe_float(getattr(obj, "importe", 0.0))
         cuenta_id = extract_cuenta_id(obj)
-        adjust_liquidez(db, cuenta_id, -importe)
 
-    db.delete(obj)
-    db.commit()
-    return {"detail": "Ingreso eliminado"}
+        logger.warning(
+            "[INGRESOS][DELETE] ingreso_id=%s | periodicidad=%s | importe=%s | cuenta_id=%s | user_id=%s",
+            ingreso_id,
+            periodicidad,
+            importe,
+            cuenta_id,
+            current_user.id,
+        )
 
+        if periodicidad == PERIODICIDAD_PAGO_UNICO:
+            logger.warning(
+                "[INGRESOS][DELETE] ajuste liquidez previo borrado | cuenta_id=%s | delta=%s",
+                cuenta_id,
+                -importe,
+            )
+            adjust_liquidez(db, cuenta_id, -importe)
+
+        db.delete(obj)
+        db.commit()
+
+        logger.warning("[INGRESOS][DELETE] borrado OK | ingreso_id=%s", ingreso_id)
+        return None
+
+    except IntegrityError as e:
+        db.rollback()
+        logger.exception("[INGRESOS][DELETE] IntegrityError | ingreso_id=%s", ingreso_id)
+        raise HTTPException(
+            status_code=400,
+            detail=f"Error de integridad al eliminar ingreso: {getattr(e, 'orig', e)}",
+        )
+
+    except HTTPException:
+        db.rollback()
+        raise
+
+    except Exception as e:
+        db.rollback()
+        logger.exception("[INGRESOS][DELETE] Exception inesperada | ingreso_id=%s", ingreso_id)
+        tb = traceback.format_exc()
+        logger.error("[INGRESOS][DELETE] traceback=\n%s", tb)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error inesperado al eliminar ingreso: {e.__class__.__name__}: {e}",
+        )
 
 # ============================================================
 # ACCIONES
