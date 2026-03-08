@@ -157,18 +157,22 @@ def generate_entity_id(
 # Wrappers específicos para Gappto
 # ============================================================
 
-def generate_ingreso_id() -> str:
+def generate_ingreso_id(db: Session) -> str:
     """
     IDs de INGRESOS, compatibles con la v2:
 
         INGRESO-<6 caracteres A-Z0-9>
+
+    Comprueba colisión en public.ingresos.
     """
-    return generate_random_id(
+    return generate_id_with_db(
+        db=db,
         prefix="INGRESO-",
+        table="public.ingresos",
+        column="id",
         length=6,
         alphabet=UPPER_ALNUM,
     )
-
 
 def generate_gasto_cotidiano_id(db: Session) -> str:
     """

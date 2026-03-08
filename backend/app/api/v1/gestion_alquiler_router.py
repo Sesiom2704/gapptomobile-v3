@@ -11,6 +11,14 @@ Reglas generales:
 - Todas las entidades están ligadas a user_id.
 - Cada usuario solo puede ver y modificar sus propios registros.
 - La lógica de validación funcional mínima se resuelve aquí.
+
+Integración adicional:
+- Al crear un contrato se crea automáticamente un ingreso recurrente en `ingresos`.
+- Al actualizar un contrato, el ingreso asociado se sincroniza.
+- Si el contrato se finaliza/cancela/inactiva, el ingreso asociado se desactiva:
+    * activo = False
+    * kpi = False
+    * inactivatedon = now
 """
 
 from __future__ import annotations
@@ -48,7 +56,7 @@ router = APIRouter(
 
 
 # ==========================================================
-# Helpers
+# Helpers generales
 # ==========================================================
 
 def _normalize_phone(value: Optional[str]) -> Optional[str]:
@@ -75,7 +83,7 @@ def _get_default_tipo_ingreso_alquiler_id() -> str:
 
 def _get_default_rama_ingreso_alquiler_id() -> str:
     """
-    Rama ingreso fija solicitada para rentas de alquiler.
+    Rama fija solicitada para rentas de alquiler.
     """
     return "VIV-TIPORAMAINGRESO-6F29A938"
 
@@ -133,48 +141,27 @@ def _get_ingreso_by_contrato(
     contrato_id: str,
     user_id: int,
 ) -> Optional[models.Ingreso]:
+    """
+    Recupera el ingreso vinculado al contrato.
+    """
     return (
         db.query(models.Ingreso)
         .filter(
             models.Ingreso.user_id == user_id,
             models.Ingreso.contrato_alquiler == contrato_id,
         )
+        .order_by(models.Ingreso.createon.desc())
         .first()
     )
 
 
-def _get_inquilino_principal_nombre(contrato: models.Contrato) -> Optional[str]:
-    for p in (contrato.participantes or []):
-        if (
-            getattr(p, "inactivatedon", None) is None
-            and p.persona is not None
-            and p.rol == "inquilino"
-            and bool(p.es_principal)
-        ):
-            return p.persona.nombre_completo or p.persona.id
-    return None
-
-
-def _build_ingreso_concepto(contrato: models.Contrato) -> str:
-    """
-    Regla solicitada:
-    ALQ + NOMBRE INQUILINO PRINCIPAL + REFERENCIA CASA
-
-    Fallback si aún no existe principal:
-    ALQ SIN_INQUILINO + REFERENCIA CASA
-    """
-    referencia = (
-        getattr(contrato.patrimonio_rel, "referencia", None)
-        or contrato.patrimonio_id
-        or "SIN_REFERENCIA"
-    )
-
-    principal = _get_inquilino_principal_nombre(contrato) or "SIN_INQUILINO"
-
-    return normalize_upper_ascii(f"ALQ {principal} {referencia}") or f"ALQ {principal} {referencia}"
-
-
 def _build_participantes_resumen(contrato: models.Contrato) -> ParticipantesResumenOut:
+    """
+    Resume participantes activos del contrato.
+
+    Regla importante:
+    - El inquilino principal NO debe aparecer en "otros inquilinos".
+    """
     participantes = [
         p for p in (contrato.participantes or [])
         if getattr(p, "inactivatedon", None) is None and p.persona is not None
@@ -207,6 +194,30 @@ def _build_participantes_resumen(contrato: models.Contrato) -> ParticipantesResu
         avalistas=avalistas,
         gestor=gestor,
     )
+
+
+def _build_ingreso_concepto_for_contrato(contrato: models.Contrato) -> str:
+    """
+    Construye el concepto del ingreso automático del alquiler.
+
+    Regla:
+    - ALQ <INQUILINO_PRINCIPAL> <REFERENCIA_VIVIENDA>
+    - Si no existe principal:
+      ALQ SIN_INQUILINO <REFERENCIA_VIVIENDA>
+    """
+    referencia = (
+        getattr(contrato.patrimonio_rel, "referencia", None)
+        or contrato.patrimonio_id
+        or "SIN_REFERENCIA"
+    )
+
+    resumen = _build_participantes_resumen(contrato)
+    inquilino_principal = (resumen.inquilino_principal or "").strip()
+
+    if inquilino_principal:
+        return normalize_upper_ascii(f"ALQ {inquilino_principal} {referencia}")
+
+    return normalize_upper_ascii(f"ALQ SIN_INQUILINO {referencia}")
 
 
 def _persona_to_schema(row: models.Persona) -> PersonaSchema:
@@ -279,6 +290,10 @@ def _validate_rol_participante(rol: Optional[str]) -> str:
     return value
 
 
+# ==========================================================
+# Helpers de ingresos automáticos por contrato
+# ==========================================================
+
 def _create_ingreso_for_contrato(
     db: Session,
     contrato: models.Contrato,
@@ -287,15 +302,19 @@ def _create_ingreso_for_contrato(
     """
     Crea el ingreso recurrente de alquiler asociado al contrato.
 
-    Reglas fijadas por negocio:
+    Reglas de negocio:
     - rango_cobro: 1-3
     - periodicidad: MENSUAL
     - tipo_id: VIV-TIPO_INGRESO-FKV95F
     - rama_id: VIV-TIPORAMAINGRESO-6F29A938
-    - concepto: ALQ + INQUILINO PRINCIPAL + REFERENCIA CASA
     - cuenta_id: BANCO-679A92B7
     - contrato_alquiler: id del contrato
+    - concepto dinámico:
+        ALQ <INQUILINO_PRINCIPAL> <REFERENCIA>
+        o ALQ SIN_INQUILINO <REFERENCIA>
     """
+    now = datetime.utcnow()
+
     ingreso = models.Ingreso(
         id=generate_ingreso_id(db),
         rango_cobro="1-3",
@@ -304,12 +323,12 @@ def _create_ingreso_for_contrato(
         rama_id=_get_default_rama_ingreso_alquiler_id(),
         referencia_vivienda_id=contrato.patrimonio_id,
         contrato_alquiler=contrato.id,
-        concepto=_build_ingreso_concepto(contrato),
+        concepto=_build_ingreso_concepto_for_contrato(contrato),
         importe=float(contrato.renta_mensual) if contrato.renta_mensual is not None else 0.0,
         activo=True,
         cobrado=False,
-        createon=datetime.utcnow(),
-        modifiedon=datetime.utcnow(),
+        createon=now,
+        modifiedon=now,
         fecha_inicio=contrato.fecha_inicio,
         kpi=True,
         ingresos_cobrados=0,
@@ -332,8 +351,13 @@ def _sync_ingreso_for_contrato(
 ) -> models.Ingreso:
     """
     Sincroniza el ingreso automático vinculado al contrato.
+
     Si no existe, lo crea.
-    Si existe, actualiza los campos operativos.
+    Si existe, actualiza:
+    - datos económicos
+    - referencia a contrato/vivienda
+    - concepto
+    - estado operativo
     """
     ingreso = _get_ingreso_by_contrato(db, contrato.id, user_id)
 
@@ -341,26 +365,28 @@ def _sync_ingreso_for_contrato(
         ingreso = _create_ingreso_for_contrato(db, contrato, user_id)
         return ingreso
 
+    now = datetime.utcnow()
+    estado = (contrato.estado or "").strip().lower()
+    contrato_inactivo = contrato.inactivatedon is not None
+    contrato_no_operativo = estado in {"finalizado", "cancelado"} or contrato_inactivo
+
     ingreso.rango_cobro = "1-3"
     ingreso.periodicidad = "MENSUAL"
     ingreso.tipo_id = _get_default_tipo_ingreso_alquiler_id()
     ingreso.rama_id = _get_default_rama_ingreso_alquiler_id()
     ingreso.referencia_vivienda_id = contrato.patrimonio_id
     ingreso.contrato_alquiler = contrato.id
-    ingreso.concepto = _build_ingreso_concepto(contrato)
+    ingreso.concepto = _build_ingreso_concepto_for_contrato(contrato)
     ingreso.importe = float(contrato.renta_mensual) if contrato.renta_mensual is not None else 0.0
     ingreso.fecha_inicio = contrato.fecha_inicio
     ingreso.cuenta_id = _get_default_cuenta_alquiler_id()
-    ingreso.modifiedon = datetime.utcnow()
+    ingreso.modifiedon = now
 
-    estado = (contrato.estado or "").strip().lower()
-    contrato_inactivo = contrato.inactivatedon is not None
-    contrato_baja = estado in {"finalizado", "cancelado"} or contrato_inactivo
-
-    if contrato_baja:
+    if contrato_no_operativo:
         ingreso.activo = False
         ingreso.kpi = False
-        ingreso.inactivatedon = datetime.utcnow()
+        if ingreso.inactivatedon is None:
+            ingreso.inactivatedon = now
     else:
         ingreso.activo = True
         ingreso.kpi = True
@@ -538,6 +564,7 @@ def crear_contrato(
 
     estado = _validate_estado_contrato(payload.estado)
 
+    # Regla mínima: no permitir otro contrato activo para la misma vivienda
     if estado == "activo":
         existing = (
             db.query(models.Contrato)
@@ -573,11 +600,13 @@ def crear_contrato(
     db.add(row)
     db.flush()
 
-    row = _get_owned_contrato(db, row.id, current_user.id)
+    # Importante:
+    # recargamos el contrato con relaciones para poder construir bien el concepto
+    contrato_loaded = _get_owned_contrato(db, row.id, current_user.id)
 
     _create_ingreso_for_contrato(
         db=db,
-        contrato=row,
+        contrato=contrato_loaded,
         user_id=current_user.id,
     )
 
@@ -619,6 +648,7 @@ def actualizar_contrato(
     if payload.estado is not None:
         next_estado = _validate_estado_contrato(payload.estado)
 
+    # Si pasa a activo, comprobamos que no exista otro activo en la misma vivienda
     if next_estado == "activo":
         existing = (
             db.query(models.Contrato)
@@ -660,9 +690,15 @@ def actualizar_contrato(
     if payload.inactivatedon is not None:
         row.inactivatedon = payload.inactivatedon
 
+    # Volvemos a cargar con relaciones para:
+    # - resumen participantes
+    # - referencia vivienda
+    # - concepto dinámico del ingreso
+    contrato_loaded = _get_owned_contrato(db, row.id, current_user.id)
+
     _sync_ingreso_for_contrato(
         db=db,
-        contrato=row,
+        contrato=contrato_loaded,
         user_id=current_user.id,
     )
 
@@ -763,6 +799,7 @@ def crear_participante_contrato(
     rol = _validate_rol_participante(payload.rol)
     es_principal = bool(payload.es_principal)
 
+    # Regla: solo un inquilino principal activo por contrato
     if es_principal:
         if rol != "inquilino":
             raise HTTPException(
@@ -787,6 +824,7 @@ def crear_participante_contrato(
                 detail="Ya existe un inquilino principal para este contrato",
             )
 
+    # Evitar duplicado exacto activo contrato-persona-rol
     duplicated = (
         db.query(models.ContratoParticipante)
         .filter(
@@ -816,11 +854,12 @@ def crear_participante_contrato(
     db.add(row)
     db.flush()
 
-    # recargamos contrato y sincronizamos concepto del ingreso por si cambia principal
-    contrato = _get_owned_contrato(db, contrato.id, current_user.id)
+    # Re-sincronizamos el ingreso porque puede cambiar el concepto
+    # si se añade/cambia el inquilino principal
+    contrato_loaded = _get_owned_contrato(db, contrato.id, current_user.id)
     _sync_ingreso_for_contrato(
         db=db,
-        contrato=contrato,
+        contrato=contrato_loaded,
         user_id=current_user.id,
     )
 
@@ -906,10 +945,11 @@ def actualizar_participante_contrato(
 
     db.flush()
 
-    contrato = _get_owned_contrato(db, row.contrato_id, current_user.id)
+    # Re-sincronizamos ingreso por posible cambio de principal/rol
+    contrato_loaded = _get_owned_contrato(db, row.contrato_id, current_user.id)
     _sync_ingreso_for_contrato(
         db=db,
-        contrato=contrato,
+        contrato=contrato_loaded,
         user_id=current_user.id,
     )
 
@@ -949,15 +989,14 @@ def eliminar_participante_contrato(
             detail="Participante no encontrado",
         )
 
-    contrato_id = row.contrato_id
     row.inactivatedon = datetime.utcnow()
-
     db.flush()
 
-    contrato = _get_owned_contrato(db, contrato_id, current_user.id)
+    # Re-sincronizamos por si ese participante era el principal
+    contrato_loaded = _get_owned_contrato(db, row.contrato_id, current_user.id)
     _sync_ingreso_for_contrato(
         db=db,
-        contrato=contrato,
+        contrato=contrato_loaded,
         user_id=current_user.id,
     )
 
