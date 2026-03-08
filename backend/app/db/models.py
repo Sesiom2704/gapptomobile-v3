@@ -50,6 +50,7 @@ from sqlalchemy import (
     text,
 )
 from sqlalchemy.dialects.postgresql import ENUM as PGEnum
+from sqlalchemy.dialects.postgresql import UUID as PGUUID
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 from enum import Enum as PyEnum
@@ -600,7 +601,7 @@ class Ingreso(Base):
     # Ajuste de consistencia:
     # contratos.id es String, por tanto aquí también debe ser String
     contrato_alquiler = Column(
-        String,
+        PGUUID(as_uuid=False),
         ForeignKey("contratos.id", ondelete="SET NULL"),
         nullable=True,
         index=True,
