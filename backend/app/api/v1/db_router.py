@@ -28,7 +28,7 @@ PRIORITY = [
     "public.tipo_segmentos_gasto",
     "public.tipo_ramas_proveedores",
     "public.tipo_ramas_gasto",
-    "public.tipo_ramas_ingreso"
+    "public.tipo_ramas_ingreso",
     "public.tipo_ingreso",
     "public.tipo_gasto",
 
