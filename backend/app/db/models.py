@@ -1,43 +1,105 @@
 # ============================================================
-# GapptoMobile - Modelos SQLAlchemy (unificados V1 + V2)
+# GapptoMobile - Modelos SQLAlchemy (unificados V1 + V2 + V3)
+# ------------------------------------------------------------
 # - Mantiene relaciones y campos de V1
-# - Añade extend_existing=True (de V2) para convivencia con Neon
+# - Añade extend_existing=True para convivencia con Neon
 # - Conserva constraints y claves foráneas
-# - Ajustes 2025-10-07:
+#
+# Ajustes previos:
 #   * Proveedor: nuevas columnas localidad, pais
-#   * GastoCotidiano: se eliminan CHECKS restrictivos de tipo/observaciones.
-#     (La validación de "segmento = COTIDIANOS" se hará a nivel de API/servicio)
+#   * GastoCotidiano: se eliminan CHECKS restrictivos de tipo/observaciones
 #   * Índices útiles para filtros (fecha/tipo/proveedor; localidad/pais)
+#
+# Ajustes NUEVOS (ramas de ingreso):
+#   * Nueva tabla: tipo_ramas_ingreso
+#   * tipo_ingreso añade rama_id
+#   * ingresos añade rama_id
+#   * Relaciones ORM completas para poder navegar:
+#       - rama -> tipos de ingreso
+#       - rama -> ingresos
+#       - tipo de ingreso -> rama
+#       - ingreso -> rama
+#
+# Nota funcional:
+#   La validación de coherencia entre:
+#       ingreso.rama_id <-> ingreso.tipo_id <-> tipo_ingreso.rama_id
+#   debe hacerse en schemas / services / router,
+#   no sólo en el modelo ORM.
 # ============================================================
 
-from sqlalchemy import (
-    Column, String, Integer, Float, Boolean,
-    Date, DateTime, ForeignKey, CheckConstraint, ForeignKeyConstraint,
-    Enum as SAEnum, Text, UniqueConstraint, Numeric, Index, Column, DateTime, text
-)
 from datetime import datetime
-
-import enum
-from sqlalchemy.sql import func
-from backend.app.db.base import Base
-import sqlalchemy as sa
-from sqlalchemy.orm import relationship
-from enum import Enum as PyEnum
-from sqlalchemy.dialects.postgresql import ENUM as PGEnum
 from uuid import uuid4
-from sqlalchemy.dialects.postgresql import UUID as PGUUID
+import enum
+
+import sqlalchemy as sa
+from sqlalchemy import (
+    Boolean,
+    CheckConstraint,
+    Column,
+    Date,
+    DateTime,
+    Float,
+    ForeignKey,
+    Index,
+    Integer,
+    Numeric,
+    String,
+    Text,
+    UniqueConstraint,
+    Enum as SAEnum,
+    text,
+)
+from sqlalchemy.dialects.postgresql import ENUM as PGEnum
+from sqlalchemy.orm import relationship
+from sqlalchemy.sql import func
+from enum import Enum as PyEnum
+
+from backend.app.db.base import Base
+
 
 # =============================================
 # 1. TABLAS AUXILIARES
 # =============================================
 
+class TipoRamasIngreso(Base):
+    """
+    Catálogo de ramas de ingreso.
+    Ejemplos:
+    - LABORAL
+    - FINANCIACION
+    - VIVIENDAS
+    - OTROS
+    - SUMINISTRO
+    - IMPUESTOS Y TASAS
+    """
+    __tablename__ = "tipo_ramas_ingreso"
+    __table_args__ = {"extend_existing": True}
+
+    id = Column(String, primary_key=True, index=True)
+    nombre = Column(String, nullable=False)
+
+    # Relación con tipos de ingreso
+    tipos_ingreso = relationship("TipoIngreso", back_populates="rama_rel")
+
+    # Relación directa con ingresos
+    ingresos = relationship("Ingreso", back_populates="rama_rel")
+
+
 class TipoIngreso(Base):
+    """
+    Catálogo de tipos de ingreso.
+    Ahora cada tipo de ingreso pertenece a una rama.
+    """
     __tablename__ = "tipo_ingreso"
     __table_args__ = {"extend_existing": True}
 
-    id      = Column(String, primary_key=True, index=True)
-    nombre  = Column(String, nullable=False)
+    id = Column(String, primary_key=True, index=True)
+    nombre = Column(String, nullable=False)
 
+    # NUEVO: rama a la que pertenece el tipo de ingreso
+    rama_id = Column(String, ForeignKey("tipo_ramas_ingreso.id"), nullable=True, index=True)
+
+    rama_rel = relationship("TipoRamasIngreso", back_populates="tipos_ingreso")
     ingresos = relationship("Ingreso", back_populates="tipo_rel")
 
 
@@ -45,8 +107,8 @@ class TipoRamasGasto(Base):
     __tablename__ = "tipo_ramas_gasto"
     __table_args__ = {"extend_existing": True}
 
-    id      = Column(String, primary_key=True, index=True)
-    nombre  = Column(String, nullable=False)
+    id = Column(String, primary_key=True, index=True)
+    nombre = Column(String, nullable=False)
 
     tipos_gasto = relationship("TipoGasto", back_populates="rama_rel")
 
@@ -55,8 +117,8 @@ class TipoSegmentoGasto(Base):
     __tablename__ = "tipo_segmentos_gasto"
     __table_args__ = {"extend_existing": True}
 
-    id      = Column(String, primary_key=True, index=True)
-    nombre  = Column(String, nullable=False)
+    id = Column(String, primary_key=True, index=True)
+    nombre = Column(String, nullable=False)
 
     tipos_gasto = relationship("TipoGasto", back_populates="segmento_rel")
     gastos = relationship("Gasto", back_populates="segmento")
@@ -66,27 +128,26 @@ class TipoRamasProveedores(Base):
     __tablename__ = "tipo_ramas_proveedores"
     __table_args__ = {"extend_existing": True}
 
-    id      = Column(String, primary_key=True, index=True)
-    nombre  = Column(String, nullable=False)
+    id = Column(String, primary_key=True, index=True)
+    nombre = Column(String, nullable=False)
 
     proveedores = relationship("Proveedor", back_populates="rama_rel")
+
 
 class TipoGasto(Base):
     __tablename__ = "tipo_gasto"
     __table_args__ = {"extend_existing": True}
 
-    id          = Column(String, primary_key=True, index=True)
-    nombre      = Column(String, nullable=False)
-    rama_id     = Column(String, ForeignKey("tipo_ramas_gasto.id"))
+    id = Column(String, primary_key=True, index=True)
+    nombre = Column(String, nullable=False)
+    rama_id = Column(String, ForeignKey("tipo_ramas_gasto.id"))
     segmento_id = Column(String, ForeignKey("tipo_segmentos_gasto.id"), nullable=True)
 
-    rama_rel            = relationship("TipoRamasGasto", back_populates="tipos_gasto")
-    segmento_rel        = relationship("TipoSegmentoGasto", back_populates="tipos_gasto")
-    gastos              = relationship("Gasto", back_populates="tipo_rel")
-    gastos_cotidianos   = relationship("GastoCotidiano", back_populates="tipo_rel")
-    # En class TipoGasto(...)
+    rama_rel = relationship("TipoRamasGasto", back_populates="tipos_gasto")
+    segmento_rel = relationship("TipoSegmentoGasto", back_populates="tipos_gasto")
+    gastos = relationship("Gasto", back_populates="tipo_rel")
+    gastos_cotidianos = relationship("GastoCotidiano", back_populates="tipo_rel")
     inversiones = relationship("Inversion", back_populates="tipo_gasto")
-
 
 
 # =============================================
@@ -95,81 +156,82 @@ class TipoGasto(Base):
 
 class TipoInmueble(str, PyEnum):
     VIVIENDA = "VIVIENDA"
-    LOCAL    = "LOCAL"
-    GARAJE   = "GARAJE"
+    LOCAL = "LOCAL"
+    GARAJE = "GARAJE"
     TRASTERO = "TRASTERO"
+
 
 class Patrimonio(Base):
     __tablename__ = "patrimonio"
     __table_args__ = {"extend_existing": True}
 
-    id                 = Column(String, primary_key=True, index=True)
-    calle              = Column(String)
-    numero             = Column(String)
-    escalera           = Column(String)
-    piso               = Column(String)
-    puerta             = Column(String)
-    localidad          = Column(String)
-    referencia         = Column(String, index=True)
+    id = Column(String, primary_key=True, index=True)
+    calle = Column(String)
+    numero = Column(String)
+    escalera = Column(String)
+    piso = Column(String)
+    puerta = Column(String)
+    localidad = Column(String)
+    referencia = Column(String, index=True)
     direccion_completa = Column(String)
-    # 👇 Nuevo campo: propietario de la vivienda / activo
-    user_id            = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
 
-    # Enum persiste en BD (create_type=False evita recrearlo)
-    tipo_inmueble     = Column(
+    # Propietario del activo
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+
+    tipo_inmueble = Column(
         PGEnum(TipoInmueble, name="tipo_inmueble", create_type=False),
         nullable=False,
         server_default=text("'VIVIENDA'::tipo_inmueble"),
     )
     fecha_adquisicion = Column(Date, nullable=True)
-    activo            = Column(Boolean, nullable=False, server_default=text("true"), index=True)
-    disponible        = Column(Boolean, nullable=False, server_default=text("true"), index=True)
+    activo = Column(Boolean, nullable=False, server_default=text("true"), index=True)
+    disponible = Column(Boolean, nullable=False, server_default=text("true"), index=True)
 
-    # Superficie original
-    superficie_m2     = Column(Float, nullable=True)
+    superficie_m2 = Column(Float, nullable=True)
 
-    # Nuevos
-    participacion_pct     = Column(Float, nullable=False, server_default=text("100.0"))
+    participacion_pct = Column(Float, nullable=False, server_default=text("100.0"))
     superficie_construida = Column(Numeric(10, 2), nullable=True)
 
-    habitaciones      = Column(Integer, nullable=True)
-    banos             = Column(Integer, nullable=True)
-    garaje            = Column(Boolean, nullable=False, server_default=text("false"))
-    trastero          = Column(Boolean, nullable=False, server_default=text("false"))
+    habitaciones = Column(Integer, nullable=True)
+    banos = Column(Integer, nullable=True)
+    garaje = Column(Boolean, nullable=False, server_default=text("false"))
+    trastero = Column(Boolean, nullable=False, server_default=text("false"))
 
-    ingresos      = relationship("Ingreso", back_populates="vivienda_rel")
-    gastos        = relationship("Gasto", back_populates="vivienda_rel")
-    rendimientos  = relationship("RendimientoPatrimonio", back_populates="patrimonio", cascade="all, delete-orphan")
-    contratos     = relationship("Contrato", back_populates="patrimonio_rel", cascade="all, delete-orphan")
-    user          = relationship("User", back_populates="patrimonios")
+    ingresos = relationship("Ingreso", back_populates="vivienda_rel")
+    gastos = relationship("Gasto", back_populates="vivienda_rel")
+    rendimientos = relationship("RendimientoPatrimonio", back_populates="patrimonio", cascade="all, delete-orphan")
+    contratos = relationship("Contrato", back_populates="patrimonio_rel", cascade="all, delete-orphan")
+    user = relationship("User", back_populates="patrimonios")
+
 
 class PatrimonioCompra(Base):
     __tablename__ = "patrimonio_compra"
     __table_args__ = {"extend_existing": True}
 
-    patrimonio_id       = Column(String, ForeignKey("patrimonio.id", ondelete="CASCADE"), primary_key=True)
+    patrimonio_id = Column(String, ForeignKey("patrimonio.id", ondelete="CASCADE"), primary_key=True)
 
-    valor_compra        = Column(Float, nullable=False)
-    valor_referencia    = Column(Float, nullable=True)
-    impuestos_pct       = Column(Float, nullable=True)
-    impuestos_eur       = Column(Float, nullable=True)
-    notaria             = Column(Float, nullable=True)
-    agencia             = Column(Float, nullable=True)
-    reforma_adecuamiento= Column(Float, nullable=True)
-    total_inversion     = Column(Float, nullable=True)
-    valor_mercado       = Column(Float, nullable=True)
+    valor_compra = Column(Float, nullable=False)
+    valor_referencia = Column(Float, nullable=True)
+    impuestos_pct = Column(Float, nullable=True)
+    impuestos_eur = Column(Float, nullable=True)
+    notaria = Column(Float, nullable=True)
+    agencia = Column(Float, nullable=True)
+    reforma_adecuamiento = Column(Float, nullable=True)
+    total_inversion = Column(Float, nullable=True)
+    valor_mercado = Column(Float, nullable=True)
     valor_mercado_fecha = Column(Date, nullable=True, server_default=func.current_date())
 
-    notas               = Column(String)
+    notas = Column(String)
 
-    created_at          = Column(DateTime(timezone=True), server_default=func.now())
-    updated_at          = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
     patrimonio_rel = relationship("Patrimonio", backref="compra", uselist=False)
 
 
 def gen_rendpat_id() -> str:
     return "rendpat-" + uuid4().hex[:8]
+
 
 def gen_persona_id() -> str:
     return "PER-" + uuid4().hex[:10].upper()
@@ -178,8 +240,10 @@ def gen_persona_id() -> str:
 def gen_contrato_id() -> str:
     return "CON-" + uuid4().hex[:10].upper()
 
+
 def gen_contrato_participante_id() -> str:
     return "CPR-" + uuid4().hex[:10].upper()
+
 
 class RendimientoPatrimonio(Base):
     __tablename__ = "rendimiento_patrimonio"
@@ -192,29 +256,25 @@ class RendimientoPatrimonio(Base):
     patrimonio_id = Column(String, ForeignKey("patrimonio.id", ondelete="CASCADE"), nullable=False, index=True)
     year = Column(Integer, nullable=False, index=True)
 
-    # Entradas
-    ingresos_alquiler    = Column(Numeric(12, 2), nullable=False, server_default=text("0"))
-    meses_alquiler       = Column(Integer, nullable=False, server_default=text("0"))  # 0..12
+    ingresos_alquiler = Column(Numeric(12, 2), nullable=False, server_default=text("0"))
+    meses_alquiler = Column(Integer, nullable=False, server_default=text("0"))
     ingresos_adicionales = Column(Numeric(12, 2), nullable=False, server_default=text("0"))
 
-    # Gastos
-    gastos_mejoras       = Column(Numeric(12, 2), nullable=False, server_default=text("0"))  # CAPEX
-    gastos_mantenimiento = Column(Numeric(12, 2), nullable=False, server_default=text("0"))  # OPEX
-    otros_gastos         = Column(Numeric(12, 2), nullable=False, server_default=text("0"))
+    gastos_mejoras = Column(Numeric(12, 2), nullable=False, server_default=text("0"))
+    gastos_mantenimiento = Column(Numeric(12, 2), nullable=False, server_default=text("0"))
+    otros_gastos = Column(Numeric(12, 2), nullable=False, server_default=text("0"))
 
-    # Derivados
-    ocupacion_pct        = Column(Numeric(5, 2), nullable=False, server_default=text("0"))   # 0..100
-    ingreso_bruto        = Column(Numeric(12, 2), nullable=False, server_default=text("0"))
-    gasto_total          = Column(Numeric(12, 2), nullable=False, server_default=text("0"))
-    ingreso_neto         = Column(Numeric(12, 2), nullable=False, server_default=text("0"))
-    yield_bruto_pct      = Column(Numeric(7, 3), nullable=False, server_default=text("0"))
-    yield_neto_pct       = Column(Numeric(7, 3), nullable=False, server_default=text("0"))
+    ocupacion_pct = Column(Numeric(5, 2), nullable=False, server_default=text("0"))
+    ingreso_bruto = Column(Numeric(12, 2), nullable=False, server_default=text("0"))
+    gasto_total = Column(Numeric(12, 2), nullable=False, server_default=text("0"))
+    ingreso_neto = Column(Numeric(12, 2), nullable=False, server_default=text("0"))
+    yield_bruto_pct = Column(Numeric(7, 3), nullable=False, server_default=text("0"))
+    yield_neto_pct = Column(Numeric(7, 3), nullable=False, server_default=text("0"))
 
-    # Snapshot de participación para ese año
-    participacion_pct    = Column(Numeric(5, 2), nullable=False, server_default=text("100"))
+    participacion_pct = Column(Numeric(5, 2), nullable=False, server_default=text("100"))
 
-    createon            = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
-    modifiedon          = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
+    createon = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    modifiedon = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
 
     patrimonio = relationship("Patrimonio", back_populates="rendimientos")
 
@@ -229,10 +289,6 @@ class Persona(Base):
     - inquilinos
     - avalistas
     - gestores
-
-    Nota:
-    - Se gestiona por user_id para mantener aislamiento multiusuario.
-    - DNI y teléfono se validarán a nivel de API/servicio.
     """
 
     __tablename__ = "personas"
@@ -269,12 +325,6 @@ class Persona(Base):
 class Contrato(Base):
     """
     Contrato asociado a una vivienda/patrimonio.
-
-    Reglas funcionales previstas:
-    - Una vivienda puede tener varios contratos históricos.
-    - Solo uno debería estar activo al mismo tiempo.
-    - Esa regla fuerte se puede reforzar por BD con índice parcial
-      o por servicio/API.
     """
 
     __tablename__ = "contratos"
@@ -325,15 +375,6 @@ class Contrato(Base):
 class ContratoParticipante(Base):
     """
     Relación entre contrato y persona con rol.
-
-    Roles previstos:
-    - inquilino
-    - avalista
-    - gestor
-
-    Nota funcional:
-    - es_principal solo debería tener sentido real para inquilino,
-      pero esa validación la haremos mejor en servicio/API.
     """
 
     __tablename__ = "contratos_participantes"
@@ -365,28 +406,25 @@ class ContratoParticipante(Base):
     contrato = relationship("Contrato", back_populates="participantes")
     persona = relationship("Persona", back_populates="contratos_participaciones")
 
+
 class Pais(Base):
     __tablename__ = "paises"
 
-    id         = Column(Integer, primary_key=True, index=True)
-    nombre     = Column(String, nullable=False, unique=True)
+    id = Column(Integer, primary_key=True, index=True)
+    nombre = Column(String, nullable=False, unique=True)
     codigo_iso = Column(String, nullable=True)
 
-    # Lista de regiones asociadas a este país
     regiones = relationship("Region", back_populates="pais")
 
 
 class Region(Base):
     __tablename__ = "regiones"
 
-    id      = Column(Integer, primary_key=True, index=True)
-    nombre  = Column(String, nullable=False)
+    id = Column(Integer, primary_key=True, index=True)
+    nombre = Column(String, nullable=False)
     pais_id = Column(Integer, ForeignKey("paises.id"), nullable=False)
 
-    # Relación inversa con Pais.regiones
     pais = relationship("Pais", back_populates="regiones")
-
-    # Lista de localidades dentro de esta región
     localidades = relationship("Localidad", back_populates="region")
 
     __table_args__ = (
@@ -397,14 +435,11 @@ class Region(Base):
 class Localidad(Base):
     __tablename__ = "localidades"
 
-    id        = Column(Integer, primary_key=True, index=True)
-    nombre    = Column(String, nullable=False, index=True)
+    id = Column(Integer, primary_key=True, index=True)
+    nombre = Column(String, nullable=False, index=True)
     region_id = Column(Integer, ForeignKey("regiones.id"), nullable=False)
 
-    # Relación inversa con Region.localidades
     region = relationship("Region", back_populates="localidades")
-
-    # Proveedores asociados a esta localidad
     proveedores = relationship("Proveedor", back_populates="localidad_rel")
 
     __table_args__ = (
@@ -416,27 +451,23 @@ class Proveedor(Base):
     __tablename__ = "proveedores"
     __table_args__ = {"extend_existing": True}
 
-    id       = Column(String, primary_key=True, index=True)
-    nombre   = Column(String, nullable=False)
-    rama_id  = Column(String, ForeignKey("tipo_ramas_proveedores.id"))
+    id = Column(String, primary_key=True, index=True)
+    nombre = Column(String, nullable=False)
+    rama_id = Column(String, ForeignKey("tipo_ramas_proveedores.id"))
 
-    # Campos Texto para mantener compatibilidad con v2.0
     localidad_id = Column(Integer, ForeignKey("localidades.id"), nullable=True, index=True)
-    localidad   = Column(String, nullable=True, index=True)
-    pais      = Column(String, nullable=True, index=True)
+    localidad = Column(String, nullable=True, index=True)
+    pais = Column(String, nullable=True, index=True)
     comunidad = Column(String, nullable=True, index=True)
 
-    # Multiusuario
-    user_id      = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
 
-
-    rama_rel          = relationship("TipoRamasProveedores", back_populates="proveedores")
-    gastos            = relationship("Gasto", back_populates="proveedor_rel")
+    rama_rel = relationship("TipoRamasProveedores", back_populates="proveedores")
+    gastos = relationship("Gasto", back_populates="proveedor_rel")
     gastos_cotidianos = relationship("GastoCotidiano", back_populates="proveedor_rel")
     cuentas_bancarias = relationship("CuentaBancaria", back_populates="banco_rel")
-    user              = relationship("User", back_populates="proveedores")
+    user = relationship("User", back_populates="proveedores")
 
-    # Relación con Localidad (normalizada)
     localidad_rel = relationship("Localidad", back_populates="proveedores")
     inversiones_como_proveedor = relationship(
         "Inversion",
@@ -462,7 +493,6 @@ class CuentaBancaria(Base):
     liquidez = Column(Float, nullable=False, server_default=text("0"))
     liquidez_inicial = Column(Float, nullable=False, server_default=text("0"))
 
-    # IMPORTANTE: nullable=False => el backend DEBE asignar user_id en create
     user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
 
     activo = Column(Boolean, default=True)
@@ -490,7 +520,8 @@ class CuentaBancaria(Base):
         back_populates="cuenta_destino",
         cascade="all, delete-orphan",
     )
-    
+
+
 class MovimientoCuenta(Base):
     __tablename__ = "movimientos_cuenta"
 
@@ -535,7 +566,6 @@ class MovimientoCuenta(Base):
     saldo_destino_antes = Column(Numeric(12, 2), nullable=True)
     saldo_destino_despues = Column(Numeric(12, 2), nullable=True)
 
-    # Relaciones
     cuenta_origen = relationship(
         "CuentaBancaria",
         foreign_keys=[cuenta_origen_id],
@@ -548,121 +578,124 @@ class MovimientoCuenta(Base):
     )
     user = relationship("User", back_populates="movimientos_cuenta")
 
+
 class Ingreso(Base):
     __tablename__ = "ingresos"
     __table_args__ = {"extend_existing": True}
 
-    id                     = Column(String, primary_key=True, index=True)
-    rango_cobro            = Column(String, nullable=True)   # (pendiente migrar a Date si procede)
-    periodicidad           = Column(String)
-    tipo_id                = Column(String, ForeignKey("tipo_ingreso.id"))
+    id = Column(String, primary_key=True, index=True)
+
+    rango_cobro = Column(String, nullable=True)
+    periodicidad = Column(String)
+
+    # Tipo de ingreso seleccionado
+    tipo_id = Column(String, ForeignKey("tipo_ingreso.id"), index=True)
+
+    # NUEVO: rama del ingreso
+    # Se persiste también en ingresos para acelerar filtros y evitar recalcular siempre
+    rama_id = Column(String, ForeignKey("tipo_ramas_ingreso.id"), nullable=True, index=True)
+
     referencia_vivienda_id = Column(String, ForeignKey("patrimonio.id"))
 
-    # ✅ NUEVO: vínculo opcional al contrato de alquiler origen
-    contrato_alquiler      = Column(
-        PGUUID(as_uuid=False),
+    # Ajuste de consistencia:
+    # contratos.id es String, por tanto aquí también debe ser String
+    contrato_alquiler = Column(
+        String,
         ForeignKey("contratos.id", ondelete="SET NULL"),
         nullable=True,
         index=True,
     )
 
-    concepto               = Column(String)
-    importe                = Column(Float)
-    activo                 = Column(Boolean, server_default=text("true"))
-    cobrado                = Column(Boolean, server_default=text("false"))
-    createon               = Column(DateTime, server_default=func.now())
-    modifiedon             = Column(DateTime, onupdate=func.now())
-    fecha_inicio           = Column(Date, nullable=True)
-    cuenta_id              = Column(
+    concepto = Column(String)
+    importe = Column(Float)
+    activo = Column(Boolean, server_default=text("true"))
+    cobrado = Column(Boolean, server_default=text("false"))
+    createon = Column(DateTime, server_default=func.now())
+    modifiedon = Column(DateTime, onupdate=func.now())
+    fecha_inicio = Column(Date, nullable=True)
+
+    cuenta_id = Column(
         String,
         ForeignKey("cuentas_bancarias.id", ondelete="SET NULL"),
         nullable=True,
         index=True,
     )
 
-    user_id                = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
 
-    kpi               = Column(Boolean, nullable=False, server_default=sa.text("true"))
+    kpi = Column(Boolean, nullable=False, server_default=sa.text("true"))
     ingresos_cobrados = Column(Integer, nullable=False, server_default=sa.text("0"))
-    inactivatedon     = Column(DateTime, nullable=True)
+    inactivatedon = Column(DateTime, nullable=True)
     ultimo_ingreso_on = Column(DateTime, nullable=True)
 
-    # -----------------------
-    # Omitidos (nuevo estado v3)
-    # -----------------------
-    omitido_este_mes  = Column(Boolean, nullable=False, server_default=sa.text("false"), index=True)
+    omitido_este_mes = Column(Boolean, nullable=False, server_default=sa.text("false"), index=True)
     ultimo_omitido_on = Column(DateTime(timezone=True), nullable=True)
-    omitido_count     = Column(Integer, nullable=False, server_default=sa.text("0"))
+    omitido_count = Column(Integer, nullable=False, server_default=sa.text("0"))
 
-    tipo_rel     = relationship("TipoIngreso", back_populates="ingresos")
-    cuenta       = relationship("CuentaBancaria", back_populates="ingresos", lazy="joined")
+    # Relaciones
+    tipo_rel = relationship("TipoIngreso", back_populates="ingresos")
+    rama_rel = relationship("TipoRamasIngreso", back_populates="ingresos")
+    cuenta = relationship("CuentaBancaria", back_populates="ingresos", lazy="joined")
     vivienda_rel = relationship("Patrimonio", back_populates="ingresos")
-
-    # ✅ NUEVO: relación opcional al contrato creador del ingreso
     contrato_rel = relationship("Contrato", foreign_keys=[contrato_alquiler])
+    user = relationship("User", back_populates="ingresos")
 
-    # 👇 Relación inversa al usuario
-    user         = relationship("User", back_populates="ingresos")
 
 class Gasto(Base):
     __tablename__ = "gastos"
     __table_args__ = {"extend_existing": True}
 
-    id                     = Column(String, primary_key=True, index=True)
-    fecha                  = Column(Date, index=True)
-    periodicidad           = Column(String, index=True)
-    nombre                 = Column(String)
-    tienda                 = Column(String)
-    proveedor_id           = Column(String, ForeignKey("proveedores.id"), index=True)
-    tipo_id                = Column(String, ForeignKey("tipo_gasto.id"), index=True)
-    segmento_id            = Column(String, ForeignKey("tipo_segmentos_gasto.id"), nullable=True, index=True)
-    rama                   = Column(String) 
+    id = Column(String, primary_key=True, index=True)
+    fecha = Column(Date, index=True)
+    periodicidad = Column(String, index=True)
+    nombre = Column(String)
+    tienda = Column(String)
+    proveedor_id = Column(String, ForeignKey("proveedores.id"), index=True)
+    tipo_id = Column(String, ForeignKey("tipo_gasto.id"), index=True)
+    segmento_id = Column(String, ForeignKey("tipo_segmentos_gasto.id"), nullable=True, index=True)
+    rama = Column(String)
     referencia_vivienda_id = Column(String, ForeignKey("patrimonio.id"), index=True)
-    cuenta_id              = Column(String, ForeignKey("cuentas_bancarias.id"), index=True)
+    cuenta_id = Column(String, ForeignKey("cuentas_bancarias.id"), index=True)
 
-    user_id                = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
 
-    importe                = Column(Float)
-    importe_cuota          = Column(Float)
-    cuotas                 = Column(Integer)
-    total                  = Column(Float)
-    cuotas_pagadas         = Column(Integer)
-    cuotas_restantes       = Column(Integer)
-    importe_pendiente      = Column(Float)
-    rango_pago             = Column(String)
-    activo                 = Column(Boolean, server_default=text("true"), index=True)
-    pagado                 = Column(Boolean, server_default=text("false"), index=True)
-    kpi                    = Column(Boolean, server_default=text("false"), index=True)
-    createon               = Column(DateTime, server_default=func.now())
-    modifiedon             = Column(DateTime, onupdate=func.now())
-    referencia_gasto       = Column(String, ForeignKey("gastos.id"))
-    prestamo_id            = sa.Column(sa.String)
+    importe = Column(Float)
+    importe_cuota = Column(Float)
+    cuotas = Column(Integer)
+    total = Column(Float)
+    cuotas_pagadas = Column(Integer)
+    cuotas_restantes = Column(Integer)
+    importe_pendiente = Column(Float)
+    rango_pago = Column(String)
+    activo = Column(Boolean, server_default=text("true"), index=True)
+    pagado = Column(Boolean, server_default=text("false"), index=True)
+    kpi = Column(Boolean, server_default=text("false"), index=True)
+    createon = Column(DateTime, server_default=func.now())
+    modifiedon = Column(DateTime, onupdate=func.now())
+    referencia_gasto = Column(String, ForeignKey("gastos.id"))
+    prestamo_id = sa.Column(sa.String)
 
-    inactivatedon          = Column(DateTime, nullable=True)
-    ultimo_pago_on         = Column(DateTime, nullable=True)
-    comentarios            = Column(Text, nullable=True)
+    inactivatedon = Column(DateTime, nullable=True)
+    ultimo_pago_on = Column(DateTime, nullable=True)
+    comentarios = Column(Text, nullable=True)
 
-    # -----------------------
-    # Omitidos (nuevo estado v3)
-    # -----------------------
-    omitido_este_mes  = Column(Boolean, nullable=False, server_default=text("false"), index=True)
+    omitido_este_mes = Column(Boolean, nullable=False, server_default=text("false"), index=True)
     ultimo_omitido_on = Column(DateTime(timezone=True), nullable=True)
-    omitido_count     = Column(Integer, nullable=False, server_default=text("0"))
+    omitido_count = Column(Integer, nullable=False, server_default=text("0"))
 
-    proveedor_rel  = relationship("Proveedor", back_populates="gastos")
-    tipo_rel       = relationship("TipoGasto", back_populates="gastos")
-    vivienda_rel   = relationship("Patrimonio", back_populates="gastos")
-    cuenta_rel     = relationship("CuentaBancaria", back_populates="gastos")
-    subgastos      = relationship("Gasto", backref="parent", remote_side=[id])
-    segmento       = relationship("TipoSegmentoGasto", back_populates="gastos")
-    user           = relationship("User", back_populates="gastos")
+    proveedor_rel = relationship("Proveedor", back_populates="gastos")
+    tipo_rel = relationship("TipoGasto", back_populates="gastos")
+    vivienda_rel = relationship("Patrimonio", back_populates="gastos")
+    cuenta_rel = relationship("CuentaBancaria", back_populates="gastos")
+    subgastos = relationship("Gasto", backref="parent", remote_side=[id])
+    segmento = relationship("TipoSegmentoGasto", back_populates="gastos")
+    user = relationship("User", back_populates="gastos")
 
     @property
     def user_nombre(self) -> str | None:
-        # Ajusta "nombre" al campo real de tu modelo User
         return self.user.full_name if self.user else None
-    @property
 
+    @property
     def proveedor_nombre(self) -> str | None:
         return self.proveedor_rel.nombre if self.proveedor_rel else None
 
@@ -672,12 +705,10 @@ class Gasto(Base):
 
     @property
     def segmento_nombre(self) -> str | None:
-        # relación: segmento = relationship("TipoSegmentoGasto", ...)
         return self.segmento.nombre if self.segmento else None
 
     @property
     def cuenta_anagrama(self) -> str | None:
-        # Ajusta el campo si tu CuentaBancaria no se llama "anagrama"
         if not self.cuenta_rel:
             return None
         return getattr(self.cuenta_rel, "anagrama", None) or getattr(self.cuenta_rel, "nombre", None)
@@ -688,64 +719,33 @@ class GastoCotidiano(Base):
     __table_args__ = {
         "extend_existing": True,
         "schema": "public",
-        # Nota: se eliminan CHECKS restrictivos previos. Validación por API:
-        # - sólo tipos cuyo segmento sea COTIDIANOS
-        # - reglas de evento/observaciones si aplican
     }
 
-    id           = Column(String, primary_key=True, index=True)
-    fecha        = Column(Date, index=True)
-    tipo_id      = Column(String, ForeignKey("tipo_gasto.id"), index=True)
+    id = Column(String, primary_key=True, index=True)
+    fecha = Column(Date, index=True)
+    tipo_id = Column(String, ForeignKey("tipo_gasto.id"), index=True)
     proveedor_id = Column(String, ForeignKey("proveedores.id"), index=True)
-    cuenta_id    = Column(String, ForeignKey("cuentas_bancarias.id"), index=True, nullable=True)
+    cuenta_id = Column(String, ForeignKey("cuentas_bancarias.id"), index=True, nullable=True)
 
-    # 👇 Dueño del gasto cotidiano
-    user_id      = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
 
-    # ============================
-    # Importes / gasolina / estado
-    # ============================
-    importe      = Column(Float)  # "mi parte" (la que te corresponde)
-    litros       = Column(Float)
-    km           = Column(Float)
+    importe = Column(Float)
+    litros = Column(Float)
+    km = Column(Float)
     precio_litro = Column(Float)
-    pagado       = Column(Boolean, server_default=text("true"), index=True)
+    pagado = Column(Boolean, server_default=text("true"), index=True)
 
-    # ============================
-    # ✅ V3 - Reparto / ticket real
-    # ============================
-    # Estos campos son los que el front envía:
-    # - tipo_pago: 1..4 (pagado por mí, invitado, a pachas, entre varios)
-    # - importe_total: total del ticket real (ej. 56)
-    # - cantidad: personas para dividir (ej. 4)
-    #
-    # Sin estas columnas en el modelo ORM:
-    # - el backend NO puede persistirlas
-    # - el GET las devuelve como null (porque no existen como atributos)
-    tipo_pago     = Column(Integer, nullable=True, index=True)
+    tipo_pago = Column(Integer, nullable=True, index=True)
     importe_total = Column(Numeric(12, 2), nullable=True)
-    cantidad      = Column(Integer, nullable=True)
+    cantidad = Column(Integer, nullable=True)
 
-    # ============================
-    # Campos de contexto
-    # ============================
-    evento        = Column(String(120), nullable=True)
+    evento = Column(String(120), nullable=True)
     observaciones = Column(sa.Text, nullable=True)
 
-    # ============================
-    # Relaciones
-    # ============================
-    tipo_rel      = relationship("TipoGasto", back_populates="gastos_cotidianos")
+    tipo_rel = relationship("TipoGasto", back_populates="gastos_cotidianos")
     proveedor_rel = relationship("Proveedor", back_populates="gastos_cotidianos")
-    cuenta        = relationship("CuentaBancaria", back_populates="gastos_cotidianos", lazy="joined")
-    user          = relationship("User", back_populates="gastos_cotidianos")
-
-# =============================================
-# 4.1 ROLES
-# =============================================
-class RoleEnum(str, enum.Enum):
-    admin = "admin"
-    user = "user"
+    cuenta = relationship("CuentaBancaria", back_populates="gastos_cotidianos", lazy="joined")
+    user = relationship("User", back_populates="gastos_cotidianos")
 
 
 # =============================================
@@ -763,26 +763,25 @@ class User(Base):
     __tablename__ = "users"
     __table_args__ = {"extend_existing": True}
 
-    id         = Column(Integer, primary_key=True, index=True, autoincrement=True)
-    email      = Column(String, unique=True, index=True, nullable=False)
-    password   = Column(String, nullable=False)
-    full_name  = Column(String, nullable=False)
-    is_active  = Column(Boolean, server_default=text("true"))
+    id = Column(Integer, primary_key=True, index=True, autoincrement=True)
+    email = Column(String, unique=True, index=True, nullable=False)
+    password = Column(String, nullable=False)
+    full_name = Column(String, nullable=False)
+    is_active = Column(Boolean, server_default=text("true"))
     created_at = Column(DateTime(timezone=True), server_default=func.now())
-    role       = Column(
+    role = Column(
         SAEnum(RoleEnum, name="role_enum"),
         nullable=False,
         server_default="user",
     )
 
-    # Relaciones con las entidades que "pertenecen" a un usuario
-    gastos            = relationship("Gasto", back_populates="user")
-    ingresos          = relationship("Ingreso", back_populates="user")
+    gastos = relationship("Gasto", back_populates="user")
+    ingresos = relationship("Ingreso", back_populates="user")
     gastos_cotidianos = relationship("GastoCotidiano", back_populates="user")
     cuentas_bancarias = relationship("CuentaBancaria", back_populates="user")
-    patrimonios       = relationship("Patrimonio", back_populates="user")
-    prestamos         = relationship("Prestamo", back_populates="user")
-    proveedores       = relationship("Proveedor", back_populates="user")
+    patrimonios = relationship("Patrimonio", back_populates="user")
+    prestamos = relationship("Prestamo", back_populates="user")
+    proveedores = relationship("Proveedor", back_populates="user")
     movimientos_cuenta = relationship("MovimientoCuenta", back_populates="user")
 
     personas = relationship("Persona", back_populates="user")
@@ -796,28 +795,12 @@ class User(Base):
         passive_deletes=True,
     )
 
+
 # =============================================
-# 5. CIERRES MENSUALES (cabecera + detalle)
+# 5. CIERRES MENSUALES
 # =============================================
 
 class CierreMensual(Base):
-    """
-    Tabla: cierre_mensual
-
-    IMPORTANTE (fix de consistencia ORM <-> DB):
-    - En BD ya NO existen las columnas:
-        * n_pendientes_al_cerrar
-        * version
-      Por tanto, NO deben estar en el modelo ORM.
-    - Si el modelo incluye columnas que no existen físicamente,
-      SQLAlchemy generará SELECT que las referencia y Postgres fallará con:
-        psycopg.errors.UndefinedColumn
-
-    Resultado:
-    - Evitamos el error en listados y en cualquier carga ORM de CierreMensual.
-    - Mantenemos el resto de métricas necesarias para preview/insert del cierre.
-    """
-
     __tablename__ = "cierre_mensual"
     __table_args__ = (
         sa.UniqueConstraint("anio", "mes", name="uq_cierre_anio_mes"),
@@ -827,7 +810,7 @@ class CierreMensual(Base):
     )
 
     id = sa.Column(
-        PGUUID(as_uuid=True),
+        sa.dialects.postgresql.UUID(as_uuid=True),
         primary_key=True,
         nullable=False,
         server_default=sa.text("gen_random_uuid()"),
@@ -846,16 +829,10 @@ class CierreMensual(Base):
 
     criterio = sa.Column(sa.String, nullable=False, server_default="CAJA")
 
-    # -------------------------
-    # Ingresos
-    # -------------------------
     ingresos_esperados = sa.Column(sa.Float, nullable=False, server_default=sa.text("0"))
     ingresos_reales = sa.Column(sa.Float, nullable=False, server_default=sa.text("0"))
     desv_ingresos = sa.Column(sa.Float, nullable=False, server_default=sa.text("0"))
 
-    # -------------------------
-    # Gastos (desglose)
-    # -------------------------
     gastos_gestionables_esperados = sa.Column(sa.Float, nullable=False, server_default=sa.text("0"))
     gastos_gestionables_reales = sa.Column(sa.Float, nullable=False, server_default=sa.text("0"))
 
@@ -865,32 +842,20 @@ class CierreMensual(Base):
     gastos_esperados_total = sa.Column(sa.Float, nullable=False, server_default=sa.text("0"))
     gastos_reales_total = sa.Column(sa.Float, nullable=False, server_default=sa.text("0"))
 
-    # -------------------------
-    # Desviaciones
-    # -------------------------
     desv_gestionables = sa.Column(sa.Float, nullable=False, server_default=sa.text("0"))
     desv_cotidianos = sa.Column(sa.Float, nullable=False, server_default=sa.text("0"))
     desv_gastos_total = sa.Column(sa.Float, nullable=False, server_default=sa.text("0"))
 
-    # -------------------------
-    # Resultado
-    # -------------------------
     resultado_esperado = sa.Column(sa.Float, nullable=False, server_default=sa.text("0"))
     resultado_real = sa.Column(sa.Float, nullable=False, server_default=sa.text("0"))
     desv_resultado = sa.Column(sa.Float, nullable=False, server_default=sa.text("0"))
 
-    # -------------------------
-    # Contadores
-    # -------------------------
     n_recurrentes_ing = sa.Column(sa.Integer, nullable=False, server_default=sa.text("0"))
     n_recurrentes_gas = sa.Column(sa.Integer, nullable=False, server_default=sa.text("0"))
     n_unicos_ing = sa.Column(sa.Integer, nullable=False, server_default=sa.text("0"))
     n_unicos_gas = sa.Column(sa.Integer, nullable=False, server_default=sa.text("0"))
     n_cotidianos = sa.Column(sa.Integer, nullable=False, server_default=sa.text("0"))
 
-    # -------------------------
-    # Liquidez snapshot
-    # -------------------------
     liquidez_total = sa.Column(sa.Float, nullable=False, server_default=sa.text("0"))
 
     detalles = relationship(
@@ -902,6 +867,7 @@ class CierreMensual(Base):
 
     user_rel = relationship("User")
 
+
 class CierreMensualDetalle(Base):
     __tablename__ = "cierre_mensual_detalle"
     __table_args__ = (
@@ -911,13 +877,13 @@ class CierreMensualDetalle(Base):
     )
 
     id = sa.Column(
-        PGUUID(as_uuid=True),
+        sa.dialects.postgresql.UUID(as_uuid=True),
         primary_key=True,
         nullable=False,
         server_default=sa.text("gen_random_uuid()"),
     )
     cierre_id = sa.Column(
-        PGUUID(as_uuid=True),
+        sa.dialects.postgresql.UUID(as_uuid=True),
         sa.ForeignKey("cierre_mensual.id", ondelete="CASCADE"),
         nullable=False,
     )
@@ -948,26 +914,11 @@ class CierreMensualDetalle(Base):
 # Préstamo (cabecera)
 # ============================
 class Prestamo(Base):
-    """
-    Tabla: prestamo
-
-    IMPORTANTE:
-    - Este modelo está alineado con el esquema real que has listado por SQL.
-    - Si la BD ya tiene las columnas, NO hace falta migración para “crearlas”,
-      pero sí necesitas este mapeo para que SQLAlchemy/ORM pueda usarlas.
-    """
-
     __tablename__ = "prestamo"
 
-    # -----------------------
-    # Identidad / ownership
-    # -----------------------
     id = Column(String, primary_key=True, index=True)
     user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
 
-    # -----------------------
-    # Datos del préstamo
-    # -----------------------
     nombre = Column(String, nullable=False)
 
     proveedor_id = Column(String, nullable=False, index=True)
@@ -990,9 +941,6 @@ class Prestamo(Base):
     comision_apertura = Column(Numeric, nullable=True)
     otros_gastos_iniciales = Column(Numeric, nullable=True)
 
-    # -----------------------
-    # Estado / agregados
-    # -----------------------
     estado = Column(String, nullable=True, index=True)
     cuotas_totales = Column(Integer, nullable=True, default=0)
     cuotas_pagadas = Column(Integer, nullable=True, default=0)
@@ -1011,10 +959,6 @@ class Prestamo(Base):
     capital_pendiente = Column(Numeric, nullable=True)
     intereses_pendientes = Column(Numeric, nullable=True)
 
-    # -----------------------
-    # Relaciones (opcional)
-    # -----------------------
-    # Si tienes tabla prestamo_cuota y FK prestamo_id, es útil:
     cuotas = relationship("PrestamoCuota", back_populates="prestamo", cascade="all, delete-orphan")
 
     __table_args__ = (
@@ -1022,23 +966,13 @@ class Prestamo(Base):
         Index("ix_prestamo_user_estado", "user_id", "estado"),
     )
 
-    # 👇 Relación inversa al usuario
     user = sa.orm.relationship("User", back_populates="prestamos")
+
 
 # ============================
 # Detalle de cuotas (plan)
 # ============================
 class PrestamoCuota(Base):
-    """
-    Tabla: prestamo_cuota
-
-    IMPORTANTE:
-    - Esta tabla NO tiene user_id (según tu SQL).
-    - La autorización se garantiza validando ownership a través del Prestamo:
-        - primero validas p.user_id == current_user.id
-        - luego consultas cuotas por prestamo_id
-    """
-
     __tablename__ = "prestamo_cuota"
 
     id = Column(String, primary_key=True, index=True)
@@ -1048,7 +982,6 @@ class PrestamoCuota(Base):
 
     fecha_vencimiento = Column(Date, nullable=False)
 
-    # Nota: en SQL es numeric (sin precisión/escala visible). Mantengo Numeric estándar.
     importe_cuota = Column(Numeric, nullable=False)
     capital = Column(Numeric, nullable=False)
     interes = Column(Numeric, nullable=False)
@@ -1063,20 +996,18 @@ class PrestamoCuota(Base):
     createon = Column(DateTime, nullable=False, default=datetime.utcnow)
     modifiedon = Column(DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
 
-    # Relación con cabecera
     prestamo = relationship("Prestamo", back_populates="cuotas")
 
     __table_args__ = (
-        # ✅ Índice útil y consistente con tu tabla:
         Index("ix_prestamo_cuota_prestamo_num", "prestamo_id", "num_cuota"),
     )
 
+
 # =============================================
-# 6. INVERSIONES (nuevo módulo v3)
+# 6. INVERSIONES
 # =============================================
 
 def gen_inversion_id() -> str:
-    # INV- + UUID corto
     return "INV-" + uuid4().hex[:10].upper()
 
 
@@ -1086,13 +1017,10 @@ class Inversion(Base):
 
     id = Column(String, primary_key=True, index=True, default=gen_inversion_id)
 
-    # Ownership
     user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
 
-    # Reutiliza TipoGasto como "tipo de inversión" (JV/NPL/etc.)
     tipo_gasto_id = Column(String, ForeignKey("tipo_gasto.id", ondelete="RESTRICT"), nullable=False, index=True)
 
-    # Un proveedor y un dealer (ambos en proveedores)
     proveedor_id = Column(String, ForeignKey("proveedores.id", ondelete="SET NULL"), nullable=True, index=True)
     dealer_id = Column(String, ForeignKey("proveedores.id", ondelete="SET NULL"), nullable=True, index=True)
 
@@ -1100,7 +1028,7 @@ class Inversion(Base):
     descripcion = Column(sa.Text, nullable=True)
 
     estado = Column(String, nullable=False, server_default=text("'ACTIVA'"))
-    fase = Column(String, nullable=True)  # futuro
+    fase = Column(String, nullable=True)
 
     fecha_creacion = Column(Date, nullable=False, server_default=func.current_date())
     fecha_inicio = Column(Date, nullable=True)
@@ -1109,19 +1037,16 @@ class Inversion(Base):
 
     moneda = Column(String, nullable=False, server_default=text("'EUR'"))
 
-    # Importes (sin caja real)
     aporte_estimado = Column(Numeric(14, 2), nullable=True)
     aporte_final = Column(Numeric(14, 2), nullable=True)
     retorno_esperado_total = Column(Numeric(14, 2), nullable=True)
     retorno_final_total = Column(Numeric(14, 2), nullable=True)
 
-    # Rentabilidad esperada
     roi_esperado_pct = Column(Numeric(6, 2), nullable=True)
     moic_esperado = Column(Numeric(10, 4), nullable=True)
     irr_esperada_pct = Column(Numeric(6, 2), nullable=True)
     plazo_esperado_meses = Column(Integer, nullable=True)
 
-    # Rentabilidad final
     roi_final_pct = Column(Numeric(6, 2), nullable=True)
     moic_final = Column(Numeric(10, 4), nullable=True)
     irr_final_pct = Column(Numeric(6, 2), nullable=True)
@@ -1132,7 +1057,6 @@ class Inversion(Base):
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
 
-    # Relaciones
     user = relationship("User", back_populates="inversiones")
 
     tipo_gasto = relationship("TipoGasto", back_populates="inversiones")
@@ -1168,13 +1092,13 @@ class InversionMetrica(Base):
         index=True,
     )
 
-    escenario = Column(String, nullable=True)  # BASE/PESIMISTA/OPTIMISTA
+    escenario = Column(String, nullable=True)
     clave = Column(String, nullable=False)
 
     valor_num = Column(Numeric(18, 6), nullable=True)
     valor_Texto = Column(sa.Text, nullable=True)
     unidad = Column(String, nullable=True)
-    origen = Column(String, nullable=True)  # MANUAL/MODELO/TAPE
+    origen = Column(String, nullable=True)
 
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
 

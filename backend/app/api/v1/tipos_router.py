@@ -1,21 +1,30 @@
 # backend/app/api/v1/tipos_router.py
 
 """
-API v1 - TIPOS (TipoGasto, TipoIngreso, TipoSegmentoGasto)
+API v1 - TIPOS
+- TipoGasto
+- TipoIngreso
+- TipoSegmentoGasto
 
-Basado en la lógica de la v2 (backend/routers/tipos.py), manteniendo:
+Basado en la lógica de la v2, manteniendo:
 
 - NOMBRE siempre en MAYÚSCULAS.
 - Unicidad por NOMBRE en creación.
 - CRUD simple para cada entidad.
 
-Además:
+Mejoras v3:
 - IDs generados en backend (TGAS-/TING-/TSEG-).
+- Compatibilidad Pydantic v1/v2 en updates.
+- Control de duplicados también al actualizar.
+- NUEVO:
+    * TipoIngreso ahora pertenece a una rama de ingreso (rama_id).
+    * Se puede filtrar el listado de tipos de ingreso por rama_id.
+    * Se valida que la rama de ingreso exista al crear/editar.
 """
 
 from __future__ import annotations
 
-from typing import List, Optional
+from typing import List, Optional, Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session
@@ -45,6 +54,80 @@ router = APIRouter(
     tags=["tipos"],
 )
 
+
+# ============================================================
+# Helpers
+# ============================================================
+
+def _to_dict(model: Any, *, exclude_unset: bool = False) -> dict:
+    """
+    Compatibilidad Pydantic v1/v2.
+    """
+    if hasattr(model, "model_dump"):
+        return model.model_dump(exclude_unset=exclude_unset)
+    return model.dict(exclude_unset=exclude_unset)
+
+
+def _ensure_unique_nombre_on_create(
+    db: Session,
+    orm_model: Any,
+    nombre_up: str,
+    detail: str,
+) -> None:
+    """
+    Valida que no exista ya otro registro con el mismo nombre.
+    """
+    exists = db.query(orm_model).filter(orm_model.nombre == nombre_up).first()
+    if exists:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=detail,
+        )
+
+
+def _ensure_unique_nombre_on_update(
+    db: Session,
+    orm_model: Any,
+    *,
+    current_id: str,
+    nombre_up: str,
+    detail: str,
+) -> None:
+    """
+    Valida que al renombrar no se duplique el nombre con otro registro distinto.
+    """
+    exists = (
+        db.query(orm_model)
+        .filter(
+            orm_model.nombre == nombre_up,
+            orm_model.id != current_id,
+        )
+        .first()
+    )
+    if exists:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=detail,
+        )
+
+
+def _get_rama_ingreso_or_404(db: Session, rama_id: str) -> models.TipoRamasIngreso:
+    """
+    Comprueba que la rama de ingreso exista.
+    """
+    obj = (
+        db.query(models.TipoRamasIngreso)
+        .filter(models.TipoRamasIngreso.id == rama_id)
+        .first()
+    )
+    if not obj:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Rama de ingreso no encontrada.",
+        )
+    return obj
+
+
 # ==========================
 # CRUD TipoGasto
 # ==========================
@@ -59,18 +142,28 @@ def list_tipos_gasto(
         None,
         description="Si se indica, filtra por segmento_id.",
     ),
+    rama_id: Optional[str] = Query(
+        None,
+        description="Si se indica, filtra por rama_id.",
+    ),
     db: Session = Depends(get_db),
 ):
     """
-    Lista de tipos de gasto.
+    Lista tipos de gasto.
 
-    - Si se pasa `segmento_id`, filtra por ese segmento.
-    - Devuelve todos los tipos de gasto que cumplen la condición.
+    Filtros opcionales:
+    - segmento_id
+    - rama_id
     """
     q = db.query(models.TipoGasto)
+
     if segmento_id:
-        q = q.filter(models.TipoGasto.segmento_id == segmento_id)
-    return q.all()
+        q = q.filter(models.TipoGasto.segmento_id == normalize_upper(segmento_id))
+
+    if rama_id:
+        q = q.filter(models.TipoGasto.rama_id == normalize_upper(rama_id))
+
+    return q.order_by(models.TipoGasto.nombre.asc()).all()
 
 
 @router.post(
@@ -88,28 +181,25 @@ def create_tipo_gasto(
 
     Reglas:
     - NOMBRE se guarda en MAYÚSCULAS.
-    - No se permite duplicar NOMBRE (unicidad por nombre).
-    - El ID se genera en el backend con formato TGAS-XXXXXX.
+    - No se permite duplicar NOMBRE.
+    - El ID se genera en backend con formato TGAS-XXXXXX.
     """
     nombre_up = normalize_upper(tipo_in.nombre) or ""
-    exists = (
-        db.query(models.TipoGasto)
-        .filter(models.TipoGasto.nombre == nombre_up)
-        .first()
+
+    _ensure_unique_nombre_on_create(
+        db,
+        models.TipoGasto,
+        nombre_up,
+        "Ya existe ese tipo de gasto.",
     )
-    if exists:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Ya existe ese tipo de gasto.",
-        )
 
     new_id = generate_tipo_gasto_id(db)
 
     obj = models.TipoGasto(
         id=new_id,
         nombre=nombre_up,
-        rama_id=tipo_in.rama_id,
-        segmento_id=tipo_in.segmento_id,
+        rama_id=normalize_upper(tipo_in.rama_id) if getattr(tipo_in, "rama_id", None) else None,
+        segmento_id=normalize_upper(tipo_in.segmento_id) if getattr(tipo_in, "segmento_id", None) else None,
     )
     db.add(obj)
     db.commit()
@@ -130,9 +220,11 @@ def update_tipo_gasto(
     """
     Actualiza un TipoGasto existente.
 
-    - Si no existe → 404.
+    Reglas:
+    - Si no existe -> 404.
     - NOMBRE se normaliza a MAYÚSCULAS si se envía.
     - Se actualizan solo los campos enviados.
+    - No se permite renombrar a un nombre ya existente.
     """
     obj = db.get(models.TipoGasto, tipo_id)
     if not obj:
@@ -141,10 +233,23 @@ def update_tipo_gasto(
             detail="Tipo gasto no encontrado.",
         )
 
-    data = tipo_in.model_dump(exclude_unset=True)
+    data = _to_dict(tipo_in, exclude_unset=True)
 
     if "nombre" in data and data["nombre"] is not None:
         data["nombre"] = normalize_upper(data["nombre"])
+        _ensure_unique_nombre_on_update(
+            db,
+            models.TipoGasto,
+            current_id=tipo_id,
+            nombre_up=data["nombre"],
+            detail="Ya existe otro tipo de gasto con ese nombre.",
+        )
+
+    if "rama_id" in data and data["rama_id"] is not None:
+        data["rama_id"] = normalize_upper(data["rama_id"])
+
+    if "segmento_id" in data and data["segmento_id"] is not None:
+        data["segmento_id"] = normalize_upper(data["segmento_id"])
 
     for k, v in data.items():
         setattr(obj, k, v)
@@ -166,7 +271,7 @@ def delete_tipo_gasto(
     """
     Elimina un TipoGasto por ID.
 
-    - Si no existe → 404.
+    - Si no existe -> 404.
     - Si está referenciado por gastos, la BD puede impedir el borrado.
     """
     obj = db.get(models.TipoGasto, tipo_id)
@@ -191,12 +296,28 @@ def delete_tipo_gasto(
     summary="Listar tipos de ingreso",
 )
 def list_tipos_ingreso(
+    rama_id: Optional[str] = Query(
+        None,
+        description="Si se indica, filtra por rama_id.",
+    ),
     db: Session = Depends(get_db),
 ):
     """
-    Devuelve la lista completa de tipos de ingreso.
+    Devuelve la lista de tipos de ingreso.
+
+    Comportamiento nuevo:
+    - Si se informa rama_id, devuelve solo los tipos asociados a esa rama.
+    - Esto permite alimentar la UI:
+        1) seleccionar rama
+        2) cargar tipos de esa rama
     """
-    return db.query(models.TipoIngreso).all()
+    q = db.query(models.TipoIngreso)
+
+    if rama_id:
+        rama_id = normalize_upper(rama_id)
+        q = q.filter(models.TipoIngreso.rama_id == rama_id)
+
+    return q.order_by(models.TipoIngreso.nombre.asc()).all()
 
 
 @router.post(
@@ -215,25 +336,34 @@ def create_tipo_ingreso(
     Reglas:
     - NOMBRE en MAYÚSCULAS.
     - Unicidad por NOMBRE.
+    - rama_id es obligatoria funcionalmente.
+    - La rama debe existir.
     - ID generado en backend (TING-XXXXXX).
     """
     nombre_up = normalize_upper(tipo_in.nombre) or ""
-    exists = (
-        db.query(models.TipoIngreso)
-        .filter(models.TipoIngreso.nombre == nombre_up)
-        .first()
-    )
-    if exists:
+    rama_id_up = normalize_upper(getattr(tipo_in, "rama_id", None))
+
+    if not rama_id_up:
         raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Ya existe ese tipo de ingreso.",
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="rama_id es obligatorio para crear un tipo de ingreso.",
         )
+
+    _get_rama_ingreso_or_404(db, rama_id_up)
+
+    _ensure_unique_nombre_on_create(
+        db,
+        models.TipoIngreso,
+        nombre_up,
+        "Ya existe ese tipo de ingreso.",
+    )
 
     new_id = generate_tipo_ingreso_id(db)
 
     obj = models.TipoIngreso(
         id=new_id,
         nombre=nombre_up,
+        rama_id=rama_id_up,
     )
     db.add(obj)
     db.commit()
@@ -254,8 +384,11 @@ def update_tipo_ingreso(
     """
     Actualiza un tipo de ingreso existente.
 
-    - Si no existe → 404.
+    Reglas:
+    - Si no existe -> 404.
     - NOMBRE se normaliza a MAYÚSCULAS si se envía.
+    - Si se envía rama_id, la rama debe existir.
+    - No se permite renombrar a un nombre ya existente.
     """
     obj = db.get(models.TipoIngreso, tipo_id)
     if not obj:
@@ -264,10 +397,21 @@ def update_tipo_ingreso(
             detail="Tipo ingreso no encontrado.",
         )
 
-    data = tipo_in.model_dump(exclude_unset=True)
+    data = _to_dict(tipo_in, exclude_unset=True)
 
     if "nombre" in data and data["nombre"] is not None:
         data["nombre"] = normalize_upper(data["nombre"])
+        _ensure_unique_nombre_on_update(
+            db,
+            models.TipoIngreso,
+            current_id=tipo_id,
+            nombre_up=data["nombre"],
+            detail="Ya existe otro tipo de ingreso con ese nombre.",
+        )
+
+    if "rama_id" in data and data["rama_id"] is not None:
+        data["rama_id"] = normalize_upper(data["rama_id"])
+        _get_rama_ingreso_or_404(db, data["rama_id"])
 
     for k, v in data.items():
         setattr(obj, k, v)
@@ -289,7 +433,8 @@ def delete_tipo_ingreso(
     """
     Elimina un TipoIngreso por ID.
 
-    - Si no existe → 404.
+    - Si no existe -> 404.
+    - Si está referenciado por ingresos, la BD puede impedir el borrado.
     """
     obj = db.get(models.TipoIngreso, tipo_id)
     if not obj:
@@ -318,7 +463,11 @@ def list_tipos_segmento(
     """
     Devuelve la lista completa de segmentos de gasto.
     """
-    return db.query(models.TipoSegmentoGasto).all()
+    return (
+        db.query(models.TipoSegmentoGasto)
+        .order_by(models.TipoSegmentoGasto.nombre.asc())
+        .all()
+    )
 
 
 @router.post(
@@ -340,16 +489,13 @@ def create_tipo_segmento(
     - ID generado en backend (TSEG-XXXXXX).
     """
     nombre_up = normalize_upper(tipo_in.nombre) or ""
-    exists = (
-        db.query(models.TipoSegmentoGasto)
-        .filter(models.TipoSegmentoGasto.nombre == nombre_up)
-        .first()
+
+    _ensure_unique_nombre_on_create(
+        db,
+        models.TipoSegmentoGasto,
+        nombre_up,
+        "Ya existe ese segmento de gasto.",
     )
-    if exists:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Ya existe ese segmento de gasto.",
-        )
 
     new_id = generate_tipo_segmento_gasto_id(db)
 
@@ -376,8 +522,10 @@ def update_tipo_segmento(
     """
     Actualiza un segmento de gasto existente.
 
-    - Si no existe → 404.
+    Reglas:
+    - Si no existe -> 404.
     - NOMBRE se normaliza a MAYÚSCULAS si se envía.
+    - No se permite renombrar a un nombre ya existente.
     """
     obj = db.get(models.TipoSegmentoGasto, tipo_id)
     if not obj:
@@ -386,10 +534,17 @@ def update_tipo_segmento(
             detail="Segmento no encontrado.",
         )
 
-    data = tipo_in.model_dump(exclude_unset=True)
+    data = _to_dict(tipo_in, exclude_unset=True)
 
     if "nombre" in data and data["nombre"] is not None:
         data["nombre"] = normalize_upper(data["nombre"])
+        _ensure_unique_nombre_on_update(
+            db,
+            models.TipoSegmentoGasto,
+            current_id=tipo_id,
+            nombre_up=data["nombre"],
+            detail="Ya existe otro segmento de gasto con ese nombre.",
+        )
 
     for k, v in data.items():
         setattr(obj, k, v)
@@ -411,7 +566,7 @@ def delete_tipo_segmento(
     """
     Elimina un segmento de gasto por ID.
 
-    - Si no existe → 404.
+    - Si no existe -> 404.
     """
     obj = db.get(models.TipoSegmentoGasto, tipo_id)
     if not obj:

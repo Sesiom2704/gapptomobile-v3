@@ -10,35 +10,42 @@ Objetivo:
 
 Incluye:
 - random_code: genera un código aleatorio dado un alfabeto.
-- generate_random_id: ID simple sin comprobar BD (suficiente cuando
-  la probabilidad de colisión es muy baja y además se controla con
-  IntegrityError).
+- generate_random_id: ID simple sin comprobar BD.
 - generate_id_with_db: ID comprobando colisión en la tabla.
-- Wrappers específicos:
-    * generate_ingreso_id()
-    * generate_gasto_cotidiano_id(db)
-    * generate_gasto_id(db)
+- Wrappers específicos para las distintas entidades.
+
+Notas de diseño:
+- Cuando el riesgo de colisión es muy bajo y el insert ya controla
+  IntegrityError, puede bastar generate_random_id().
+- Cuando queremos máxima robustez antes de insertar, usamos
+  generate_id_with_db() contra la tabla real.
 """
 
 from __future__ import annotations
-
-from typing import Optional
 
 import secrets
 import string
 
 from fastapi import HTTPException
-from sqlalchemy.orm import Session
 from sqlalchemy import text
+from sqlalchemy.orm import Session
 
-# Alfabetos que reutilizaremos
+
+# ============================================================
+# Alfabetos reutilizables
+# ============================================================
+
 UPPER_ALNUM = string.ascii_uppercase + string.digits
 LOWER_ALNUM = string.ascii_lowercase + string.digits
 
 
+# ============================================================
+# Helpers genéricos
+# ============================================================
+
 def random_code(length: int = 6, *, alphabet: str = UPPER_ALNUM) -> str:
     """
-    Genera un código aleatorio de `length` caracteres a partir del
+    Genera un código aleatorio de `length` caracteres usando el
     alfabeto indicado.
 
     Ejemplo:
@@ -58,10 +65,12 @@ def generate_random_id(
 
         <prefix><codigo>
 
-    sin comprobar nada en la BD. Es útil cuando:
+    sin comprobar nada en la BD.
 
-    - El espacio de IDs es muy grande (colisión muy improbable).
-    - Además controlamos posibles colisiones con IntegrityError en el insert.
+    Útil cuando:
+    - el espacio de IDs es suficientemente grande
+    - la colisión es muy improbable
+    - además se controla IntegrityError en el insert
 
     Ejemplo:
         generate_random_id("INGRESO-", length=6, alphabet=UPPER_ALNUM)
@@ -88,16 +97,16 @@ def generate_id_with_db(
     comprobando que no exista ya en la tabla indicada.
 
     Parámetros:
-    - db: sesión SQLAlchemy.
-    - prefix: prefijo del ID (ej: 'GASTO_COTIDIANO-', 'gasto-').
+    - db: sesión SQLAlchemy
+    - prefix: prefijo del ID (ej: 'GASTO_COTIDIANO-', 'gasto-')
     - table: nombre completo de la tabla, incluyendo schema si aplica
-             (ej: 'public.gastos', 'public.gastos_cotidianos').
-    - column: columna donde se guarda el ID (por defecto 'id').
-    - length: longitud del código aleatorio.
-    - alphabet: alfabeto a usar (UPPER_ALNUM, LOWER_ALNUM, ...).
-    - attempts: número máximo de reintentos en caso de colisión.
+             (ej: 'public.gastos', 'public.tipo_ingreso')
+    - column: columna donde se guarda el ID (por defecto 'id')
+    - length: longitud del código aleatorio
+    - alphabet: alfabeto a usar
+    - attempts: máximo número de intentos
 
-    Si no consigue un ID libre tras `attempts` intentos, lanza HTTP 500.
+    Si no consigue un ID libre tras varios intentos, lanza HTTP 500.
     """
     for _ in range(attempts):
         candidate = f"{prefix}{random_code(length=length, alphabet=alphabet)}"
@@ -120,8 +129,32 @@ def generate_id_with_db(
     )
 
 
+def generate_entity_id(
+    db: Session,
+    prefix: str,
+    table: str,
+    column: str = "id",
+    length: int = 6,
+    alphabet: str = UPPER_ALNUM,
+) -> str:
+    """
+    Generador genérico de IDs para cualquier entidad.
+
+    Ejemplo:
+        generate_entity_id(db, prefix="TIPO-", table="public.tipo_gasto")
+    """
+    return generate_id_with_db(
+        db=db,
+        prefix=prefix,
+        table=table,
+        column=column,
+        length=length,
+        alphabet=alphabet,
+    )
+
+
 # ============================================================
-# Wrappers específicos para Gappto (evitan “magia” en routers)
+# Wrappers específicos para Gappto
 # ============================================================
 
 def generate_ingreso_id() -> str:
@@ -139,11 +172,11 @@ def generate_ingreso_id() -> str:
 
 def generate_gasto_cotidiano_id(db: Session) -> str:
     """
-    IDs de GASTOS COTIDIANOS, compatibles con la v2:
+    IDs de GASTOS COTIDIANOS:
 
         GASTO_COTIDIANO-<6 caracteres A-Z0-9>
 
-    Se comprueba que no exista ya en public.gastos_cotidianos.
+    Comprueba colisión en public.gastos_cotidianos.
     """
     return generate_id_with_db(
         db,
@@ -161,7 +194,7 @@ def generate_gasto_id(db: Session) -> str:
 
         gasto-<6 caracteres a-z0-9>
 
-    Se comprueba que no exista ya en public.gastos.
+    Comprueba colisión en public.gastos.
     """
     return generate_id_with_db(
         db,
@@ -172,13 +205,14 @@ def generate_gasto_id(db: Session) -> str:
         alphabet=LOWER_ALNUM,
     )
 
+
 def generate_cuenta_bancaria_id(db: Session) -> str:
     """
     IDs de CUENTAS BANCARIAS:
 
         CTA-<6 caracteres A-Z0-9>
 
-    Se comprueba que no exista ya en public.cuentas_bancarias antes de usarlo.
+    Comprueba colisión en public.cuentas_bancarias.
     """
     return generate_id_with_db(
         db,
@@ -189,61 +223,29 @@ def generate_cuenta_bancaria_id(db: Session) -> str:
         alphabet=UPPER_ALNUM,
     )
 
+
 def generate_proveedor_id(db: Session) -> str:
     """
-    Genera un ID único para PROVEEDORES con el formato:
+    IDs de PROVEEDORES:
 
         PROV-<6 caracteres A-Z0-9>
 
-    Usa la tabla real de proveedores en la BD para asegurar que
-    no se repite (consulta por public.proveedores.id).
-
-    Requiere que exista la función generate_id_with_db, que ya
-    utilizamos para otros IDs (gastos, ingresos, cuentas, etc.).
+    Comprueba colisión en public.proveedores.
     """
-    return generate_id_with_db(
+    return generate_entity_id(
         db=db,
         prefix="PROV-",
         table="public.proveedores",
-        column="id",
-        length=6,
-        alphabet=UPPER_ALNUM,
     )
 
-
-def generate_entity_id(
-    db: Session,
-    prefix: str,
-    table: str,
-    column: str = "id",
-    length: int = 6,
-) -> str:
-    """
-    Generador genérico de IDs para cualquier entidad.
-
-    Ejemplo de uso:
-    - generate_entity_id(db, prefix="TIPO-", table="public.tipo_gasto")
-
-    Internamente delega en generate_id_with_db, que se encarga de
-    comprobar en la BD que el ID no exista antes de devolverlo.
-    """
-    return generate_id_with_db(
-        db=db,
-        prefix=prefix,
-        table=table,
-        column=column,
-        length=length,
-        alphabet=UPPER_ALNUM,
-    )
 
 def generate_tipo_gasto_id(db: Session) -> str:
     """
-    Genera un ID único para TipoGasto con formato:
+    IDs de TipoGasto:
 
         TGAS-<6 caracteres A-Z0-9>
 
-    La tabla asumida es public.tipo_gasto.
-    Ajusta 'table' si tu tabla real tiene otro nombre.
+    Tabla: public.tipo_gasto
     """
     return generate_entity_id(
         db=db,
@@ -254,9 +256,11 @@ def generate_tipo_gasto_id(db: Session) -> str:
 
 def generate_tipo_ingreso_id(db: Session) -> str:
     """
-    Genera un ID único para TipoIngreso:
+    IDs de TipoIngreso:
 
         TING-<6 caracteres A-Z0-9>
+
+    Tabla: public.tipo_ingreso
     """
     return generate_entity_id(
         db=db,
@@ -267,31 +271,22 @@ def generate_tipo_ingreso_id(db: Session) -> str:
 
 def generate_tipo_segmento_gasto_id(db: Session) -> str:
     """
-    Genera un ID único para TipoSegmentoGasto:
+    IDs de TipoSegmentoGasto:
 
         TSEG-<6 caracteres A-Z0-9>
+
+    Tabla real: public.tipo_segmentos_gasto
     """
     return generate_entity_id(
         db=db,
         prefix="TSEG-",
-        table="public.tipo_segmento_gasto",
+        table="public.tipo_segmentos_gasto",
     )
 
-def generate_tipo_segmento_gasto_id(db: Session) -> str:
-    """
-    Genera un ID único para TipoSegmentoGasto:
-
-        TSEG-<6 caracteres A-Z0-9>
-    """
-    return generate_entity_id(
-        db=db,
-        prefix="TSEG-",
-        table="public.tipo_segmentos_gasto",  # <- Ojo: tipo_segmentos_gasto (plural)
-    )
 
 def generate_tipo_rama_gasto_id(db: Session) -> str:
     """
-    Genera un ID único para TipoRamasGasto con formato:
+    IDs de TipoRamasGasto:
 
         TRAG-<6 caracteres A-Z0-9>
 
@@ -306,7 +301,7 @@ def generate_tipo_rama_gasto_id(db: Session) -> str:
 
 def generate_tipo_rama_proveedor_id(db: Session) -> str:
     """
-    Genera un ID único para TipoRamasProveedores con formato:
+    IDs de TipoRamasProveedores:
 
         TRPR-<6 caracteres A-Z0-9>
 
@@ -318,33 +313,68 @@ def generate_tipo_rama_proveedor_id(db: Session) -> str:
         table="public.tipo_ramas_proveedores",
     )
 
+
+def generate_tipo_rama_ingreso_id(db: Session) -> str:
+    """
+    IDs de TipoRamasIngreso:
+
+        TRIN-<6 caracteres A-Z0-9>
+
+    Tabla: public.tipo_ramas_ingreso
+
+    Nota:
+    - Los datos semilla históricos usan otro formato más descriptivo
+      (ej. LAB-TIPORAMAINGRESO-...).
+    - Para nuevas altas desde API usamos un formato técnico uniforme
+      y fácil de mantener.
+    """
+    return generate_entity_id(
+        db=db,
+        prefix="TRIN-",
+        table="public.tipo_ramas_ingreso",
+    )
+
+
 def generate_patrimonio_id(db: Session) -> str:
     """
-    Genera un ID único para PATRIMONIO (viviendas) con formato:
+    IDs de PATRIMONIO:
 
         VIVIENDA-<6 caracteres A-Z0-9>
 
-    Usa la tabla real de patrimonio en BD para asegurar que no se repite.
-    Ajusta el nombre de la tabla si en tu BD es distinto.
+    Tabla: public.patrimonio
     """
     return generate_entity_id(
         db=db,
         prefix="VIVIENDA-",
-        table="public.patrimonio",  # Si tu tabla es 'patrimonios', aquí lo cambiamos
+        table="public.patrimonio",
     )
+
 
 def generate_prestamo_id(db: Session) -> str:
     """
-    Genera un ID único para la tabla prestamo, del estilo:
-      'prestamo-xxxxxx'
+    IDs de PRÉSTAMOS:
+
+        prestamo-<6 caracteres A-Z0-9>
+
+    Tabla: public.prestamo
     """
-    from .id_utils import generate_entity_id  # si estás en el mismo archivo, quita este import interno
-    return generate_entity_id(db, "prestamo-", "public.prestamo")
+    return generate_entity_id(
+        db=db,
+        prefix="prestamo-",
+        table="public.prestamo",
+    )
+
 
 def generate_prestamo_cuota_id(db: Session) -> str:
     """
-    Genera un ID único para la tabla prestamo_cuota, del estilo:
-      'prestamo_cuota-xxxxxx'
+    IDs de CUOTAS DE PRÉSTAMO:
+
+        prestamo_cuota-<6 caracteres A-Z0-9>
+
+    Tabla: public.prestamo_cuota
     """
-    from .id_utils import generate_entity_id  # igual que arriba, quítalo si ya estás en el mismo scope
-    return generate_entity_id(db, "prestamo_cuota-", "public.prestamo_cuota")
+    return generate_entity_id(
+        db=db,
+        prefix="prestamo_cuota-",
+        table="public.prestamo_cuota",
+    )

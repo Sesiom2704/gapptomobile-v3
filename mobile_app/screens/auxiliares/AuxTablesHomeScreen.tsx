@@ -5,13 +5,14 @@ import { Ionicons } from '@expo/vector-icons';
 import { Header } from '../../components/layout/Header';
 import { panelStyles } from '../../components/panels/panelStyles';
 import { colors } from '../../theme/colors';
+import { AuxEntity } from '../../services/auxiliaresApi';
 
 type Props = {
   navigation: any;
 };
 
 export const AuxTablesHomeScreen: React.FC<Props> = ({ navigation }) => {
-  const goTo = (auxType: string) => {
+  const goTo = (auxType: AuxEntity | 'proveedor') => {
     navigation.navigate('AuxEntityList', {
       auxType,
       origin: 'config', // venimos desde menú de configuración
@@ -29,8 +30,6 @@ export const AuxTablesHomeScreen: React.FC<Props> = ({ navigation }) => {
       <View style={panelStyles.screen}>
         <ScrollView contentContainerStyle={panelStyles.scrollContent}>
           <View style={panelStyles.section}>
-
-            <View style={panelStyles.section}>
             <Text style={panelStyles.sectionTitle}>Alquiler</Text>
 
             <AuxMenuItem
@@ -41,6 +40,7 @@ export const AuxTablesHomeScreen: React.FC<Props> = ({ navigation }) => {
             />
           </View>
 
+          <View style={panelStyles.section}>
             <Text style={panelStyles.sectionTitle}>Cuentas</Text>
 
             <AuxMenuItem
@@ -77,7 +77,7 @@ export const AuxTablesHomeScreen: React.FC<Props> = ({ navigation }) => {
           </View>
 
           <View style={panelStyles.section}>
-            <Text style={panelStyles.sectionTitle}>Proveedores e ingresos</Text>
+            <Text style={panelStyles.sectionTitle}>Proveedores</Text>
 
             <AuxMenuItem
               label="Ramas de proveedores"
@@ -92,10 +92,21 @@ export const AuxTablesHomeScreen: React.FC<Props> = ({ navigation }) => {
               icon="storefront-outline"
               onPress={() => goTo('proveedor')}
             />
+          </View>
+
+          <View style={panelStyles.section}>
+            <Text style={panelStyles.sectionTitle}>Ingresos</Text>
+
+            <AuxMenuItem
+              label="Ramas de ingreso"
+              subtitle="Agrupa los ingresos por rama."
+              icon="git-branch-outline"
+              onPress={() => goTo('tipo_ramas_ingreso')}
+            />
 
             <AuxMenuItem
               label="Tipos de ingreso"
-              subtitle="Salario, bonus, otros ingresos."
+              subtitle="Nómina, desempleo, viviendas, bizum..."
               icon="cash-outline"
               onPress={() => goTo('tipo_ingreso')}
             />

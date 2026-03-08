@@ -1,14 +1,16 @@
 # backend/app/schemas/ramas.py
 
 """
-Schemas Pydantic para las RAMAS de GapptoMobile v3:
+Schemas Pydantic para las RAMAS de GapptoMobile v3.
 
+Incluye:
+- TipoRamasIngreso
 - TipoRamasGasto
 - TipoRamasProveedores
 
 Reglas:
-- El nombre SIEMPRE se tratará en MAYÚSCULAS en la lógica del router.
-- Los IDs se generan en el backend (no los envía el cliente).
+- El nombre SIEMPRE se tratará en MAYÚSCULAS en la lógica del router/service.
+- Los IDs se generan en el backend, no los envía el cliente.
 """
 
 from __future__ import annotations
@@ -19,6 +21,48 @@ from pydantic import BaseModel, ConfigDict, Field
 
 
 # ==========================
+# TipoRamasIngreso
+# ==========================
+
+class TipoRamaIngresoBase(BaseModel):
+    """
+    Campos base de una rama de ingreso.
+
+    Ejemplos:
+    - LABORAL
+    - FINANCIACION
+    - VIVIENDAS
+    - SUMINISTRO
+    - OTROS
+    """
+    nombre: str = Field(..., description="Nombre de la rama de ingreso.")
+
+
+class TipoRamaIngresoCreate(TipoRamaIngresoBase):
+    """
+    Payload de creación de rama de ingreso.
+    El ID se genera en el backend.
+    """
+    pass
+
+
+class TipoRamaIngresoUpdate(BaseModel):
+    """
+    Payload de actualización de rama de ingreso.
+    """
+    nombre: Optional[str] = Field(None, description="Nuevo nombre de la rama de ingreso.")
+
+
+class TipoRamaIngresoRead(TipoRamaIngresoBase):
+    """
+    Schema de salida para rama de ingreso.
+    """
+    id: str
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+# ==========================
 # TipoRamasGasto
 # ==========================
 
@@ -26,7 +70,7 @@ class TipoRamaGastoBase(BaseModel):
     """
     Campos base de una rama de gasto.
 
-    Ejemplos de nombre:
+    Ejemplos:
     - SUMINISTROS
     - FINANCIACIONES
     - SEGUROS
@@ -96,3 +140,19 @@ class TipoRamaProveedorRead(TipoRamaProveedorBase):
     id: str
 
     model_config = ConfigDict(from_attributes=True)
+
+
+__all__ = [
+    "TipoRamaIngresoBase",
+    "TipoRamaIngresoCreate",
+    "TipoRamaIngresoUpdate",
+    "TipoRamaIngresoRead",
+    "TipoRamaGastoBase",
+    "TipoRamaGastoCreate",
+    "TipoRamaGastoUpdate",
+    "TipoRamaGastoRead",
+    "TipoRamaProveedorBase",
+    "TipoRamaProveedorCreate",
+    "TipoRamaProveedorUpdate",
+    "TipoRamaProveedorRead",
+]

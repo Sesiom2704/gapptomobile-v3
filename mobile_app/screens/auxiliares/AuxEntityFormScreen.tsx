@@ -3,6 +3,11 @@
  *
  * Objetivo:
  *   - Rama proveedor, Localidad, Comunidad/Región y País usan InlineSearchSelect.
+ *   - Soporta creación/edición de auxiliares genéricos:
+ *       * tipo_gasto
+ *       * tipo_ingreso
+ *       * tipo_ramas_ingreso
+ *       * otros auxiliares simples
  *   - Fix UX:
  *       1) Si se crea proveedor desde cotidianos con rama preseleccionada (ramaBloqueada),
  *          el selector NO debe mostrar todo el listado: solo la rama fijada.
@@ -11,6 +16,7 @@
  *
  * Nota backend:
  *   - Backend proveedores NO acepta localidad_id: se envían TEXTOS localidad/comunidad/pais.
+ *   - Para tipo_ingreso ahora se requiere rama_id.
  */
 
 import React, { useEffect, useMemo, useState } from 'react';
@@ -74,9 +80,10 @@ type DirtySnapshot = {
   comunidad: string;
   pais: string;
 
-  // aux (ej: tipo_gasto)
+  // aux
   ramaGastoId: string;
   segmentoGastoId: string;
+  ramaIngresoId: string;
 };
 
 type SimpleAuxItem = { id: string; nombre: string; [k: string]: any };
@@ -94,6 +101,8 @@ export const AuxEntityFormScreen: React.FC<Props> = ({ navigation, route }) => {
 
   const isProveedor = auxType === 'proveedor';
   const isTipoGasto = auxType === 'tipo_gasto';
+  const isTipoIngreso = auxType === 'tipo_ingreso';
+  const isRamaIngreso = auxType === 'tipo_ramas_ingreso';
 
   const isEditMode = !!(editingProveedor || editingItem);
 
@@ -118,6 +127,13 @@ export const AuxEntityFormScreen: React.FC<Props> = ({ navigation, route }) => {
 
   const [busquedaRamaGasto, setBusquedaRamaGasto] = useState('');
   const [busquedaSegmentoGasto, setBusquedaSegmentoGasto] = useState('');
+
+  // =========================
+  // AUX - TIPO INGRESO
+  // =========================
+  const [ramaIngresoId, setRamaIngresoId] = useState<string | null>(null);
+  const [ramasIngreso, setRamasIngreso] = useState<Array<{ id: string; nombre: string }>>([]);
+  const [busquedaRamaIngreso, setBusquedaRamaIngreso] = useState('');
 
   // =========================
   // PROVEEDOR
@@ -181,22 +197,11 @@ export const AuxEntityFormScreen: React.FC<Props> = ({ navigation, route }) => {
 
   const sendResult = (result: { type: string; item: any; key?: string | null; mode: 'created' | 'updated' }) => {
     const auxResult = {
-      // tipo de entidad creada (ej: 'proveedor', 'tipo_gasto', 'tipo_ingreso', etc.)
       type: result.type,
-
-      // item creado/actualizado
       item: result.item,
-
-      // compat: campo legacy que ya usas
       key: result.key ?? null,
-
-      // ✅ NUEVO: campo “canónico” para que los forms lo detecten de forma consistente
       returnKey: result.key ?? null,
-
-      // ✅ NUEVO: origen (útil para debug / compat)
       origin,
-
-      // creado/actualizado
       mode: result.mode,
     };
 
@@ -217,7 +222,6 @@ export const AuxEntityFormScreen: React.FC<Props> = ({ navigation, route }) => {
           return;
         } catch (e) {
           console.log('[AuxEntityForm][sendResult] dispatch failed, fallback to returnTo', e);
-          // fallback sigue abajo
         }
       }
     }
@@ -233,7 +237,6 @@ export const AuxEntityFormScreen: React.FC<Props> = ({ navigation, route }) => {
       }
     }
   };
-
 
   const sendResultAndClose = (result: { type: string; item: any; key?: string | null; mode: 'created' | 'updated' }) => {
     sendResult(result);
@@ -258,7 +261,6 @@ export const AuxEntityFormScreen: React.FC<Props> = ({ navigation, route }) => {
     if (auxResult?.type === 'localidad' && auxResult?.item) {
       const loc: LocalidadWithContext = auxResult.item;
 
-      // 1) Selección (preselección efectiva)
       setLocalidadId(loc.id);
       setLocalidad(loc.nombre);
 
@@ -271,7 +273,6 @@ export const AuxEntityFormScreen: React.FC<Props> = ({ navigation, route }) => {
       setComunidad(regionNombre);
       setPais(paisNombre);
 
-      // 2) Cerrar modos inline
       setCreatingLocalidad(false);
       setNewLocalidadText('');
       setCreatingRegion(false);
@@ -279,19 +280,16 @@ export const AuxEntityFormScreen: React.FC<Props> = ({ navigation, route }) => {
       setCreatingPais(false);
       setNewPaisText('');
 
-      // 3) Limpiar búsquedas
       setBusquedaLocalidad('');
       setBusquedaRegion('');
       setBusquedaPais('');
 
-      // 4) Importante: asegurar que la localidad exista en options
       setLocalidadOptions((prev) => {
         const exists = prev.some((x) => x.id === loc.id);
         if (exists) return prev;
         return [loc, ...prev].slice(0, 800);
       });
 
-      // 5) Actualizar regiones/países derivados si vienen en el objeto
       buildRegionAndPaisOptionsFromLocalidades([loc]);
     }
   }, [route?.params?.auxResult, isProveedor, navigation]);
@@ -324,35 +322,45 @@ export const AuxEntityFormScreen: React.FC<Props> = ({ navigation, route }) => {
     if (!editingItem) return;
 
     setNombre(editingItem.nombre ?? '');
+
     if (isTipoGasto) {
       setRamaGastoId(editingItem.rama_id ?? null);
       setSegmentoGastoId(editingItem.segmento_id ?? null);
     }
-  }, [isProveedor, editingItem, isTipoGasto]);
+
+    if (isTipoIngreso) {
+      setRamaIngresoId(editingItem.rama_id ?? null);
+    }
+  }, [isProveedor, editingItem, isTipoGasto, isTipoIngreso]);
 
   // =========================
-  // Cargar catálogos para tipo_gasto
+  // Cargar catálogos para tipo_gasto / tipo_ingreso
   // =========================
   useEffect(() => {
     const loadCatalogs = async () => {
-      if (!isTipoGasto) return;
-
       try {
-        const [rg, sg] = await Promise.all([
-          listAux<{ id: string; nombre: string }>('tipo_ramas_gasto'),
-          listAux<{ id: string; nombre: string }>('tipo_segmento_gasto'),
-        ]);
+        if (isTipoGasto) {
+          const [rg, sg] = await Promise.all([
+            listAux<{ id: string; nombre: string }>('tipo_ramas_gasto'),
+            listAux<{ id: string; nombre: string }>('tipo_segmento_gasto'),
+          ]);
 
-        setRamasGasto(rg ?? []);
-        setSegmentosGasto(sg ?? []);
+          setRamasGasto(rg ?? []);
+          setSegmentosGasto(sg ?? []);
+        }
+
+        if (isTipoIngreso) {
+          const ri = await listAux<{ id: string; nombre: string }>('tipo_ramas_ingreso');
+          setRamasIngreso(ri ?? []);
+        }
       } catch (e) {
-        console.error('[AuxEntityForm] Error cargando ramas/segmentos gasto', e);
-        Alert.alert('Error', 'No se han podido cargar ramas/segmentos de gasto.');
+        console.error('[AuxEntityForm] Error cargando catálogos auxiliares', e);
+        Alert.alert('Error', 'No se han podido cargar los catálogos necesarios.');
       }
     };
 
     void loadCatalogs();
-  }, [isTipoGasto]);
+  }, [isTipoGasto, isTipoIngreso]);
 
   // =========================
   // Precargar ramas proveedor
@@ -478,10 +486,8 @@ export const AuxEntityFormScreen: React.FC<Props> = ({ navigation, route }) => {
     if (!isProveedor) return;
     if (!ramaId) return;
 
-    // En rama bloqueada, mantenemos UX limpia (sin query).
     if (ramaBloqueada && busquedaRamaProveedor !== '') setBusquedaRamaProveedor('');
 
-    // Si falta ramaNombre, lo resolvemos al cargar catálogo.
     if (ramaNombre) return;
 
     const found = ramaOptions.find((r) => r.id === ramaId);
@@ -490,7 +496,6 @@ export const AuxEntityFormScreen: React.FC<Props> = ({ navigation, route }) => {
       return;
     }
 
-    // Si aún no hay options, intentamos cargarlas y se resolverá al actualizar ramaOptions.
     void ensureRamasProveedorLoaded();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isProveedor, ramaId, ramaNombre, ramaOptions, ramaBloqueada]);
@@ -499,7 +504,6 @@ export const AuxEntityFormScreen: React.FC<Props> = ({ navigation, route }) => {
   // Filtrados (InlineSearchSelect)
   // =========================
   const ramasProveedorFiltradas = useMemo(() => {
-    // UX FIX: cuando rama está bloqueada, no mostramos el listado completo.
     if (ramaBloqueada && ramaId) {
       return ramaOptions.filter((r) => r.id === ramaId);
     }
@@ -540,6 +544,12 @@ export const AuxEntityFormScreen: React.FC<Props> = ({ navigation, route }) => {
     if (!term) return segmentosGasto;
     return segmentosGasto.filter((s) => (s.nombre ?? '').toLowerCase().includes(term));
   }, [segmentosGasto, busquedaSegmentoGasto]);
+
+  const ramasIngresoFiltradas = useMemo(() => {
+    const term = busquedaRamaIngreso.trim().toLowerCase();
+    if (!term) return ramasIngreso;
+    return ramasIngreso.filter((r) => (r.nombre ?? '').toLowerCase().includes(term));
+  }, [ramasIngreso, busquedaRamaIngreso]);
 
   // =========================
   // Clears / selects
@@ -806,6 +816,14 @@ export const AuxEntityFormScreen: React.FC<Props> = ({ navigation, route }) => {
         payload = { nombre: nombreFinal, rama_id: ramaGastoId, segmento_id: segmentoGastoId };
       }
 
+      if (isTipoIngreso) {
+        if (!ramaIngresoId) {
+          Alert.alert('Campo requerido', 'Debes seleccionar una rama de ingreso.');
+          return;
+        }
+        payload = { nombre: nombreFinal, rama_id: ramaIngresoId };
+      }
+
       let result: any;
       if (isEditMode && editingItem?.id) {
         result = await updateAux(entity, editingItem.id, payload);
@@ -821,6 +839,11 @@ export const AuxEntityFormScreen: React.FC<Props> = ({ navigation, route }) => {
 
       if (status === 400 && typeof detail === 'string') {
         Alert.alert('No se ha podido guardar', detail);
+        return;
+      }
+
+      if (status === 422 && typeof detail === 'string') {
+        Alert.alert('Datos inválidos', detail);
         return;
       }
 
@@ -846,11 +869,9 @@ export const AuxEntityFormScreen: React.FC<Props> = ({ navigation, route }) => {
     }
 
     try {
-      // Si el usuario ha escrito algo para localidad (o está en modo creación), intentamos materializarla
       const hasLocalidadText = (creatingLocalidad ? newLocalidadText : localidad).trim().length > 0;
       const finalLocalidadId = hasLocalidadText ? await ensureLocalidadCreatedIfNeeded() : null;
 
-      // Backend proveedores acepta TEXTOS, no localidad_id:
       const payloadForBackend = {
         nombre: nombreFinal,
         rama_id: ramaId,
@@ -868,7 +889,7 @@ export const AuxEntityFormScreen: React.FC<Props> = ({ navigation, route }) => {
       const creado = await createProveedorFromAuxForm({
         nombre: nombreFinal,
         ramaId,
-        localidadId: finalLocalidadId, // se mantiene por compatibilidad, pero el helper NO lo envía
+        localidadId: finalLocalidadId,
         localidadTexto: payloadForBackend.localidad,
         comunidadTexto: payloadForBackend.comunidad,
         paisTexto: payloadForBackend.pais,
@@ -957,10 +978,18 @@ export const AuxEntityFormScreen: React.FC<Props> = ({ navigation, route }) => {
       ? isEditMode
         ? 'Editar proveedor'
         : 'Nuevo proveedor'
-      : isTipoGasto
+      : auxType === 'tipo_gasto'
       ? isEditMode
         ? 'Editar tipo de gasto'
         : 'Nuevo tipo de gasto'
+      : auxType === 'tipo_ingreso'
+      ? isEditMode
+        ? 'Editar tipo de ingreso'
+        : 'Nuevo tipo de ingreso'
+      : auxType === 'tipo_ramas_ingreso'
+      ? isEditMode
+        ? 'Editar rama de ingreso'
+        : 'Nueva rama de ingreso'
       : isEditMode
       ? 'Editar registro'
       : 'Nuevo registro';
@@ -983,11 +1012,10 @@ export const AuxEntityFormScreen: React.FC<Props> = ({ navigation, route }) => {
 
           ramaGastoId: '',
           segmentoGastoId: '',
+          ramaIngresoId: '',
         };
       }
 
-      // Nuevo proveedor:
-      // Si rama viene preseleccionada/bloqueada desde cotidianos, NO lo contamos como "cambio" por sí solo.
       return {
         mode: 'proveedor',
         nombre: '',
@@ -998,10 +1026,10 @@ export const AuxEntityFormScreen: React.FC<Props> = ({ navigation, route }) => {
 
         ramaGastoId: '',
         segmentoGastoId: '',
+        ramaIngresoId: '',
       };
     }
 
-    // Aux genérico (tipo_gasto u otros)
     if (editingItem) {
       return {
         mode: 'aux',
@@ -1014,6 +1042,7 @@ export const AuxEntityFormScreen: React.FC<Props> = ({ navigation, route }) => {
 
         ramaGastoId: normalize((editingItem as any).rama_id),
         segmentoGastoId: normalize((editingItem as any).segmento_id),
+        ramaIngresoId: normalize((editingItem as any).rama_id),
       };
     }
 
@@ -1028,6 +1057,7 @@ export const AuxEntityFormScreen: React.FC<Props> = ({ navigation, route }) => {
 
       ramaGastoId: '',
       segmentoGastoId: '',
+      ramaIngresoId: '',
     };
   }, [isProveedor, editingProveedor, editingItem, ramaBloqueada, ramaId]);
 
@@ -1054,12 +1084,14 @@ export const AuxEntityFormScreen: React.FC<Props> = ({ navigation, route }) => {
       nombre: normalize(nombre),
       ramaGastoId: normalize(ramaGastoId),
       segmentoGastoId: normalize(segmentoGastoId),
+      ramaIngresoId: normalize(ramaIngresoId),
     };
 
     return (
       current.nombre !== initialSnapshot.nombre ||
       current.ramaGastoId !== initialSnapshot.ramaGastoId ||
-      current.segmentoGastoId !== initialSnapshot.segmentoGastoId
+      current.segmentoGastoId !== initialSnapshot.segmentoGastoId ||
+      current.ramaIngresoId !== initialSnapshot.ramaIngresoId
     );
   }, [
     isProveedor,
@@ -1077,9 +1109,9 @@ export const AuxEntityFormScreen: React.FC<Props> = ({ navigation, route }) => {
     newPaisText,
     ramaGastoId,
     segmentoGastoId,
+    ramaIngresoId,
     initialSnapshot,
   ]);
-
 
   const handleBackPress = () => {
     if (!isDirty) {
@@ -1107,6 +1139,11 @@ export const AuxEntityFormScreen: React.FC<Props> = ({ navigation, route }) => {
     if (ramaNombre) return ({ id: ramaId, nombre: ramaNombre } as any);
     return null;
   }, [ramaId, ramaNombre, ramaOptions]);
+
+  const selectedRamaIngreso = useMemo(() => {
+    if (!ramaIngresoId) return null;
+    return ramasIngreso.find((r) => r.id === ramaIngresoId) ?? null;
+  }, [ramaIngresoId, ramasIngreso]);
 
   return (
     <FormScreen
@@ -1142,7 +1179,15 @@ export const AuxEntityFormScreen: React.FC<Props> = ({ navigation, route }) => {
       </FormSection>
 
       {!isProveedor ? (
-        <FormSection title={isTipoGasto ? 'Configuración tipo de gasto' : 'Configuración'}>
+        <FormSection
+          title={
+            isTipoGasto
+              ? 'Configuración tipo de gasto'
+              : isTipoIngreso
+              ? 'Configuración tipo de ingreso'
+              : 'Configuración'
+          }
+        >
           {isTipoGasto ? (
             <>
               <View style={styles.field}>
@@ -1191,6 +1236,29 @@ export const AuxEntityFormScreen: React.FC<Props> = ({ navigation, route }) => {
                 />
               </View>
             </>
+          ) : isTipoIngreso ? (
+            <View style={styles.field}>
+              <InlineSearchSelect<{ id: string; nombre: string }>
+                label="Rama de ingreso"
+                onAddPress={NOOP}
+                addAccessibilityLabel="Añadir (no aplica)"
+                disabled={false}
+                selected={selectedRamaIngreso}
+                selectedLabel={(x) => x.nombre}
+                onClear={() => setRamaIngresoId(null)}
+                query={busquedaRamaIngreso}
+                onChangeQuery={(v) => setBusquedaRamaIngreso(v)}
+                placeholder="Escribe para buscar rama de ingreso"
+                options={ramasIngresoFiltradas}
+                optionKey={(x) => x.id}
+                optionLabel={(x) => x.nombre}
+                onSelect={(x) => {
+                  setRamaIngresoId(x.id);
+                  setBusquedaRamaIngreso('');
+                }}
+                emptyText="No hay ramas de ingreso que coincidan con la búsqueda."
+              />
+            </View>
           ) : (
             <Text style={styles.helperText}>Completa el nombre y guarda.</Text>
           )}
@@ -1209,7 +1277,6 @@ export const AuxEntityFormScreen: React.FC<Props> = ({ navigation, route }) => {
                 onClear={ramaBloqueada ? NOOP : clearRama}
                 query={ramaBloqueada ? '' : busquedaRamaProveedor}
                 onChangeQuery={(v) => {
-                  // Si está bloqueada, no permitimos interacción (ni filtros).
                   if (ramaBloqueada) return;
                   setBusquedaRamaProveedor(v);
                   void ensureRamasProveedorLoaded();

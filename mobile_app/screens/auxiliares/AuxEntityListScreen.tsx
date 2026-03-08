@@ -26,15 +26,17 @@ export const AuxEntityListScreen: React.FC<Props> = ({ navigation, route }) => {
   const [items, setItems] = useState<Array<Proveedor | SimpleAuxItem>>([]);
   const [loading, setLoading] = useState(false);
 
-  // Para resolver nombres en tipo_gasto
+  // Mapas auxiliares para resolver nombres relacionados
   const [ramasGastoMap, setRamasGastoMap] = useState<Record<string, string>>({});
   const [segmentosMap, setSegmentosMap] = useState<Record<string, string>>({});
+  const [ramasIngresoMap, setRamasIngresoMap] = useState<Record<string, string>>({});
 
   const titleByType: Record<string, string> = {
     proveedor: 'Proveedores',
     tipo_gasto: 'Tipos de gasto',
     tipo_segmento_gasto: 'Segmentos de gasto',
     tipo_ramas_gasto: 'Ramas de gasto',
+    tipo_ramas_ingreso: 'Ramas de ingreso',
     tipo_ramas_proveedores: 'Ramas de proveedores',
     tipo_ingreso: 'Tipos de ingreso',
   };
@@ -44,6 +46,7 @@ export const AuxEntityListScreen: React.FC<Props> = ({ navigation, route }) => {
     tipo_gasto: 'Configura las categorías de gasto.',
     tipo_segmento_gasto: 'Segmenta los gastos por tipo.',
     tipo_ramas_gasto: 'Agrupa gastos por rama.',
+    tipo_ramas_ingreso: 'Agrupa ingresos por rama.',
     tipo_ramas_proveedores: 'Agrupa proveedores por rama.',
     tipo_ingreso: 'Configura los tipos de ingreso.',
   };
@@ -57,6 +60,9 @@ export const AuxEntityListScreen: React.FC<Props> = ({ navigation, route }) => {
       if (auxType === 'proveedor') {
         const data = await listProveedores();
         setItems(data);
+        setRamasGastoMap({});
+        setSegmentosMap({});
+        setRamasIngresoMap({});
         return;
       }
 
@@ -64,7 +70,7 @@ export const AuxEntityListScreen: React.FC<Props> = ({ navigation, route }) => {
       const data = await listAux<SimpleAuxItem>(auxType as AuxEntity);
       setItems(data);
 
-      // Si estamos en tipo_gasto, precargamos mapas para pintar nombres en vez de IDs
+      // tipo_gasto: resolver rama + segmento
       if (auxType === 'tipo_gasto') {
         const [ramas, segmentos] = await Promise.all([
           listAux<SimpleAuxItem>('tipo_ramas_gasto'),
@@ -79,15 +85,33 @@ export const AuxEntityListScreen: React.FC<Props> = ({ navigation, route }) => {
 
         setRamasGastoMap(rMap);
         setSegmentosMap(sMap);
-      } else {
+        setRamasIngresoMap({});
+        return;
+      }
+
+      // tipo_ingreso: resolver rama de ingreso
+      if (auxType === 'tipo_ingreso') {
+        const ramasIngreso = await listAux<SimpleAuxItem>('tipo_ramas_ingreso');
+
+        const riMap: Record<string, string> = {};
+        for (const r of ramasIngreso ?? []) riMap[String(r.id)] = String(r.nombre);
+
+        setRamasIngresoMap(riMap);
         setRamasGastoMap({});
         setSegmentosMap({});
+        return;
       }
+
+      // resto: limpiar mapas
+      setRamasGastoMap({});
+      setSegmentosMap({});
+      setRamasIngresoMap({});
     } catch (err) {
       console.error('[AuxEntityList] Error cargando', auxType, err);
       setItems([]);
       setRamasGastoMap({});
       setSegmentosMap({});
+      setRamasIngresoMap({});
     } finally {
       setLoading(false);
     }
@@ -105,10 +129,12 @@ export const AuxEntityListScreen: React.FC<Props> = ({ navigation, route }) => {
   }, [navigation, load]);
 
   const filtered = useMemo(() => {
+    const term = search.trim().toLowerCase();
+    if (!term) return items;
+
     return items.filter((item: any) => {
-      const term = search.trim().toLowerCase();
-      if (!term) return true;
-      return String(item?.nombre ?? '').toLowerCase().includes(term);
+      const nombre = String(item?.nombre ?? '').toLowerCase();
+      return nombre.includes(term);
     });
   }, [items, search]);
 
@@ -123,8 +149,8 @@ export const AuxEntityListScreen: React.FC<Props> = ({ navigation, route }) => {
     navigation.navigate('AuxEntityForm', {
       auxType,
       origin,
-      editingItem: item, // genérico
-      editingProveedor: auxType === 'proveedor' ? item : undefined, // compatibilidad
+      editingItem: item,
+      editingProveedor: auxType === 'proveedor' ? item : undefined,
     });
   };
 
@@ -169,7 +195,7 @@ export const AuxEntityListScreen: React.FC<Props> = ({ navigation, route }) => {
 
           {!loading &&
             filtered.map((item: any) => {
-              const ramaName =
+              const ramaGastoName =
                 auxType === 'tipo_gasto' && item?.rama_id
                   ? (ramasGastoMap[String(item.rama_id)] ?? String(item.rama_id))
                   : null;
@@ -177,6 +203,11 @@ export const AuxEntityListScreen: React.FC<Props> = ({ navigation, route }) => {
               const segmentoName =
                 auxType === 'tipo_gasto' && item?.segmento_id
                   ? (segmentosMap[String(item.segmento_id)] ?? String(item.segmento_id))
+                  : null;
+
+              const ramaIngresoName =
+                auxType === 'tipo_ingreso' && item?.rama_id
+                  ? (ramasIngresoMap[String(item.rama_id)] ?? String(item.rama_id))
                   : null;
 
               return (
@@ -202,11 +233,18 @@ export const AuxEntityListScreen: React.FC<Props> = ({ navigation, route }) => {
                       </Text>
                     )}
 
-                    {/* Extras para tipo_gasto (nombres, no IDs) */}
-                    {auxType === 'tipo_gasto' && (ramaName || segmentoName) && (
+                    {/* Extras para tipo_gasto */}
+                    {auxType === 'tipo_gasto' && (ramaGastoName || segmentoName) && (
                       <Text style={panelStyles.menuSubtitle}>
-                        {ramaName ? `Rama: ${ramaName}` : ''}
-                        {segmentoName ? `${ramaName ? ' · ' : ''}Segmento: ${segmentoName}` : ''}
+                        {ramaGastoName ? `Rama: ${ramaGastoName}` : ''}
+                        {segmentoName ? `${ramaGastoName ? ' · ' : ''}Segmento: ${segmentoName}` : ''}
+                      </Text>
+                    )}
+
+                    {/* Extras para tipo_ingreso */}
+                    {auxType === 'tipo_ingreso' && ramaIngresoName && (
+                      <Text style={panelStyles.menuSubtitle}>
+                        Rama: {ramaIngresoName}
                       </Text>
                     )}
                   </View>
@@ -219,6 +257,12 @@ export const AuxEntityListScreen: React.FC<Props> = ({ navigation, route }) => {
                 </TouchableOpacity>
               );
             })}
+
+          {!loading && filtered.length === 0 && (
+            <Text style={{ textAlign: 'center', marginTop: 16, color: colors.textSecondary }}>
+              No hay resultados.
+            </Text>
+          )}
         </ScrollView>
       </View>
     </>

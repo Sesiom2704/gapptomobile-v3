@@ -1,15 +1,13 @@
 /**
  * Archivo: mobile_app/screens/ingresos/IngresoFormScreen.tsx
  *
- * FIX PRINCIPAL (preselección tipo ingreso):
- * - Al volver desde AuxEntityForm con un tipo creado, se marca como seleccionado.
- * - Evita carrera con el reset de foco: usamos skipNextResetRef.
+ * Flujo funcional v3:
+ * - Primero se selecciona la rama de ingreso.
+ * - Después se cargan y muestran solo los tipos asociados a esa rama.
  *
- * Logs clave:
- * - [IngresoForm][AUX] ...  (qué auxResult llega)
- * - [IngresoForm][STATE] setTipoId -> ... reason=...
- * - [IngresoForm][RESET] ... (si se intenta resetear)
- * - [IngresoForm][LOAD] ...  (cuántos tipos y qué tipoId se ve en el load)
+ * FIX principal:
+ * - Al volver desde AuxEntityForm con una rama o un tipo creado, queda preseleccionado.
+ * - Se evita carrera con el reset de foco mediante skipNextResetRef.
  */
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
@@ -42,8 +40,15 @@ import { colors } from '../../theme';
 import { PERIODICIDADES } from '../../constants/finance';
 import { RANGOS_PAGO } from '../../constants/general';
 
-import { fetchTiposIngreso, fetchCuentas, fetchViviendas } from '../../services/utilsApi';
-import { createIngreso, updateIngreso } from '../../services/ingresosApi';
+import { fetchCuentas, fetchViviendas } from '../../services/utilsApi';
+import {
+  createIngreso,
+  updateIngreso,
+  fetchRamasIngreso,
+  fetchTiposIngresoPorRama,
+  type RamaIngreso,
+  type TipoIngresoPorRama,
+} from '../../services/ingresosApi';
 
 import { EuroformatEuro, parseImporte, appendMonthYearSuffix, formatFechaCorta } from '../../utils/format';
 import { useResetFormOnFocus } from '../../utils/formsUtils';
@@ -51,8 +56,7 @@ import { useResetFormOnFocus } from '../../utils/formsUtils';
 // ---- Tipos locales ----
 type IngresoMode = 'gestionable' | 'extraordinario';
 
-type TipoIngreso = { id: string; nombre: string };
-
+type TipoIngreso = { id: string; nombre: string; rama_id?: string | null };
 type Cuenta = {
   id: string;
   nombre?: string;
@@ -91,7 +95,8 @@ type Props = {
 // ===== Debug =====
 const DEBUG_AUX = false;
 
-// Tu returnKey “canónico” para tipo ingreso
+// Return keys “canónicos”
+const RETURN_KEY_RAMA_INGRESO = 'ingresos-rama_ingreso';
 const RETURN_KEY_TIPO_INGRESO = 'ingresos-tipo_ingreso';
 
 // ---- Helpers ----
@@ -113,7 +118,6 @@ function toApiDate(d: Date): string {
 function parseDateString(value: string | null | undefined): Date {
   if (!value) return new Date();
 
-  // YYYY-MM-DD
   const isoParts = value.split('-');
   if (isoParts.length === 3) {
     const [y, m, d] = isoParts;
@@ -125,7 +129,6 @@ function parseDateString(value: string | null | undefined): Date {
     }
   }
 
-  // DD/MM/YYYY
   const esParts = value.split('/');
   if (esParts.length === 3) {
     const [d, m, y] = esParts;
@@ -170,12 +173,20 @@ function normalizePagoUnico(value: string): string {
 }
 
 function normalizeTipoIngreso(raw: any): TipoIngreso {
-  return { id: String(raw?.id ?? ''), nombre: String(raw?.nombre ?? '') };
+  return {
+    id: String(raw?.id ?? ''),
+    nombre: String(raw?.nombre ?? ''),
+    rama_id: raw?.rama_id != null ? String(raw.rama_id) : null,
+  };
 }
 
-/**
- * Extrae el item creado desde auxResult con tolerancia a distintos shapes.
- */
+function normalizeRamaIngreso(raw: any): RamaIngreso {
+  return {
+    id: String(raw?.id ?? ''),
+    nombre: String(raw?.nombre ?? ''),
+  };
+}
+
 function extractAuxItem(res: any): any | null {
   if (!res) return null;
   if (res.item) return res.item;
@@ -187,12 +198,6 @@ function extractAuxItem(res: any): any | null {
   return null;
 }
 
-/**
- * Determina si el auxResult corresponde a tipo_ingreso.
- * Soporta:
- * - returnKey o key
- * - type === 'tipo_ingreso'
- */
 function isAuxTipoIngreso(res: any): boolean {
   if (!res) return false;
 
@@ -202,6 +207,26 @@ function isAuxTipoIngreso(res: any): boolean {
 
   const typeRaw = String(res.type ?? res.auxType ?? '').trim().toLowerCase();
   if (typeRaw === 'tipo_ingreso' || typeRaw === 'tipoingreso' || typeRaw === 'tipo-ingreso') return true;
+
+  return false;
+}
+
+function isAuxRamaIngreso(res: any): boolean {
+  if (!res) return false;
+
+  const rk = String(res.returnKey ?? '').trim();
+  const k = String(res.key ?? '').trim();
+  if (rk === RETURN_KEY_RAMA_INGRESO || k === RETURN_KEY_RAMA_INGRESO) return true;
+
+  const typeRaw = String(res.type ?? res.auxType ?? '').trim().toLowerCase();
+  if (
+    typeRaw === 'tipo_ramas_ingreso' ||
+    typeRaw === 'tiporamasingreso' ||
+    typeRaw === 'tipo-rama-ingreso' ||
+    typeRaw === 'rama_ingreso'
+  ) {
+    return true;
+  }
 
   return false;
 }
@@ -227,6 +252,7 @@ const IngresoFormScreen: React.FC<Props> = ({ navigation, route }) => {
   const fromDiaADia: boolean = route?.params?.fromDiaADia === true;
 
   // Catálogos
+  const [ramas, setRamas] = useState<RamaIngreso[]>([]);
   const [tipos, setTipos] = useState<TipoIngreso[]>([]);
   const [cuentas, setCuentas] = useState<Cuenta[]>([]);
   const [viviendas, setViviendas] = useState<Vivienda[]>([]);
@@ -234,7 +260,17 @@ const IngresoFormScreen: React.FC<Props> = ({ navigation, route }) => {
   // Form state
   const [concepto, setConcepto] = useState<string>(ingresoSource?.concepto ?? '');
 
-  // ✅ tipoId con setter instrumentado (para detectar quién lo pisa)
+  const [ramaIdState, _setRamaId] = useState<string | null>(
+    ingresoSource?.rama_id != null ? String(ingresoSource.rama_id) : null
+  );
+
+  const setRamaId = useCallback((v: string | null, reason: string) => {
+    if (DEBUG_AUX) console.log('[IngresoForm][STATE] setRamaId ->', v, 'reason=', reason);
+    _setRamaId(v != null ? String(v) : null);
+  }, []);
+
+  const ramaId = ramaIdState;
+
   const [tipoIdState, _setTipoId] = useState<string | null>(
     ingresoSource?.tipo_id != null ? String(ingresoSource.tipo_id) : null
   );
@@ -287,13 +323,11 @@ const IngresoFormScreen: React.FC<Props> = ({ navigation, route }) => {
   const [saving, setSaving] = useState<boolean>(false);
   const [refreshing, setRefreshing] = useState<boolean>(false);
 
-  // ✅ Anti-carrera: tipo pendiente a aplicar cuando el catálogo lo contenga
+  // Anti-carrera
+  const pendingRamaIdRef = useRef<string | null>(null);
   const pendingTipoIdRef = useRef<string | null>(null);
-
-  // ✅ Anti-reset al volver de Aux (este es el FIX clave)
   const skipNextResetRef = useRef<boolean>(false);
 
-  // Navegación atrás “normal”
   const navigateBack = useCallback(() => {
     if (returnToTab) {
       if (returnToScreen) navigation.navigate(returnToTab, { screen: returnToScreen, params: returnToParams });
@@ -308,11 +342,11 @@ const IngresoFormScreen: React.FC<Props> = ({ navigation, route }) => {
     navigation.goBack();
   }, [navigation, returnToTab, returnToScreen, returnToParams, fromHome, fromDiaADia]);
 
-  // Reset para “Alta nueva”
   const resetFormToNew = useCallback(() => {
     const hoy = toApiDate(new Date());
 
     setConcepto('');
+    setRamaId(null, 'resetFormToNew');
     setTipoId(null, 'resetFormToNew');
 
     setCuentaId(null);
@@ -332,18 +366,15 @@ const IngresoFormScreen: React.FC<Props> = ({ navigation, route }) => {
 
     setShowAdvanced(false);
 
+    pendingRamaIdRef.current = null;
     pendingTipoIdRef.current = null;
-  }, [mode, setTipoId]);
+    setTipos([]);
+  }, [mode, setRamaId, setTipoId]);
 
-  /**
-   * Hook de reset al foco (pero con bypass cuando venimos de Aux).
-   * IMPORTANTE:
-   * - aunque limpies auxResult (setParams), este ref evita que el reset ocurra en el mismo foco.
-   */
   const safeResetOnFocus = useCallback(() => {
     if (skipNextResetRef.current) {
       if (DEBUG_AUX) console.log('[IngresoForm][RESET] skip reset: skipNextResetRef=true');
-      skipNextResetRef.current = false; // consumimos el “token”
+      skipNextResetRef.current = false;
       return;
     }
 
@@ -364,7 +395,6 @@ const IngresoFormScreen: React.FC<Props> = ({ navigation, route }) => {
     onReset: safeResetOnFocus,
   });
 
-  // Duplicado
   useEffect(() => {
     if (!duplicate || !ingresoSource) return;
 
@@ -383,33 +413,94 @@ const IngresoFormScreen: React.FC<Props> = ({ navigation, route }) => {
     }
   }, [duplicate, ingresoSource]);
 
-  // Carga catálogos (sin depender de tipoId para evitar recargas innecesarias)
+  const loadTiposForRama = useCallback(
+    async (targetRamaId: string | null, options?: { preserveTipoId?: string | null }) => {
+      if (!targetRamaId) {
+        setTipos([]);
+        return;
+      }
+
+      try {
+        const tiposRes = await fetchTiposIngresoPorRama(targetRamaId);
+        const tiposNorm = (tiposRes ?? []).map((t: TipoIngresoPorRama) => normalizeTipoIngreso(t));
+        setTipos(tiposNorm);
+
+        const preserveTipoId = options?.preserveTipoId ?? null;
+        if (preserveTipoId) {
+          const exists = tiposNorm.some((t) => String(t.id) === String(preserveTipoId));
+          if (!exists) {
+            setTipoId(null, 'loadTiposForRama-preserveTipoNotFound');
+          }
+        }
+
+        if (DEBUG_AUX) {
+          console.log(
+            '[IngresoForm][LOAD] tiposByRama=',
+            tiposNorm.length,
+            'ramaId=',
+            targetRamaId,
+            'tipoId=',
+            tipoId
+          );
+        }
+      } catch (err) {
+        console.error('[IngresoForm] Error cargando tipos por rama', err);
+        Alert.alert('Error', 'No se pudieron cargar los tipos de ingreso de esa rama.');
+      }
+    },
+    [setTipoId, tipoId]
+  );
+
   const loadData = useCallback(async () => {
     try {
       setLoading(true);
-      const [tiposRes, cuentasRes, viviendasRes] = await Promise.all([
-        fetchTiposIngreso(),
+
+      const [ramasRes, cuentasRes, viviendasRes] = await Promise.all([
+        fetchRamasIngreso(),
         fetchCuentas(),
         fetchViviendas(),
       ]);
 
-      const tiposNorm = (tiposRes ?? []).map((t: any) => normalizeTipoIngreso(t));
-      setTipos(tiposNorm);
+      const ramasNorm = (ramasRes ?? []).map((r: any) => normalizeRamaIngreso(r));
+      setRamas(ramasNorm);
       setCuentas(cuentasRes || []);
       setViviendas(viviendasRes || []);
 
+      const initialRamaId =
+        pendingRamaIdRef.current ??
+        (ramaId != null ? String(ramaId) : null) ??
+        (ingresoSource?.rama_id != null ? String(ingresoSource.rama_id) : null);
+
+      if (initialRamaId) {
+        await loadTiposForRama(initialRamaId, {
+          preserveTipoId: pendingTipoIdRef.current ?? tipoId ?? ingresoSource?.tipo_id ?? null,
+        });
+      } else {
+        setTipos([]);
+      }
+
       if (DEBUG_AUX) {
-        console.log('[IngresoForm][LOAD] tipos=', tiposNorm.length, 'tipoId=', tipoId);
-        console.log('[IngresoForm][LOAD] pendingTipoIdRef=', pendingTipoIdRef.current);
+        console.log(
+          '[IngresoForm][LOAD] ramas=',
+          ramasNorm.length,
+          'ramaId=',
+          ramaId,
+          'tipoId=',
+          tipoId,
+          'pendingRamaId=',
+          pendingRamaIdRef.current,
+          'pendingTipoId=',
+          pendingTipoIdRef.current
+        );
       }
     } catch (err) {
       console.error('[IngresoForm] Error cargando catálogos', err);
-      Alert.alert('Error', 'No se pudieron cargar tipos, cuentas o viviendas. Inténtalo de nuevo.');
+      Alert.alert('Error', 'No se pudieron cargar ramas, tipos, cuentas o viviendas. Inténtalo de nuevo.');
     } finally {
       setLoading(false);
       setRefreshing(false);
     }
-  }, [tipoId]);
+  }, [ingresoSource?.rama_id, ingresoSource?.tipo_id, loadTiposForRama, ramaId, tipoId]);
 
   useEffect(() => {
     void loadData();
@@ -420,23 +511,39 @@ const IngresoFormScreen: React.FC<Props> = ({ navigation, route }) => {
     void loadData();
   };
 
-  // ✅ aplica pending cuando el catálogo ya contiene el tipo
+  // aplica pending de rama cuando catálogo lo contiene
+  useEffect(() => {
+    const pending = pendingRamaIdRef.current;
+    if (!pending) return;
+
+    const exists = ramas.some((r) => String(r.id) === String(pending));
+    if (!exists) {
+      if (DEBUG_AUX) console.log('[IngresoForm][PENDING] pending rama not in ramas yet:', pending);
+      return;
+    }
+
+    if (DEBUG_AUX) console.log('[IngresoForm][PENDING] applying pending ramaId=', pending);
+    setRamaId(pending, 'applyPendingRamaAfterRamasLoaded');
+    pendingRamaIdRef.current = null;
+  }, [ramas, setRamaId]);
+
+  // aplica pending de tipo cuando el catálogo ya lo contiene
   useEffect(() => {
     const pending = pendingTipoIdRef.current;
     if (!pending) return;
 
     const exists = tipos.some((t) => String(t.id) === String(pending));
     if (!exists) {
-      if (DEBUG_AUX) console.log('[IngresoForm][PENDING] pending not in tipos yet:', pending);
+      if (DEBUG_AUX) console.log('[IngresoForm][PENDING] pending tipo not in tipos yet:', pending);
       return;
     }
 
     if (DEBUG_AUX) console.log('[IngresoForm][PENDING] applying pending tipoId=', pending);
-    setTipoId(pending, 'applyPendingAfterTiposLoaded');
+    setTipoId(pending, 'applyPendingTipoAfterTiposLoaded');
     pendingTipoIdRef.current = null;
   }, [tipos, setTipoId]);
 
-  // Retorno desde AuxEntityForm (tipo ingreso)
+  // Retorno desde AuxEntityForm (rama ingreso / tipo ingreso)
   useFocusEffect(
     useCallback(() => {
       let alive = true;
@@ -452,56 +559,76 @@ const IngresoFormScreen: React.FC<Props> = ({ navigation, route }) => {
         if (!res) return;
 
         try {
+          const isRama = isAuxRamaIngreso(res);
           const isTipo = isAuxTipoIngreso(res);
-          if (DEBUG_AUX) console.log('[IngresoForm][AUX] isAuxTipoIngreso=', isTipo);
 
-          if (!isTipo) return;
+          if (DEBUG_AUX) {
+            console.log('[IngresoForm][AUX] isAuxRamaIngreso=', isRama);
+            console.log('[IngresoForm][AUX] isAuxTipoIngreso=', isTipo);
+          }
+
+          if (!isRama && !isTipo) return;
 
           const item = extractAuxItem(res);
           if (DEBUG_AUX) console.log('[IngresoForm][AUX] extracted item=', safeJson(item ?? null));
 
-          const newId = item?.id != null ? String(item.id) : null;
-          if (!newId) {
-            console.log('[IngresoForm][AUX] WARNING: item has no id -> cannot select');
+          if (!item?.id) return;
+
+          skipNextResetRef.current = true;
+
+          if (isRama) {
+            const newRama = normalizeRamaIngreso(item);
+            const newRamaId = String(newRama.id);
+
+            pendingRamaIdRef.current = newRamaId;
+            setRamaId(newRamaId, 'auxRamaImmediate');
+
+            setRamas((prev) => {
+              const map = new Map<string, RamaIngreso>();
+              map.set(newRamaId, newRama);
+              for (const r of prev) map.set(String(r.id), r);
+              return Array.from(map.values());
+            });
+
+            setTipoId(null, 'auxRamaResetTipo');
+            pendingTipoIdRef.current = null;
+
+            await loadTiposForRama(newRamaId);
+            if (!alive) return;
+
             return;
           }
 
-          // ✅ MUY IMPORTANTE:
-          // Evita que el reset del mismo foco te borre la selección.
-          skipNextResetRef.current = true;
+          if (isTipo) {
+            const newTipo = normalizeTipoIngreso(item);
+            const newTipoId = String(newTipo.id);
+            const newTipoRamaId =
+              newTipo.rama_id != null ? String(newTipo.rama_id) : null;
 
-          // guardamos pending por si el catálogo todavía no lo contiene
-          pendingTipoIdRef.current = newId;
-
-          // preselección inmediata
-          setTipoId(newId, 'auxReturnImmediate');
-
-          // recargamos catálogo y mergeamos para asegurar que la pill existe
-          const tiposRes = await fetchTiposIngreso();
-          if (!alive) return;
-
-          const nuevo = normalizeTipoIngreso(item);
-          const merged = (() => {
-            const map = new Map<string, TipoIngreso>();
-            map.set(String(nuevo.id), nuevo);
-            for (const raw of tiposRes ?? []) {
-              const t = normalizeTipoIngreso(raw);
-              if (t.id) map.set(String(t.id), t);
+            if (!newTipoRamaId) {
+              console.warn('[IngresoForm][AUX] El tipo creado no trae rama_id; no se puede preseleccionar correctamente.');
+              return;
             }
-            return Array.from(map.values());
-          })();
 
-          if (DEBUG_AUX) {
-            console.log('[IngresoForm][AUX] merged tipos count=', merged.length);
-            console.log('[IngresoForm][AUX] ensuring selection tipoId=', newId);
+            pendingRamaIdRef.current = newTipoRamaId;
+            pendingTipoIdRef.current = newTipoId;
+
+            setRamaId(newTipoRamaId, 'auxTipoSetRama');
+            setTipoId(newTipoId, 'auxTipoImmediate');
+
+            await loadTiposForRama(newTipoRamaId);
+            if (!alive) return;
+
+            setTipos((prev) => {
+              const map = new Map<string, TipoIngreso>();
+              for (const t of prev) map.set(String(t.id), t);
+              map.set(newTipoId, newTipo);
+              return Array.from(map.values());
+            });
+
+            setTipoId(newTipoId, 'auxTipoAfterMerge');
           }
-
-          setTipos(merged);
-
-          // reafirmación post-merge
-          setTipoId(newId, 'auxReturnAfterMerge');
         } finally {
-          // Limpia auxResult para no reprocesar, pero el reset ya queda bloqueado por skipNextResetRef
           navigation.setParams({ auxResult: undefined });
           if (DEBUG_AUX) console.log('[IngresoForm][AUX] cleared auxResult');
         }
@@ -510,12 +637,13 @@ const IngresoFormScreen: React.FC<Props> = ({ navigation, route }) => {
       return () => {
         alive = false;
       };
-    }, [route?.params?.auxResult, navigation, setTipoId])
+    }, [route?.params?.auxResult, navigation, loadTiposForRama, setRamaId, setTipoId])
   );
 
   // Confirmación al salir si dirty
   type Snapshot = {
     concepto: string;
+    ramaId: string | null;
     tipoId: string | null;
     cuentaId: string | null;
     viviendaId: string | null;
@@ -531,6 +659,7 @@ const IngresoFormScreen: React.FC<Props> = ({ navigation, route }) => {
   const getSnapshot = useCallback((): Snapshot => {
     return {
       concepto,
+      ramaId,
       tipoId,
       cuentaId,
       viviendaId,
@@ -542,7 +671,7 @@ const IngresoFormScreen: React.FC<Props> = ({ navigation, route }) => {
       cobrado,
       kpi,
     };
-  }, [concepto, tipoId, cuentaId, viviendaId, importe, fechaInicio, rangoCobro, periodicidad, activo, cobrado, kpi]);
+  }, [concepto, ramaId, tipoId, cuentaId, viviendaId, importe, fechaInicio, rangoCobro, periodicidad, activo, cobrado, kpi]);
 
   const baselineRef = useRef<Snapshot | null>(null);
 
@@ -623,19 +752,50 @@ const IngresoFormScreen: React.FC<Props> = ({ navigation, route }) => {
     setRangoCobro(getRangoFromDateString(apiDate));
   };
 
+  const ramaSeleccionada = ramas.find((r) => String(r.id) === String(ramaId)) || null;
   const tipoSeleccionado = tipos.find((t) => String(t.id) === String(tipoId)) || null;
   const isTipoVivienda = !!tipoSeleccionado && tipoSeleccionado.nombre.toUpperCase().includes('VIVIENDA');
 
-  // Navegar a AuxEntityForm (crear tipo ingreso)
+  const handleSelectRama = async (newRamaId: string) => {
+    if (readOnly) return;
+
+    const sameRama = String(ramaId ?? '') === String(newRamaId ?? '');
+    if (sameRama) return;
+
+    setRamaId(String(newRamaId), 'manualRamaSelect');
+    setTipoId(null, 'manualRamaSelect-resetTipo');
+    pendingTipoIdRef.current = null;
+
+    await loadTiposForRama(String(newRamaId));
+  };
+
+  const handleAddRamaIngreso = () => {
+    if (readOnly) return;
+
+    navigation.navigate('AuxEntityForm', {
+      auxType: 'tipo_ramas_ingreso',
+      origin: 'ingresos',
+      returnKey: RETURN_KEY_RAMA_INGRESO,
+      returnRouteKey: route.key,
+    });
+  };
+
   const handleAddTipoIngreso = () => {
     if (readOnly) return;
+
+    if (!ramaId) {
+      Alert.alert('Campo obligatorio', 'Primero debes seleccionar una rama de ingreso.');
+      return;
+    }
 
     if (DEBUG_AUX) {
       console.log(
         '[IngresoForm][NAV] AuxEntityForm auxType=tipo_ingreso returnKey=',
         RETURN_KEY_TIPO_INGRESO,
         'returnRouteKey=',
-        route.key
+        route.key,
+        'defaultRamaId=',
+        ramaId
       );
     }
 
@@ -644,15 +804,19 @@ const IngresoFormScreen: React.FC<Props> = ({ navigation, route }) => {
       origin: 'ingresos',
       returnKey: RETURN_KEY_TIPO_INGRESO,
       returnRouteKey: route.key,
+      defaultRamaId: ramaId,
     });
   };
 
-  // Guardar
   const handleSave = async () => {
     if (readOnly) return;
 
     if (!concepto.trim()) {
       Alert.alert('Campo obligatorio', 'El nombre del ingreso es obligatorio.');
+      return;
+    }
+    if (!ramaId) {
+      Alert.alert('Campo obligatorio', 'Selecciona una rama de ingreso.');
       return;
     }
     if (!tipoId) {
@@ -676,6 +840,7 @@ const IngresoFormScreen: React.FC<Props> = ({ navigation, route }) => {
       periodicidad: normalizePagoUnico(periodicidad),
       rango_cobro: (rangoCobro ?? '').trim(),
       fecha_inicio: fechaInicio,
+      rama_id: String(ramaId),
       tipo_id: String(tipoId),
       referencia_vivienda_id: viviendaId,
       cuenta_id: String(cuentaId),
@@ -728,7 +893,6 @@ const IngresoFormScreen: React.FC<Props> = ({ navigation, route }) => {
     );
   }
 
-  // Avanzadas: solo edición (no alta, no duplicado)
   const canShowAdvancedSection = !!ingresoSource && !duplicate;
 
   return (
@@ -757,24 +921,23 @@ const IngresoFormScreen: React.FC<Props> = ({ navigation, route }) => {
 
           <View style={styles.field}>
             <View style={styles.labelRow}>
-              <Text style={styles.label}>Tipo de ingreso</Text>
+              <Text style={styles.label}>Rama de ingreso</Text>
 
               <InlineAddButton
-                onPress={handleAddTipoIngreso}
+                onPress={handleAddRamaIngreso}
                 disabled={readOnly}
-                accessibilityLabel="Crear tipo de ingreso"
+                accessibilityLabel="Crear rama de ingreso"
               />
             </View>
 
             <View style={styles.segmentosRow}>
-              {tipos.map((t) => (
-                <View key={t.id} style={styles.segmentoWrapper}>
+              {ramas.map((r) => (
+                <View key={r.id} style={styles.segmentoWrapper}>
                   <PillButton
-                    label={t.nombre}
-                    selected={String(tipoId) === String(t.id)}
+                    label={r.nombre}
+                    selected={String(ramaId) === String(r.id)}
                     onPress={() => {
-                      if (readOnly) return;
-                      setTipoId(String(t.id), 'manualPillSelect');
+                      void handleSelectRama(String(r.id));
                     }}
                   />
                 </View>
@@ -783,7 +946,52 @@ const IngresoFormScreen: React.FC<Props> = ({ navigation, route }) => {
 
             {DEBUG_AUX && (
               <Text style={styles.helperText}>
-                DEBUG: tipoId={String(tipoId ?? 'null')} | pending={String(pendingTipoIdRef.current ?? 'null')} | tipos={tipos.length}
+                DEBUG: ramaId={String(ramaId ?? 'null')} | ramas={ramas.length}
+              </Text>
+            )}
+          </View>
+
+          <View style={styles.field}>
+            <View style={styles.labelRow}>
+              <Text style={styles.label}>Tipo de ingreso</Text>
+
+              <InlineAddButton
+                onPress={handleAddTipoIngreso}
+                disabled={readOnly || !ramaId}
+                accessibilityLabel="Crear tipo de ingreso"
+              />
+            </View>
+
+            {ramaSeleccionada ? (
+              <View style={styles.segmentosRow}>
+                {tipos.map((t) => (
+                  <View key={t.id} style={styles.segmentoWrapper}>
+                    <PillButton
+                      label={t.nombre}
+                      selected={String(tipoId) === String(t.id)}
+                      onPress={() => {
+                        if (readOnly) return;
+                        setTipoId(String(t.id), 'manualTipoPillSelect');
+                      }}
+                    />
+                  </View>
+                ))}
+              </View>
+            ) : (
+              <Text style={styles.helperText}>
+                Primero selecciona una rama para ver los tipos disponibles.
+              </Text>
+            )}
+
+            {ramaSeleccionada && tipos.length === 0 ? (
+              <Text style={styles.helperText}>
+                No hay tipos en esta rama todavía. Puedes crear uno con el botón +.
+              </Text>
+            ) : null}
+
+            {DEBUG_AUX && (
+              <Text style={styles.helperText}>
+                DEBUG: tipoId={String(tipoId ?? 'null')} | pendingRama={String(pendingRamaIdRef.current ?? 'null')} | pendingTipo={String(pendingTipoIdRef.current ?? 'null')} | tipos={tipos.length}
               </Text>
             )}
           </View>

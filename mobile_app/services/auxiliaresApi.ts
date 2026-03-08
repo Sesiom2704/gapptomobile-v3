@@ -6,6 +6,7 @@ export type AuxEntity =
   | 'tipo_ingreso'
   | 'tipo_gasto'
   | 'tipo_ramas_gasto'
+  | 'tipo_ramas_ingreso'
   | 'tipo_ramas_proveedores'
   | 'tipo_segmento_gasto';
 
@@ -16,8 +17,12 @@ export type TipoGastoItem = AuxItemBase & {
   segmento_id: string | null;
 };
 
+export type TipoIngresoItem = AuxItemBase & {
+  rama_id: string;
+};
+
 // --------------------
-// Mapeo entidad -> endpoint (REAL según OpenAPI)
+// Mapeo entidad -> endpoint (REAL según backend)
 // --------------------
 function endpointFor(entity: AuxEntity): string {
   switch (entity) {
@@ -28,15 +33,15 @@ function endpointFor(entity: AuxEntity): string {
       return '/api/v1/tipos/gastos';
 
     case 'tipo_ramas_gasto':
-      // ✅ EXISTE: /api/v1/ramas/gastos
       return '/api/v1/ramas/gastos';
 
+    case 'tipo_ramas_ingreso':
+      return '/api/v1/ramas/ingresos';
+
     case 'tipo_ramas_proveedores':
-      // ✅ EXISTE: /api/v1/ramas/proveedores
       return '/api/v1/ramas/proveedores';
 
     case 'tipo_segmento_gasto':
-      // ✅ EXISTE: /api/v1/tipos/segmentos
       return '/api/v1/tipos/segmentos';
 
     default:

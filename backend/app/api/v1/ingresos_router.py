@@ -2,27 +2,22 @@
 """
 Router de INGRESOS para GapptoMobile v3.
 
-Migrado desde la v2 manteniendo:
+Mantiene:
 - Estructura de endpoints.
 - Lógica de liquidez (ajustes en CuentaBancaria).
 - Lógica de PAGO UNICO (activo/cobrado/kpi/inactivatedon).
 - Ponderación por participación_pct de Patrimonio en /extra.
+- Multiusuario con require_user.
+- Normalización de textos a MAYÚSCULAS.
 
 Añadidos en v3:
 - Asociación de cada ingreso a un user_id.
-- Todos los endpoints filtran por el usuario autenticado (require_user).
-- Normalización de textos a MAYÚSCULAS (excepto observaciones, que aquí no hay).
-
-Añadido v3 (2026-01):
-- Estado "omitido_este_mes" para ingresos recurrentes:
-    * Permite "resolver" este mes sin marcar cobrado y sin mover liquidez.
-    * Se excluye de /pendientes.
-    * Se puede revertir con "deshacer omisión".
-
-Añadido v3 (2026-03):
-- Campo contrato_alquiler:
-    * Permite vincular un ingreso recurrente al contrato de alquiler que lo origina.
-    * Se expone en serialización para frontend y trazabilidad.
+- Estado omitido_este_mes.
+- Campo contrato_alquiler.
+- NUEVO: soporte de ramas de ingreso:
+    * Primero se elige rama.
+    * Luego se listan los tipos asociados a esa rama.
+    * En create/update se valida coherencia entre rama_id y tipo_id.
 """
 
 from typing import List, Optional, Any, Dict
@@ -39,7 +34,7 @@ from fastapi import (
     Query,
 )
 from pydantic import BaseModel
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 from sqlalchemy import func, cast, Date
 from sqlalchemy.exc import IntegrityError, DataError
 
@@ -60,6 +55,21 @@ router = APIRouter(tags=["ingresos"])
 
 
 # ============================================================
+# Schemas ligeros para catálogos UI
+# ============================================================
+
+class RamaIngresoOut(BaseModel):
+    id: str
+    nombre: str
+
+
+class TipoIngresoOut(BaseModel):
+    id: str
+    nombre: str
+    rama_id: Optional[str] = None
+
+
+# ============================================================
 # Helpers generales
 # ============================================================
 
@@ -69,9 +79,7 @@ _ALPHABET = string.ascii_uppercase + string.digits
 
 def to_payload(model: BaseModel, *, exclude_unset: bool = False) -> Dict[str, Any]:
     """
-    Helper de compatibilidad Pydantic v1/v2:
-    - v2: usa model_dump()
-    - v1: usa dict()
+    Compatibilidad Pydantic v1/v2.
     """
     if hasattr(model, "model_dump"):  # Pydantic v2
         return model.model_dump(exclude_unset=exclude_unset)
@@ -81,7 +89,7 @@ def to_payload(model: BaseModel, *, exclude_unset: bool = False) -> Dict[str, An
 def _norm_ref_id(val) -> str | None:
     """
     Normaliza referencia_vivienda_id:
-      - None / '' / 'none' (cualquier casing) -> None
+      - None / '' / 'none' -> None
       - Otro string -> UPPER(trim)
     """
     if val is None:
@@ -96,22 +104,32 @@ def _norm_ref_id(val) -> str | None:
 
 def _serialize_ingreso(obj: Any) -> Dict[str, Any]:
     """
-    Convierte un objeto ORM de Ingreso en un dict listo para el schema.
+    Convierte un objeto ORM Ingreso en dict listo para el schema.
 
-    Se asegura de:
-    - Convertir importe a float.
-    - Resolver cuenta_id aunque venga por relación.
-
-    v3:
-    - Incluye campos de omitidos para consistencia de UI.
-    - Incluye contrato_alquiler para trazabilidad del ingreso de renta.
+    Incluye:
+    - rama_id
+    - rama_nombre
+    - tipo_nombre
+    - omitidos
+    - contrato_alquiler
     """
+    rama_rel = getattr(obj, "rama_rel", None)
+    tipo_rel = getattr(obj, "tipo_rel", None)
+    user_rel = getattr(obj, "user", None)
+
     return {
         "id": obj.id,
         "fecha_inicio": getattr(obj, "fecha_inicio", None),
         "rango_cobro": getattr(obj, "rango_cobro", None),
         "periodicidad": getattr(obj, "periodicidad", None),
+
+        # NUEVO: ramas
+        "rama_id": getattr(obj, "rama_id", None),
+        "rama_nombre": getattr(rama_rel, "nombre", None) if rama_rel else None,
+
         "tipo_id": getattr(obj, "tipo_id", None),
+        "tipo_nombre": getattr(tipo_rel, "nombre", None) if tipo_rel else None,
+
         "referencia_vivienda_id": getattr(obj, "referencia_vivienda_id", None),
         "concepto": getattr(obj, "concepto", None),
         "importe": float(getattr(obj, "importe", 0) or 0),
@@ -124,19 +142,18 @@ def _serialize_ingreso(obj: Any) -> Dict[str, Any]:
         "inactivatedon": getattr(obj, "inactivatedon", None),
         "ultimo_ingreso_on": getattr(obj, "ultimo_ingreso_on", None),
 
-        # v3 omitidos
+        # omitidos
         "omitido_este_mes": getattr(obj, "omitido_este_mes", False),
         "ultimo_omitido_on": getattr(obj, "ultimo_omitido_on", None),
         "omitido_count": getattr(obj, "omitido_count", 0),
 
-        # v3 alquiler
+        # alquiler
         "contrato_alquiler": getattr(obj, "contrato_alquiler", None),
 
         "cuenta_id": extract_cuenta_id(obj),
 
         "user_id": getattr(obj, "user_id", None),
-        "user_nombre": getattr(getattr(obj, "user", None), "nombre", None)
-                      or getattr(getattr(obj, "user", None), "email", None),
+        "user_nombre": getattr(user_rel, "full_name", None) or getattr(user_rel, "email", None),
     }
 
 
@@ -145,16 +162,14 @@ def _serialize_ingreso_ponderado(
     pct_map: Dict[str, float],
 ) -> Dict[str, Any]:
     """
-    Serializa el ingreso ponderando el importe por la participación_pct
-    de Patrimonio según referencia_vivienda_id.
+    Serializa el ingreso ponderando el importe por participación_pct
+    según referencia_vivienda_id.
     """
     data = _serialize_ingreso(obj)
     ref = _norm_ref_id(data.get("referencia_vivienda_id"))
     pct = pct_map.get(ref, 100.0) if ref else 100.0
     try:
-        data["importe"] = round(
-            float(data.get("importe") or 0.0) * (pct / 100.0), 2
-        )
+        data["importe"] = round(float(data.get("importe") or 0.0) * (pct / 100.0), 2)
     except Exception:
         pass
     return data
@@ -162,17 +177,23 @@ def _serialize_ingreso_ponderado(
 
 def _normalize_ingreso_text_payload(d: Dict[str, Any]) -> None:
     """
-    Aplica la regla global:
-    - TODO TEXTO en BD DEBE IR EN MAYÚSCULAS (EXCEPTO observaciones).
+    Regla global:
+    - Todo texto en BD en MAYÚSCULAS.
 
-    En ingresos no hay observaciones, así que:
-    - rango_cobro, periodicidad, concepto se guardan UPPER.
-    - tipo_id, referencia_vivienda_id, cuenta_id también se fuerzan a UPPER.
+    En ingresos:
+    - rango_cobro
+    - periodicidad
+    - concepto
+    - rama_id
+    - tipo_id
+    - referencia_vivienda_id
+    - cuenta_id
     """
     text_fields = [
         "rango_cobro",
         "periodicidad",
         "concepto",
+        "rama_id",
         "tipo_id",
         "referencia_vivienda_id",
         "cuenta_id",
@@ -188,10 +209,16 @@ def _get_ingreso_for_user(
     current_user: models.User,
 ) -> models.Ingreso:
     """
-    Recupera un ingreso asegurando que pertenece al usuario actual.
+    Recupera un ingreso asegurando ownership del usuario actual.
     """
     obj = (
         db.query(models.Ingreso)
+        .options(
+            joinedload(models.Ingreso.rama_rel),
+            joinedload(models.Ingreso.tipo_rel),
+            joinedload(models.Ingreso.user),
+            joinedload(models.Ingreso.cuenta),
+        )
         .filter(
             models.Ingreso.id == ingreso_id,
             models.Ingreso.user_id == current_user.id,
@@ -201,6 +228,147 @@ def _get_ingreso_for_user(
     if not obj:
         raise HTTPException(status_code=404, detail="Ingreso no encontrado")
     return obj
+
+
+def _get_rama_ingreso_or_404(db: Session, rama_id: str) -> models.TipoRamasIngreso:
+    """
+    Valida que la rama exista.
+    """
+    obj = (
+        db.query(models.TipoRamasIngreso)
+        .filter(models.TipoRamasIngreso.id == rama_id)
+        .first()
+    )
+    if not obj:
+        raise HTTPException(status_code=404, detail="La rama de ingreso no existe")
+    return obj
+
+
+def _get_tipo_ingreso_or_404(db: Session, tipo_id: str) -> models.TipoIngreso:
+    """
+    Valida que el tipo exista.
+    """
+    obj = (
+        db.query(models.TipoIngreso)
+        .options(joinedload(models.TipoIngreso.rama_rel))
+        .filter(models.TipoIngreso.id == tipo_id)
+        .first()
+    )
+    if not obj:
+        raise HTTPException(status_code=404, detail="El tipo de ingreso no existe")
+    return obj
+
+
+def _validate_rama_tipo_ingreso(
+    db: Session,
+    *,
+    rama_id: Optional[str],
+    tipo_id: Optional[str],
+) -> tuple[Optional[models.TipoRamasIngreso], Optional[models.TipoIngreso]]:
+    """
+    Valida la coherencia entre rama_id y tipo_id.
+
+    Reglas:
+    - ambos deben venir informados para create y para updates de cambio funcional
+    - la rama debe existir
+    - el tipo debe existir
+    - el tipo debe pertenecer a la rama
+    """
+    if not rama_id:
+        raise HTTPException(status_code=422, detail="rama_id es obligatorio")
+    if not tipo_id:
+        raise HTTPException(status_code=422, detail="tipo_id es obligatorio")
+
+    rama = _get_rama_ingreso_or_404(db, rama_id)
+    tipo = _get_tipo_ingreso_or_404(db, tipo_id)
+
+    if (tipo.rama_id or "").upper() != (rama.id or "").upper():
+        raise HTTPException(
+            status_code=422,
+            detail="El tipo de ingreso no pertenece a la rama seleccionada.",
+        )
+
+    return rama, tipo
+
+
+def _resolve_rama_tipo_for_update(
+    db: Session,
+    *,
+    obj: models.Ingreso,
+    incoming: Dict[str, Any],
+) -> tuple[Optional[models.TipoRamasIngreso], Optional[models.TipoIngreso]]:
+    """
+    Resuelve rama/tipo final en update.
+
+    Casos:
+    - si viene rama_id y no tipo_id -> inválido
+    - si viene tipo_id y no rama_id -> inválido
+    - si no viene ninguno -> no valida nada
+    - si vienen ambos -> valida combinación final
+    """
+    has_rama = "rama_id" in incoming
+    has_tipo = "tipo_id" in incoming
+
+    if has_rama != has_tipo:
+        raise HTTPException(
+            status_code=422,
+            detail="Para cambiar la clasificación del ingreso debes enviar rama_id y tipo_id juntos.",
+        )
+
+    if not has_rama and not has_tipo:
+        return None, None
+
+    rama_id = incoming.get("rama_id")
+    tipo_id = incoming.get("tipo_id")
+
+    return _validate_rama_tipo_ingreso(
+        db,
+        rama_id=rama_id,
+        tipo_id=tipo_id,
+    )
+
+
+# ============================================================
+# Catálogos UI para selector rama -> tipos
+# ============================================================
+
+@router.get("/ramas", response_model=List[RamaIngresoOut])
+def list_ramas_ingreso(
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(require_user),
+):
+    """
+    Devuelve las ramas de ingreso para pintar el primer nivel de botones en UI.
+    """
+    rows = (
+        db.query(models.TipoRamasIngreso)
+        .order_by(models.TipoRamasIngreso.nombre.asc())
+        .all()
+    )
+    return [{"id": r.id, "nombre": r.nombre} for r in rows]
+
+
+@router.get("/tipos-por-rama/{rama_id}", response_model=List[TipoIngresoOut])
+def list_tipos_por_rama(
+    rama_id: str,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(require_user),
+):
+    """
+    Devuelve los tipos de ingreso asociados a una rama concreta.
+
+    Este endpoint es el que usará el front después de pulsar un botón de rama.
+    """
+    rama_id = normalize_upper(rama_id)
+    _get_rama_ingreso_or_404(db, rama_id)
+
+    rows = (
+        db.query(models.TipoIngreso)
+        .filter(models.TipoIngreso.rama_id == rama_id)
+        .order_by(models.TipoIngreso.nombre.asc())
+        .all()
+    )
+    return [{"id": t.id, "nombre": t.nombre, "rama_id": t.rama_id} for t in rows]
 
 
 # ============================================================
@@ -214,12 +382,16 @@ def list_pendientes(
 ):
     """
     Lista ingresos NO cobrados del usuario actual.
-
-    v3:
-    - Excluye omitidos_este_mes para que no bloqueen cierre/reinicio.
+    Excluye omitidos_este_mes.
     """
     objs = (
         db.query(models.Ingreso)
+        .options(
+            joinedload(models.Ingreso.rama_rel),
+            joinedload(models.Ingreso.tipo_rel),
+            joinedload(models.Ingreso.user),
+            joinedload(models.Ingreso.cuenta),
+        )
         .filter(
             models.Ingreso.user_id == current_user.id,
             models.Ingreso.cobrado == False,
@@ -244,6 +416,12 @@ def list_activos(
     """
     objs = (
         db.query(models.Ingreso)
+        .options(
+            joinedload(models.Ingreso.rama_rel),
+            joinedload(models.Ingreso.tipo_rel),
+            joinedload(models.Ingreso.user),
+            joinedload(models.Ingreso.cuenta),
+        )
         .filter(
             models.Ingreso.user_id == current_user.id,
             models.Ingreso.activo == True,
@@ -267,6 +445,12 @@ def list_inactivos(
     """
     objs = (
         db.query(models.Ingreso)
+        .options(
+            joinedload(models.Ingreso.rama_rel),
+            joinedload(models.Ingreso.tipo_rel),
+            joinedload(models.Ingreso.user),
+            joinedload(models.Ingreso.cuenta),
+        )
         .filter(
             models.Ingreso.user_id == current_user.id,
             models.Ingreso.activo == False,
@@ -303,14 +487,16 @@ def create_ingreso(
     """
     Crea un ingreso para el usuario actual.
 
-    v3:
-    - Por defecto omitido_este_mes=False (además de defaults en BD).
+    NUEVO:
+    - valida rama_id + tipo_id
+    - el tipo debe pertenecer a la rama elegida
     """
     payload = to_payload(ingreso_in)
 
     for k in [
         "rango_cobro",
         "periodicidad",
+        "rama_id",
         "tipo_id",
         "referencia_vivienda_id",
         "concepto",
@@ -321,12 +507,18 @@ def create_ingreso(
 
     _normalize_ingreso_text_payload(payload)
 
+    # Validación funcional nueva
+    _validate_rama_tipo_ingreso(
+        db,
+        rama_id=payload.get("rama_id"),
+        tipo_id=payload.get("tipo_id"),
+    )
+
     raw_id = (payload.get("id") or "").upper()
     payload["id"] = raw_id if _ID_RE.fullmatch(raw_id) else generate_ingreso_id()
 
     payload["user_id"] = current_user.id
 
-    # v3 defaults defensivos
     payload.setdefault("omitido_este_mes", False)
     payload.setdefault("omitido_count", 0)
 
@@ -340,7 +532,7 @@ def create_ingreso(
         payload["kpi"] = False
         payload["inactivatedon"] = func.now()
         payload["ultimo_ingreso_on"] = func.now()
-        payload["omitido_este_mes"] = False  # coherencia
+        payload["omitido_este_mes"] = False
 
     for _ in range(5):
         try:
@@ -352,6 +544,7 @@ def create_ingreso(
 
             db.commit()
             db.refresh(obj)
+            obj = _get_ingreso_for_user(db, obj.id, current_user)
             return _serialize_ingreso(obj)
 
         except IntegrityError:
@@ -397,6 +590,12 @@ def list_ingresos_extra(
 
     qset = (
         db.query(models.Ingreso, models.Patrimonio.participacion_pct)
+        .options(
+            joinedload(models.Ingreso.rama_rel),
+            joinedload(models.Ingreso.tipo_rel),
+            joinedload(models.Ingreso.user),
+            joinedload(models.Ingreso.cuenta),
+        )
         .outerjoin(
             models.Patrimonio,
             models.Patrimonio.id == models.Ingreso.referencia_vivienda_id,
@@ -442,10 +641,16 @@ def list_all(
     current_user: models.User = Depends(require_user),
 ):
     """
-    Lista TODOS los ingresos del usuario actual.
+    Lista todos los ingresos del usuario actual.
     """
     objs = (
         db.query(models.Ingreso)
+        .options(
+            joinedload(models.Ingreso.rama_rel),
+            joinedload(models.Ingreso.tipo_rel),
+            joinedload(models.Ingreso.user),
+            joinedload(models.Ingreso.cuenta),
+        )
         .filter(models.Ingreso.user_id == current_user.id)
         .order_by(
             models.Ingreso.fecha_inicio.asc().nullslast(),
@@ -463,7 +668,7 @@ def get_ingreso(
     current_user: models.User = Depends(require_user),
 ):
     """
-    Recupera un ingreso por id, asegurando que pertenece al usuario actual.
+    Recupera un ingreso por id, asegurando ownership.
     """
     obj = _get_ingreso_for_user(db, ingreso_id, current_user)
     return _serialize_ingreso(obj)
@@ -479,13 +684,9 @@ def update_ingreso(
     """
     Actualiza un ingreso del usuario actual.
 
-    v3 (omitidos):
-    - No permite cobrado=True y omitido_este_mes=True simultáneamente.
-    - Si se marca cobrado=True, se limpia omitido_este_mes (coherencia).
-    - Si se marca omitido_este_mes=True, setea ultimo_omitido_on=now().
-
-    Nota:
-    - contrato_alquiler no se toca aquí salvo que venga explícitamente en el schema.
+    Reglas nuevas:
+    - si se cambia rama/tipo, deben venir ambos
+    - el tipo debe pertenecer a la rama
     """
     obj = _get_ingreso_for_user(db, ingreso_id, current_user)
 
@@ -496,6 +697,9 @@ def update_ingreso(
             incoming[k] = None
 
     _normalize_ingreso_text_payload(incoming)
+
+    # Validación funcional nueva
+    _resolve_rama_tipo_for_update(db, obj=obj, incoming=incoming)
 
     if incoming.get("cobrado") is True and incoming.get("omitido_este_mes") is True:
         raise HTTPException(
@@ -514,14 +718,12 @@ def update_ingreso(
         elif not prev and newv:
             obj.inactivatedon = None
 
-    # v3: timestamp de omisión
     if incoming.get("omitido_este_mes") is True:
         incoming["ultimo_omitido_on"] = func.now()
 
     for field, value in incoming.items():
         setattr(obj, field, value)
 
-    # coherencia v3 final
     if bool(getattr(obj, "cobrado", False)) is True:
         obj.omitido_este_mes = False
 
@@ -531,6 +733,7 @@ def update_ingreso(
     obj.modifiedon = func.now()
     db.commit()
     db.refresh(obj)
+    obj = _get_ingreso_for_user(db, obj.id, current_user)
     return _serialize_ingreso(obj)
 
 
@@ -544,12 +747,12 @@ def delete_ingreso(
     Elimina un ingreso del usuario actual.
 
     Si es PAGO UNICO:
-    - Revierte el impacto en liquidez (resta lo que se sumó).
+    - revierte el impacto en liquidez.
     """
     obj = _get_ingreso_for_user(db, ingreso_id, current_user)
 
     periodicidad = (getattr(obj, "periodicidad", "") or "").strip().upper()
-    if periodicidad == "PAGO UNICO":
+    if periodicidad == PERIODICIDAD_PAGO_UNICO:
         importe = safe_float(getattr(obj, "importe", 0.0))
         cuenta_id = extract_cuenta_id(obj)
         adjust_liquidez(db, cuenta_id, -importe)
@@ -570,14 +773,7 @@ def omitir_ingreso_mes(
     current_user: models.User = Depends(require_user),
 ):
     """
-    Marca un ingreso como "omitido este mes".
-
-    Reglas:
-    - No cambia liquidez.
-    - No marca cobrado.
-    - No modifica ultimo_ingreso_on.
-    - Setea ultimo_omitido_on = now().
-    - Bloquea si el ingreso ya está cobrado.
+    Marca un ingreso como omitido este mes.
     """
     ingreso = _get_ingreso_for_user(db, ingreso_id, current_user)
 
@@ -594,6 +790,7 @@ def omitir_ingreso_mes(
 
     db.commit()
     db.refresh(ingreso)
+    ingreso = _get_ingreso_for_user(db, ingreso.id, current_user)
     return _serialize_ingreso(ingreso)
 
 
@@ -604,7 +801,7 @@ def deshacer_omision_ingreso_mes(
     current_user: models.User = Depends(require_user),
 ):
     """
-    Revierte el estado "omitido este mes" de un ingreso.
+    Revierte omitido este mes.
     """
     ingreso = _get_ingreso_for_user(db, ingreso_id, current_user)
 
@@ -613,6 +810,7 @@ def deshacer_omision_ingreso_mes(
 
     db.commit()
     db.refresh(ingreso)
+    ingreso = _get_ingreso_for_user(db, ingreso.id, current_user)
     return _serialize_ingreso(ingreso)
 
 
@@ -623,16 +821,10 @@ def cobrar_ingreso(
     current_user: models.User = Depends(require_user),
 ):
     """
-    Marca un ingreso del usuario actual como cobrado y actualiza:
-    - ingresos_cobrados (+1 si antes no lo estaba).
-    - liquidez de la cuenta (solo si pasa de no cobrado a cobrado).
-
-    v3:
-    - Si estaba omitido_este_mes=True, se limpia (cobrar prevalece).
+    Marca un ingreso como cobrado y ajusta liquidez si corresponde.
     """
     ingreso = _get_ingreso_for_user(db, ingreso_id, current_user)
 
-    # coherencia v3: cobrar prevalece
     if bool(getattr(ingreso, "omitido_este_mes", False)) is True:
         ingreso.omitido_este_mes = False
 
@@ -640,8 +832,8 @@ def cobrar_ingreso(
     ingreso.cobrado = True
     ingreso.ingresos_cobrados = (ingreso.ingresos_cobrados or 0) + (0 if was_cobrado else 1)
     ingreso.modifiedon = func.now()
-
     ingreso.ultimo_ingreso_on = func.now()
+
     if not was_cobrado:
         adjust_liquidez(
             db,
@@ -651,6 +843,7 @@ def cobrar_ingreso(
 
     db.commit()
     db.refresh(ingreso)
+    ingreso = _get_ingreso_for_user(db, ingreso.id, current_user)
     return _serialize_ingreso(ingreso)
 
 
@@ -661,7 +854,7 @@ def activar_ingreso(
     current_user: models.User = Depends(require_user),
 ):
     """
-    Marca un ingreso del usuario actual como activo.
+    Marca un ingreso como activo.
     """
     obj = _get_ingreso_for_user(db, ingreso_id, current_user)
     obj.activo = True
@@ -669,6 +862,7 @@ def activar_ingreso(
     obj.modifiedon = func.now()
     db.commit()
     db.refresh(obj)
+    obj = _get_ingreso_for_user(db, obj.id, current_user)
     return _serialize_ingreso(obj)
 
 
@@ -679,7 +873,7 @@ def inactivar_ingreso(
     current_user: models.User = Depends(require_user),
 ):
     """
-    Marca un ingreso del usuario actual como inactivo.
+    Marca un ingreso como inactivo.
     """
     obj = _get_ingreso_for_user(db, ingreso_id, current_user)
     obj.activo = False
@@ -687,6 +881,7 @@ def inactivar_ingreso(
     obj.modifiedon = func.now()
     db.commit()
     db.refresh(obj)
+    obj = _get_ingreso_for_user(db, obj.id, current_user)
     return _serialize_ingreso(obj)
 
 
@@ -696,12 +891,9 @@ def resumen_totales(
     current_user: models.User = Depends(require_user),
 ):
     """
-    Devuelve, SOLO para el usuario actual:
-    - objetivo: suma de importes de ingresos activos+kpi.
-    - cobrados: suma de importes de esos ingresos que ya están cobrados.
-
-    Nota (según tu criterio):
-    - El "objetivo" NO filtra por omitidos: esperado es esperado.
+    Devuelve:
+    - objetivo: suma de ingresos activos+kpi
+    - cobrados: suma de ingresos activos+kpi ya cobrados
     """
     objetivo = (
         db.query(func.coalesce(func.sum(models.Ingreso.importe), 0.0))

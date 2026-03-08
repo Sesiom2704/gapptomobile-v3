@@ -1,5 +1,5 @@
 """
-Schemas Pydantic para el módulo de GESTIÓN DE ALQUILERES en GapptoMobile v2.
+Schemas Pydantic para el módulo de GESTIÓN DE ALQUILERES en GapptoMobile v2/v3.
 
 Incluye:
 - Personas:
@@ -16,6 +16,10 @@ Reglas generales:
     * Limpiar teléfono.
     * Validar ownership por user_id.
     * Validar reglas funcionales del contrato y participantes.
+
+Nota sobre ingresos:
+- Este fichero NO requiere cambios obligatorios por la introducción de ramas de ingreso.
+- La relación con ingresos sigue yendo por contrato_alquiler en el módulo de ingresos.
 """
 
 from __future__ import annotations
@@ -187,3 +191,22 @@ class ContratoResumenActivoOut(BaseModel):
     fianza: Optional[float] = None
     incremento_ipc: Optional[bool] = False
     participantes_resumen: Optional[ParticipantesResumenOut] = None
+
+
+__all__ = [
+    "PersonaBase",
+    "PersonaCreate",
+    "PersonaUpdate",
+    "PersonaSchema",
+    "PersonaPickerOut",
+    "ContratoParticipanteBase",
+    "ContratoParticipanteCreate",
+    "ContratoParticipanteUpdate",
+    "ContratoParticipanteSchema",
+    "ParticipantesResumenOut",
+    "ContratoBase",
+    "ContratoCreate",
+    "ContratoUpdate",
+    "ContratoSchema",
+    "ContratoResumenActivoOut",
+]
