@@ -1,4 +1,3 @@
-# backend/app/api/v1/ingresos_router.py
 """
 Router de INGRESOS para GapptoMobile v3.
 
@@ -14,10 +13,14 @@ Añadidos en v3:
 - Asociación de cada ingreso a un user_id.
 - Estado omitido_este_mes.
 - Campo contrato_alquiler.
-- NUEVO: soporte de ramas de ingreso:
+- Soporte de ramas de ingreso:
     * Primero se elige rama.
     * Luego se listan los tipos asociados a esa rama.
     * En create/update se valida coherencia entre rama_id y tipo_id.
+
+Debug reforzado:
+- Logs de payload, columnas ORM, cuenta/vivienda/rama/tipo.
+- Captura explícita de errores inesperados en create/update.
 """
 
 from typing import List, Optional, Any, Dict
@@ -25,6 +28,8 @@ from datetime import date
 from calendar import monthrange
 import string
 import re
+import logging
+import traceback
 
 from fastapi import (
     APIRouter,
@@ -52,6 +57,7 @@ from backend.app.core.constants import PERIODICIDAD_PAGO_UNICO
 from backend.app.api.v1.auth_router import require_user
 
 router = APIRouter(tags=["ingresos"])
+logger = logging.getLogger(__name__)
 
 
 # ============================================================
@@ -86,6 +92,28 @@ def to_payload(model: BaseModel, *, exclude_unset: bool = False) -> Dict[str, An
     return model.dict(exclude_unset=exclude_unset)
 
 
+def _safe_repr(val: Any) -> str:
+    try:
+        return repr(val)
+    except Exception:
+        return "<unreprable>"
+
+
+def _debug_ingreso_context(prefix: str, payload: Optional[Dict[str, Any]] = None) -> None:
+    """
+    Debug centralizado para ver rápido:
+    - payload recibido
+    - columnas ORM realmente disponibles
+    """
+    try:
+        cols = list(models.Ingreso.__table__.columns.keys())
+    except Exception as e:
+        cols = [f"<error leyendo columnas ORM: {e}>"]
+
+    logger.warning("%s | payload=%s", prefix, payload)
+    logger.warning("%s | Ingreso ORM columns=%s", prefix, cols)
+
+
 def _norm_ref_id(val) -> str | None:
     """
     Normaliza referencia_vivienda_id:
@@ -105,17 +133,11 @@ def _norm_ref_id(val) -> str | None:
 def _serialize_ingreso(obj: Any) -> Dict[str, Any]:
     """
     Convierte un objeto ORM Ingreso en dict listo para el schema.
-
-    Incluye:
-    - rama_id
-    - rama_nombre
-    - tipo_nombre
-    - omitidos
-    - contrato_alquiler
     """
     rama_rel = getattr(obj, "rama_rel", None)
     tipo_rel = getattr(obj, "tipo_rel", None)
     user_rel = getattr(obj, "user", None)
+    cuenta_rel = getattr(obj, "cuenta", None)
 
     return {
         "id": obj.id,
@@ -123,7 +145,6 @@ def _serialize_ingreso(obj: Any) -> Dict[str, Any]:
         "rango_cobro": getattr(obj, "rango_cobro", None),
         "periodicidad": getattr(obj, "periodicidad", None),
 
-        # NUEVO: ramas
         "rama_id": getattr(obj, "rama_id", None),
         "rama_nombre": getattr(rama_rel, "nombre", None) if rama_rel else None,
 
@@ -142,15 +163,14 @@ def _serialize_ingreso(obj: Any) -> Dict[str, Any]:
         "inactivatedon": getattr(obj, "inactivatedon", None),
         "ultimo_ingreso_on": getattr(obj, "ultimo_ingreso_on", None),
 
-        # omitidos
         "omitido_este_mes": getattr(obj, "omitido_este_mes", False),
         "ultimo_omitido_on": getattr(obj, "ultimo_omitido_on", None),
         "omitido_count": getattr(obj, "omitido_count", 0),
 
-        # alquiler
         "contrato_alquiler": getattr(obj, "contrato_alquiler", None),
 
         "cuenta_id": extract_cuenta_id(obj),
+        "cuenta_nombre": getattr(cuenta_rel, "anagrama", None) or getattr(cuenta_rel, "referencia", None),
 
         "user_id": getattr(obj, "user_id", None),
         "user_nombre": getattr(user_rel, "full_name", None) or getattr(user_rel, "email", None),
@@ -162,8 +182,7 @@ def _serialize_ingreso_ponderado(
     pct_map: Dict[str, float],
 ) -> Dict[str, Any]:
     """
-    Serializa el ingreso ponderando el importe por participación_pct
-    según referencia_vivienda_id.
+    Serializa el ingreso ponderando el importe por participación_pct.
     """
     data = _serialize_ingreso(obj)
     ref = _norm_ref_id(data.get("referencia_vivienda_id"))
@@ -179,15 +198,6 @@ def _normalize_ingreso_text_payload(d: Dict[str, Any]) -> None:
     """
     Regla global:
     - Todo texto en BD en MAYÚSCULAS.
-
-    En ingresos:
-    - rango_cobro
-    - periodicidad
-    - concepto
-    - rama_id
-    - tipo_id
-    - referencia_vivienda_id
-    - cuenta_id
     """
     text_fields = [
         "rango_cobro",
@@ -208,9 +218,6 @@ def _get_ingreso_for_user(
     ingreso_id: str,
     current_user: models.User,
 ) -> models.Ingreso:
-    """
-    Recupera un ingreso asegurando ownership del usuario actual.
-    """
     obj = (
         db.query(models.Ingreso)
         .options(
@@ -231,9 +238,6 @@ def _get_ingreso_for_user(
 
 
 def _get_rama_ingreso_or_404(db: Session, rama_id: str) -> models.TipoRamasIngreso:
-    """
-    Valida que la rama exista.
-    """
     obj = (
         db.query(models.TipoRamasIngreso)
         .filter(models.TipoRamasIngreso.id == rama_id)
@@ -245,9 +249,6 @@ def _get_rama_ingreso_or_404(db: Session, rama_id: str) -> models.TipoRamasIngre
 
 
 def _get_tipo_ingreso_or_404(db: Session, tipo_id: str) -> models.TipoIngreso:
-    """
-    Valida que el tipo exista.
-    """
     obj = (
         db.query(models.TipoIngreso)
         .options(joinedload(models.TipoIngreso.rama_rel))
@@ -265,15 +266,6 @@ def _validate_rama_tipo_ingreso(
     rama_id: Optional[str],
     tipo_id: Optional[str],
 ) -> tuple[Optional[models.TipoRamasIngreso], Optional[models.TipoIngreso]]:
-    """
-    Valida la coherencia entre rama_id y tipo_id.
-
-    Reglas:
-    - ambos deben venir informados para create y para updates de cambio funcional
-    - la rama debe existir
-    - el tipo debe existir
-    - el tipo debe pertenecer a la rama
-    """
     if not rama_id:
         raise HTTPException(status_code=422, detail="rama_id es obligatorio")
     if not tipo_id:
@@ -297,15 +289,6 @@ def _resolve_rama_tipo_for_update(
     obj: models.Ingreso,
     incoming: Dict[str, Any],
 ) -> tuple[Optional[models.TipoRamasIngreso], Optional[models.TipoIngreso]]:
-    """
-    Resuelve rama/tipo final en update.
-
-    Casos:
-    - si viene rama_id y no tipo_id -> inválido
-    - si viene tipo_id y no rama_id -> inválido
-    - si no viene ninguno -> no valida nada
-    - si vienen ambos -> valida combinación final
-    """
     has_rama = "rama_id" in incoming
     has_tipo = "tipo_id" in incoming
 
@@ -328,6 +311,62 @@ def _resolve_rama_tipo_for_update(
     )
 
 
+def _validate_cuenta_for_user(
+    db: Session,
+    *,
+    cuenta_id: Optional[str],
+    current_user: models.User,
+) -> Optional[models.CuentaBancaria]:
+    """
+    Valida que la cuenta exista y pertenezca al usuario actual.
+    """
+    if not cuenta_id:
+        return None
+
+    cuenta = (
+        db.query(models.CuentaBancaria)
+        .filter(
+            models.CuentaBancaria.id == cuenta_id,
+            models.CuentaBancaria.user_id == current_user.id,
+        )
+        .first()
+    )
+    if not cuenta:
+        raise HTTPException(
+            status_code=422,
+            detail=f"La cuenta seleccionada no existe o no pertenece al usuario actual: {cuenta_id}",
+        )
+    return cuenta
+
+
+def _validate_vivienda_for_user(
+    db: Session,
+    *,
+    vivienda_id: Optional[str],
+    current_user: models.User,
+) -> Optional[models.Patrimonio]:
+    """
+    Valida que la vivienda exista y pertenezca al usuario actual.
+    """
+    if not vivienda_id:
+        return None
+
+    vivienda = (
+        db.query(models.Patrimonio)
+        .filter(
+            models.Patrimonio.id == vivienda_id,
+            models.Patrimonio.user_id == current_user.id,
+        )
+        .first()
+    )
+    if not vivienda:
+        raise HTTPException(
+            status_code=422,
+            detail=f"La vivienda seleccionada no existe o no pertenece al usuario actual: {vivienda_id}",
+        )
+    return vivienda
+
+
 # ============================================================
 # Catálogos UI para selector rama -> tipos
 # ============================================================
@@ -337,9 +376,6 @@ def list_ramas_ingreso(
     db: Session = Depends(get_db),
     current_user: models.User = Depends(require_user),
 ):
-    """
-    Devuelve las ramas de ingreso para pintar el primer nivel de botones en UI.
-    """
     rows = (
         db.query(models.TipoRamasIngreso)
         .order_by(models.TipoRamasIngreso.nombre.asc())
@@ -354,11 +390,6 @@ def list_tipos_por_rama(
     db: Session = Depends(get_db),
     current_user: models.User = Depends(require_user),
 ):
-    """
-    Devuelve los tipos de ingreso asociados a una rama concreta.
-
-    Este endpoint es el que usará el front después de pulsar un botón de rama.
-    """
     rama_id = normalize_upper(rama_id)
     _get_rama_ingreso_or_404(db, rama_id)
 
@@ -372,7 +403,7 @@ def list_tipos_por_rama(
 
 
 # ============================================================
-# Vistas rápidas (para UI)
+# Vistas rápidas
 # ============================================================
 
 @router.get("/pendientes", response_model=List[IngresoSchema])
@@ -380,10 +411,6 @@ def list_pendientes(
     db: Session = Depends(get_db),
     current_user: models.User = Depends(require_user),
 ):
-    """
-    Lista ingresos NO cobrados del usuario actual.
-    Excluye omitidos_este_mes.
-    """
     objs = (
         db.query(models.Ingreso)
         .options(
@@ -411,9 +438,6 @@ def list_activos(
     db: Session = Depends(get_db),
     current_user: models.User = Depends(require_user),
 ):
-    """
-    Lista ingresos activos del usuario actual.
-    """
     objs = (
         db.query(models.Ingreso)
         .options(
@@ -440,9 +464,6 @@ def list_inactivos(
     db: Session = Depends(get_db),
     current_user: models.User = Depends(require_user),
 ):
-    """
-    Lista ingresos inactivos del usuario actual.
-    """
     objs = (
         db.query(models.Ingreso)
         .options(
@@ -468,29 +489,13 @@ def list_inactivos(
 # CRUD
 # ============================================================
 
-@router.post(
-    "/",
-    response_model=IngresoSchema,
-    status_code=status.HTTP_201_CREATED,
-)
-@router.post(
-    "",
-    response_model=IngresoSchema,
-    status_code=status.HTTP_201_CREATED,
-    include_in_schema=False,
-)
+@router.post("/", response_model=IngresoSchema, status_code=status.HTTP_201_CREATED)
+@router.post("", response_model=IngresoSchema, status_code=status.HTTP_201_CREATED, include_in_schema=False)
 def create_ingreso(
     ingreso_in: IngresoCreateSchema,
     db: Session = Depends(get_db),
     current_user: models.User = Depends(require_user),
 ):
-    """
-    Crea un ingreso para el usuario actual.
-
-    NUEVO:
-    - valida rama_id + tipo_id
-    - el tipo debe pertenecer a la rama elegida
-    """
     payload = to_payload(ingreso_in)
 
     for k in [
@@ -507,18 +512,40 @@ def create_ingreso(
 
     _normalize_ingreso_text_payload(payload)
 
-    # Validación funcional nueva
-    _validate_rama_tipo_ingreso(
+    logger.warning("[INGRESOS][CREATE] payload normalizado=%s", payload)
+
+    # Validaciones funcionales
+    rama, tipo = _validate_rama_tipo_ingreso(
         db,
         rama_id=payload.get("rama_id"),
         tipo_id=payload.get("tipo_id"),
+    )
+
+    cuenta = _validate_cuenta_for_user(
+        db,
+        cuenta_id=payload.get("cuenta_id"),
+        current_user=current_user,
+    )
+
+    vivienda = _validate_vivienda_for_user(
+        db,
+        vivienda_id=payload.get("referencia_vivienda_id"),
+        current_user=current_user,
+    )
+
+    logger.warning(
+        "[INGRESOS][CREATE] validaciones ok | rama=%s | tipo=%s | cuenta=%s | vivienda=%s | user_id=%s",
+        getattr(rama, "id", None),
+        getattr(tipo, "id", None),
+        getattr(cuenta, "id", None),
+        getattr(vivienda, "id", None),
+        getattr(current_user, "id", None),
     )
 
     raw_id = (payload.get("id") or "").upper()
     payload["id"] = raw_id if _ID_RE.fullmatch(raw_id) else generate_ingreso_id()
 
     payload["user_id"] = current_user.id
-
     payload.setdefault("omitido_este_mes", False)
     payload.setdefault("omitido_count", 0)
 
@@ -536,14 +563,32 @@ def create_ingreso(
 
     for _ in range(5):
         try:
+            _debug_ingreso_context("[INGRESOS][CREATE][BEFORE ORM]", payload)
+
             obj = models.Ingreso(**payload)
             db.add(obj)
 
+            logger.warning(
+                "[INGRESOS][CREATE] obj creado en ORM | id=%s | tipo_id=%s | rama_id=%s | cuenta_id=%s",
+                getattr(obj, "id", None),
+                getattr(obj, "tipo_id", None),
+                getattr(obj, "rama_id", None),
+                getattr(obj, "cuenta_id", None),
+            )
+
             if periodicidad == PERIODICIDAD_PAGO_UNICO:
+                logger.warning(
+                    "[INGRESOS][CREATE] ajuste liquidez previo commit | cuenta_id=%s | importe=%s",
+                    cuenta_id,
+                    importe,
+                )
                 adjust_liquidez(db, cuenta_id, +importe)
 
             db.commit()
             db.refresh(obj)
+
+            logger.warning("[INGRESOS][CREATE] commit OK | ingreso_id=%s", obj.id)
+
             obj = _get_ingreso_for_user(db, obj.id, current_user)
             return _serialize_ingreso(obj)
 
@@ -551,27 +596,44 @@ def create_ingreso(
             db.rollback()
 
             err_msg = str(getattr(e, "orig", e)).upper()
+            logger.exception("[INGRESOS][CREATE] IntegrityError | payload=%s", payload)
 
-            # Solo reintentamos si realmente es colisión de PK / ID
             is_duplicate_id = (
-                'INGRESOS_PKEY' in err_msg
-                or 'DUPLICATE KEY VALUE' in err_msg and '(ID)' in err_msg
-                or 'KEY (ID)=' in err_msg
+                "INGRESOS_PKEY" in err_msg
+                or ("DUPLICATE KEY VALUE" in err_msg and "(ID)" in err_msg)
+                or "KEY (ID)=" in err_msg
             )
 
             if is_duplicate_id:
                 payload["id"] = generate_ingreso_id()
+                logger.warning("[INGRESOS][CREATE] retry por colisión de ID nuevo=%s", payload["id"])
                 continue
 
             raise HTTPException(
                 status_code=400,
                 detail=f"Error de integridad al crear ingreso: {getattr(e, 'orig', e)}",
             )
+
         except DataError as e:
             db.rollback()
+            logger.exception("[INGRESOS][CREATE] DataError | payload=%s", payload)
             raise HTTPException(
                 status_code=400,
                 detail=f"Datos inválidos: {e.orig}",
+            )
+
+        except HTTPException:
+            db.rollback()
+            raise
+
+        except Exception as e:
+            db.rollback()
+            logger.exception("[INGRESOS][CREATE] Exception inesperada | payload=%s", payload)
+            tb = traceback.format_exc()
+            logger.error("[INGRESOS][CREATE] traceback=\n%s", tb)
+            raise HTTPException(
+                status_code=500,
+                detail=f"Error inesperado al crear ingreso: {e.__class__.__name__}: {e}",
             )
 
     raise HTTPException(
@@ -581,9 +643,6 @@ def create_ingreso(
 
 
 def _month_range(year: int, month: int) -> tuple[date, date]:
-    """
-    Devuelve (primer_día, último_día) del mes indicado.
-    """
     last = monthrange(year, month)[1]
     return date(year, month, 1), date(year, month, last)
 
@@ -596,10 +655,6 @@ def list_ingresos_extra(
     db: Session = Depends(get_db),
     current_user: models.User = Depends(require_user),
 ):
-    """
-    Lista ingresos PAGO UNICO del usuario actual,
-    mostrando el importe ponderado por Patrimonio.participacion_pct.
-    """
     effective_date = func.coalesce(
         models.Ingreso.fecha_inicio,
         cast(models.Ingreso.createon, Date),
@@ -657,9 +712,6 @@ def list_all(
     db: Session = Depends(get_db),
     current_user: models.User = Depends(require_user),
 ):
-    """
-    Lista todos los ingresos del usuario actual.
-    """
     objs = (
         db.query(models.Ingreso)
         .options(
@@ -684,9 +736,6 @@ def get_ingreso(
     db: Session = Depends(get_db),
     current_user: models.User = Depends(require_user),
 ):
-    """
-    Recupera un ingreso por id, asegurando ownership.
-    """
     obj = _get_ingreso_for_user(db, ingreso_id, current_user)
     return _serialize_ingreso(obj)
 
@@ -698,13 +747,6 @@ def update_ingreso(
     db: Session = Depends(get_db),
     current_user: models.User = Depends(require_user),
 ):
-    """
-    Actualiza un ingreso del usuario actual.
-
-    Reglas nuevas:
-    - si se cambia rama/tipo, deben venir ambos
-    - el tipo debe pertenecer a la rama
-    """
     obj = _get_ingreso_for_user(db, ingreso_id, current_user)
 
     incoming = to_payload(ingreso_in, exclude_unset=True)
@@ -714,9 +756,24 @@ def update_ingreso(
             incoming[k] = None
 
     _normalize_ingreso_text_payload(incoming)
+    logger.warning("[INGRESOS][UPDATE] incoming normalizado=%s | ingreso_id=%s", incoming, ingreso_id)
 
-    # Validación funcional nueva
     _resolve_rama_tipo_for_update(db, obj=obj, incoming=incoming)
+
+    # Validaciones explícitas si vienen
+    if "cuenta_id" in incoming:
+        _validate_cuenta_for_user(
+            db,
+            cuenta_id=incoming.get("cuenta_id"),
+            current_user=current_user,
+        )
+
+    if "referencia_vivienda_id" in incoming:
+        _validate_vivienda_for_user(
+            db,
+            vivienda_id=incoming.get("referencia_vivienda_id"),
+            current_user=current_user,
+        )
 
     if incoming.get("cobrado") is True and incoming.get("omitido_este_mes") is True:
         raise HTTPException(
@@ -748,8 +805,37 @@ def update_ingreso(
         obj.omitido_este_mes = False
 
     obj.modifiedon = func.now()
-    db.commit()
-    db.refresh(obj)
+
+    try:
+        db.commit()
+        db.refresh(obj)
+    except IntegrityError as e:
+        db.rollback()
+        logger.exception("[INGRESOS][UPDATE] IntegrityError | ingreso_id=%s | incoming=%s", ingreso_id, incoming)
+        raise HTTPException(
+            status_code=400,
+            detail=f"Error de integridad al actualizar ingreso: {getattr(e, 'orig', e)}",
+        )
+    except DataError as e:
+        db.rollback()
+        logger.exception("[INGRESOS][UPDATE] DataError | ingreso_id=%s | incoming=%s", ingreso_id, incoming)
+        raise HTTPException(
+            status_code=400,
+            detail=f"Datos inválidos al actualizar ingreso: {e.orig}",
+        )
+    except HTTPException:
+        db.rollback()
+        raise
+    except Exception as e:
+        db.rollback()
+        logger.exception("[INGRESOS][UPDATE] Exception inesperada | ingreso_id=%s | incoming=%s", ingreso_id, incoming)
+        tb = traceback.format_exc()
+        logger.error("[INGRESOS][UPDATE] traceback=\n%s", tb)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error inesperado al actualizar ingreso: {e.__class__.__name__}: {e}",
+        )
+
     obj = _get_ingreso_for_user(db, obj.id, current_user)
     return _serialize_ingreso(obj)
 
@@ -760,12 +846,6 @@ def delete_ingreso(
     db: Session = Depends(get_db),
     current_user: models.User = Depends(require_user),
 ):
-    """
-    Elimina un ingreso del usuario actual.
-
-    Si es PAGO UNICO:
-    - revierte el impacto en liquidez.
-    """
     obj = _get_ingreso_for_user(db, ingreso_id, current_user)
 
     periodicidad = (getattr(obj, "periodicidad", "") or "").strip().upper()
@@ -789,9 +869,6 @@ def omitir_ingreso_mes(
     db: Session = Depends(get_db),
     current_user: models.User = Depends(require_user),
 ):
-    """
-    Marca un ingreso como omitido este mes.
-    """
     ingreso = _get_ingreso_for_user(db, ingreso_id, current_user)
 
     if bool(getattr(ingreso, "cobrado", False)) is True:
@@ -817,9 +894,6 @@ def deshacer_omision_ingreso_mes(
     db: Session = Depends(get_db),
     current_user: models.User = Depends(require_user),
 ):
-    """
-    Revierte omitido este mes.
-    """
     ingreso = _get_ingreso_for_user(db, ingreso_id, current_user)
 
     ingreso.omitido_este_mes = False
@@ -837,9 +911,6 @@ def cobrar_ingreso(
     db: Session = Depends(get_db),
     current_user: models.User = Depends(require_user),
 ):
-    """
-    Marca un ingreso como cobrado y ajusta liquidez si corresponde.
-    """
     ingreso = _get_ingreso_for_user(db, ingreso_id, current_user)
 
     if bool(getattr(ingreso, "omitido_este_mes", False)) is True:
@@ -870,9 +941,6 @@ def activar_ingreso(
     db: Session = Depends(get_db),
     current_user: models.User = Depends(require_user),
 ):
-    """
-    Marca un ingreso como activo.
-    """
     obj = _get_ingreso_for_user(db, ingreso_id, current_user)
     obj.activo = True
     obj.inactivatedon = None
@@ -889,9 +957,6 @@ def inactivar_ingreso(
     db: Session = Depends(get_db),
     current_user: models.User = Depends(require_user),
 ):
-    """
-    Marca un ingreso como inactivo.
-    """
     obj = _get_ingreso_for_user(db, ingreso_id, current_user)
     obj.activo = False
     obj.inactivatedon = func.now()
@@ -907,11 +972,6 @@ def resumen_totales(
     db: Session = Depends(get_db),
     current_user: models.User = Depends(require_user),
 ):
-    """
-    Devuelve:
-    - objetivo: suma de ingresos activos+kpi
-    - cobrados: suma de ingresos activos+kpi ya cobrados
-    """
     objetivo = (
         db.query(func.coalesce(func.sum(models.Ingreso.importe), 0.0))
         .filter(

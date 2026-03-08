@@ -97,7 +97,7 @@ class TipoIngreso(Base):
     nombre = Column(String, nullable=False)
 
     # NUEVO: rama a la que pertenece el tipo de ingreso
-    rama_id = Column(String, ForeignKey("tipo_ramas_ingreso.id"), nullable=True, index=True)
+    rama_id = Column(String, ForeignKey("tipo_ramas_ingreso.id"), nullable=False, index=True)
 
     rama_rel = relationship("TipoRamasIngreso", back_populates="tipos_ingreso")
     ingresos = relationship("Ingreso", back_populates="tipo_rel")
