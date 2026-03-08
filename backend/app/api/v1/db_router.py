@@ -28,6 +28,7 @@ PRIORITY = [
     "public.tipo_segmentos_gasto",
     "public.tipo_ramas_proveedores",
     "public.tipo_ramas_gasto",
+    "public.tipo_ramas_ingreso"
     "public.tipo_ingreso",
     "public.tipo_gasto",
 
@@ -41,6 +42,9 @@ PRIORITY = [
     "public.cuentas_bancarias",
     "public.patrimonio",
     "public.patrimonio_compra",
+    "public.personas",
+    "public.contratos",
+    "public.contratos_participantes",
     "public.ingresos",
     "public.gastos",
     "public.gastos_cotidianos",
