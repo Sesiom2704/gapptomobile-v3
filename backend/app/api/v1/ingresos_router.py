@@ -547,9 +547,26 @@ def create_ingreso(
             obj = _get_ingreso_for_user(db, obj.id, current_user)
             return _serialize_ingreso(obj)
 
-        except IntegrityError:
+        except IntegrityError as e:
             db.rollback()
-            payload["id"] = generate_ingreso_id()
+
+            err_msg = str(getattr(e, "orig", e)).upper()
+
+            # Solo reintentamos si realmente es colisión de PK / ID
+            is_duplicate_id = (
+                'INGRESOS_PKEY' in err_msg
+                or 'DUPLICATE KEY VALUE' in err_msg and '(ID)' in err_msg
+                or 'KEY (ID)=' in err_msg
+            )
+
+            if is_duplicate_id:
+                payload["id"] = generate_ingreso_id()
+                continue
+
+            raise HTTPException(
+                status_code=400,
+                detail=f"Error de integridad al crear ingreso: {getattr(e, 'orig', e)}",
+            )
         except DataError as e:
             db.rollback()
             raise HTTPException(
