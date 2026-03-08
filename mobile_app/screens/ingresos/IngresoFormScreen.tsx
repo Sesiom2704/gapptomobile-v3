@@ -3,11 +3,22 @@
  *
  * Flujo funcional v3:
  * - Primero se selecciona la rama de ingreso.
- * - Después se cargan y muestran solo los tipos asociados a esa rama.
+ * - Después se muestran solo los tipos asociados a esa rama.
  *
- * FIX principal:
- * - Al volver desde AuxEntityForm con una rama o un tipo creado, queda preseleccionado.
- * - Se evita carrera con el reset de foco mediante skipNextResetRef.
+ * Ajustes aplicados:
+ * 1) UX inmediata al seleccionar rama:
+ *    - Se precargan los tipos por rama en segundo plano.
+ *    - Si la rama ya está en caché, los tipos aparecen al instante.
+ *
+ * 2) Viviendas:
+ *    - La sección de vivienda se habilita por RAMA (VIVIENDAS),
+ *      no por tipo de ingreso.
+ *
+ * 3) Mantiene toda la lógica actual:
+ *    - retorno desde AuxEntityForm
+ *    - edición / duplicado / readonly
+ *    - protección anti-reset
+ *    - create/update
  */
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
@@ -36,7 +47,6 @@ import { InlineAddButton } from '../../components/ui/InlineAddButton';
 import { FormDateButton } from '../../components/ui/FormDateButton';
 
 import { colors } from '../../theme';
-
 import { PERIODICIDADES } from '../../constants/finance';
 import { RANGOS_PAGO } from '../../constants/general';
 
@@ -46,17 +56,25 @@ import {
   updateIngreso,
   fetchRamasIngreso,
   fetchTiposIngresoPorRama,
+  preloadTiposIngresoPorRamas,
+  getTiposIngresoPorRamaCache,
   type RamaIngreso,
   type TipoIngresoPorRama,
 } from '../../services/ingresosApi';
 
-import { EuroformatEuro, parseImporte, appendMonthYearSuffix, formatFechaCorta } from '../../utils/format';
+import {
+  EuroformatEuro,
+  parseImporte,
+  appendMonthYearSuffix,
+  formatFechaCorta,
+} from '../../utils/format';
 import { useResetFormOnFocus } from '../../utils/formsUtils';
 
 // ---- Tipos locales ----
 type IngresoMode = 'gestionable' | 'extraordinario';
 
 type TipoIngreso = { id: string; nombre: string; rama_id?: string | null };
+
 type Cuenta = {
   id: string;
   nombre?: string;
@@ -219,16 +237,12 @@ function isAuxRamaIngreso(res: any): boolean {
   if (rk === RETURN_KEY_RAMA_INGRESO || k === RETURN_KEY_RAMA_INGRESO) return true;
 
   const typeRaw = String(res.type ?? res.auxType ?? '').trim().toLowerCase();
-  if (
+  return (
     typeRaw === 'tipo_ramas_ingreso' ||
     typeRaw === 'tiporamasingreso' ||
     typeRaw === 'tipo-rama-ingreso' ||
     typeRaw === 'rama_ingreso'
-  ) {
-    return true;
-  }
-
-  return false;
+  );
 }
 
 // ---- Componente ----
@@ -283,9 +297,13 @@ const IngresoFormScreen: React.FC<Props> = ({ navigation, route }) => {
   const tipoId = tipoIdState;
 
   const [cuentaId, setCuentaId] = useState<string | null>(ingresoSource?.cuenta_id ?? null);
-  const [viviendaId, setViviendaId] = useState<string | null>(ingresoSource?.referencia_vivienda_id ?? null);
+  const [viviendaId, setViviendaId] = useState<string | null>(
+    ingresoSource?.referencia_vivienda_id ?? null
+  );
 
-  const [importe, setImporte] = useState<string>(ingresoSource?.importe != null ? String(ingresoSource.importe) : '');
+  const [importe, setImporte] = useState<string>(
+    ingresoSource?.importe != null ? String(ingresoSource.importe) : ''
+  );
 
   const [fechaInicio, setFechaInicio] = useState<string>(() => {
     if (ingresoSource?.fecha_inicio) return ingresoSource.fecha_inicio;
@@ -304,7 +322,9 @@ const IngresoFormScreen: React.FC<Props> = ({ navigation, route }) => {
     return mode === 'extraordinario' ? 'PAGO UNICO' : 'MENSUAL';
   });
 
-  const [activo, setActivo] = useState<boolean>(ingresoSource?.activo ?? mode === 'gestionable');
+  const [activo, setActivo] = useState<boolean>(
+    ingresoSource?.activo ?? mode === 'gestionable'
+  );
   const [cobrado, setCobrado] = useState<boolean>(ingresoSource?.cobrado ?? false);
   const [kpi, setKpi] = useState<boolean>(ingresoSource?.kpi ?? mode === 'gestionable');
 
@@ -313,7 +333,8 @@ const IngresoFormScreen: React.FC<Props> = ({ navigation, route }) => {
   const modifiedOn: string | null = ingresoAny?.modifiedon ?? null;
   const inactivatedOn: string | null = ingresoAny?.inactivatedon ?? null;
   const ultimoIngresoOn: string | null = ingresoAny?.ultimo_ingreso_on ?? null;
-  const userName: string | null = ingresoAny?.user_nombre ?? ingresoAny?.userName ?? ingresoAny?.user_id ?? null;
+  const userName: string | null =
+    ingresoAny?.user_nombre ?? ingresoAny?.userName ?? ingresoAny?.user_id ?? null;
 
   // Avanzadas solo edición
   const [showAdvanced, setShowAdvanced] = useState<boolean>(false);
@@ -330,8 +351,14 @@ const IngresoFormScreen: React.FC<Props> = ({ navigation, route }) => {
 
   const navigateBack = useCallback(() => {
     if (returnToTab) {
-      if (returnToScreen) navigation.navigate(returnToTab, { screen: returnToScreen, params: returnToParams });
-      else navigation.navigate(returnToTab);
+      if (returnToScreen) {
+        navigation.navigate(returnToTab, {
+          screen: returnToScreen,
+          params: returnToParams,
+        });
+      } else {
+        navigation.navigate(returnToTab);
+      }
       return;
     }
     if (fromHome) {
@@ -413,23 +440,56 @@ const IngresoFormScreen: React.FC<Props> = ({ navigation, route }) => {
     }
   }, [duplicate, ingresoSource]);
 
+  /**
+   * Carga tipos de una rama.
+   * - Si useCacheFirst=true y ya existe en caché, los pinta al instante.
+   * - Si no existe, consulta backend y actualiza el estado.
+   */
   const loadTiposForRama = useCallback(
-    async (targetRamaId: string | null, options?: { preserveTipoId?: string | null }) => {
+    async (
+      targetRamaId: string | null,
+      options?: {
+        preserveTipoId?: string | null;
+        useCacheFirst?: boolean;
+        forceRefresh?: boolean;
+      }
+    ) => {
       if (!targetRamaId) {
         setTipos([]);
         return;
       }
 
+      const preserveTipoId = options?.preserveTipoId ?? null;
+      const useCacheFirst = options?.useCacheFirst !== false;
+      const forceRefresh = options?.forceRefresh === true;
+
       try {
-        const tiposRes = await fetchTiposIngresoPorRama(targetRamaId);
+        if (useCacheFirst) {
+          const cached = getTiposIngresoPorRamaCache(targetRamaId);
+          if (cached) {
+            const tiposNorm = cached.map((t) => normalizeTipoIngreso(t));
+            setTipos(tiposNorm);
+
+            if (preserveTipoId) {
+              const exists = tiposNorm.some((t) => String(t.id) === String(preserveTipoId));
+              if (!exists) {
+                setTipoId(null, 'loadTiposForRama-cache-preserveTipoNotFound');
+              }
+            }
+
+            // Refresco silencioso opcional si se solicita
+            if (!forceRefresh) return;
+          }
+        }
+
+        const tiposRes = await fetchTiposIngresoPorRama(targetRamaId, { forceRefresh });
         const tiposNorm = (tiposRes ?? []).map((t: TipoIngresoPorRama) => normalizeTipoIngreso(t));
         setTipos(tiposNorm);
 
-        const preserveTipoId = options?.preserveTipoId ?? null;
         if (preserveTipoId) {
           const exists = tiposNorm.some((t) => String(t.id) === String(preserveTipoId));
           if (!exists) {
-            setTipoId(null, 'loadTiposForRama-preserveTipoNotFound');
+            setTipoId(null, 'loadTiposForRama-api-preserveTipoNotFound');
           }
         }
 
@@ -466,6 +526,9 @@ const IngresoFormScreen: React.FC<Props> = ({ navigation, route }) => {
       setCuentas(cuentasRes || []);
       setViviendas(viviendasRes || []);
 
+      // ✅ Preload silencioso de tipos por todas las ramas para UX inmediata
+      void preloadTiposIngresoPorRamas(ramasNorm.map((r) => r.id));
+
       const initialRamaId =
         pendingRamaIdRef.current ??
         (ramaId != null ? String(ramaId) : null) ??
@@ -474,6 +537,7 @@ const IngresoFormScreen: React.FC<Props> = ({ navigation, route }) => {
       if (initialRamaId) {
         await loadTiposForRama(initialRamaId, {
           preserveTipoId: pendingTipoIdRef.current ?? tipoId ?? ingresoSource?.tipo_id ?? null,
+          useCacheFirst: true,
         });
       } else {
         setTipos([]);
@@ -593,7 +657,7 @@ const IngresoFormScreen: React.FC<Props> = ({ navigation, route }) => {
             setTipoId(null, 'auxRamaResetTipo');
             pendingTipoIdRef.current = null;
 
-            await loadTiposForRama(newRamaId);
+            await loadTiposForRama(newRamaId, { useCacheFirst: true, forceRefresh: true });
             if (!alive) return;
 
             return;
@@ -602,11 +666,12 @@ const IngresoFormScreen: React.FC<Props> = ({ navigation, route }) => {
           if (isTipo) {
             const newTipo = normalizeTipoIngreso(item);
             const newTipoId = String(newTipo.id);
-            const newTipoRamaId =
-              newTipo.rama_id != null ? String(newTipo.rama_id) : null;
+            const newTipoRamaId = newTipo.rama_id != null ? String(newTipo.rama_id) : null;
 
             if (!newTipoRamaId) {
-              console.warn('[IngresoForm][AUX] El tipo creado no trae rama_id; no se puede preseleccionar correctamente.');
+              console.warn(
+                '[IngresoForm][AUX] El tipo creado no trae rama_id; no se puede preseleccionar correctamente.'
+              );
               return;
             }
 
@@ -616,7 +681,7 @@ const IngresoFormScreen: React.FC<Props> = ({ navigation, route }) => {
             setRamaId(newTipoRamaId, 'auxTipoSetRama');
             setTipoId(newTipoId, 'auxTipoImmediate');
 
-            await loadTiposForRama(newTipoRamaId);
+            await loadTiposForRama(newTipoRamaId, { useCacheFirst: true, forceRefresh: true });
             if (!alive) return;
 
             setTipos((prev) => {
@@ -671,7 +736,20 @@ const IngresoFormScreen: React.FC<Props> = ({ navigation, route }) => {
       cobrado,
       kpi,
     };
-  }, [concepto, ramaId, tipoId, cuentaId, viviendaId, importe, fechaInicio, rangoCobro, periodicidad, activo, cobrado, kpi]);
+  }, [
+    concepto,
+    ramaId,
+    tipoId,
+    cuentaId,
+    viviendaId,
+    importe,
+    fechaInicio,
+    rangoCobro,
+    periodicidad,
+    activo,
+    cobrado,
+    kpi,
+  ]);
 
   const baselineRef = useRef<Snapshot | null>(null);
 
@@ -754,19 +832,38 @@ const IngresoFormScreen: React.FC<Props> = ({ navigation, route }) => {
 
   const ramaSeleccionada = ramas.find((r) => String(r.id) === String(ramaId)) || null;
   const tipoSeleccionado = tipos.find((t) => String(t.id) === String(tipoId)) || null;
-  const isTipoVivienda = !!tipoSeleccionado && tipoSeleccionado.nombre.toUpperCase().includes('VIVIENDA');
+
+  // ✅ Regla corregida: la vivienda depende de la RAMA, no del tipo
+  const isRamaViviendas = !!ramaSeleccionada && ramaSeleccionada.nombre.toUpperCase().includes('VIVIENDA');
 
   const handleSelectRama = async (newRamaId: string) => {
     if (readOnly) return;
 
-    const sameRama = String(ramaId ?? '') === String(newRamaId ?? '');
+    const normalizedNewRamaId = String(newRamaId ?? '');
+    const sameRama = String(ramaId ?? '') === normalizedNewRamaId;
     if (sameRama) return;
 
-    setRamaId(String(newRamaId), 'manualRamaSelect');
+    // 1) selección visual inmediata
+    setRamaId(normalizedNewRamaId, 'manualRamaSelect');
+
+    // 2) tipos inmediatos si ya están en caché
+    const cached = getTiposIngresoPorRamaCache(normalizedNewRamaId);
+    if (cached) {
+      const tiposNorm = cached.map((t) => normalizeTipoIngreso(t));
+      setTipos(tiposNorm);
+    } else {
+      setTipos([]);
+    }
+
+    // 3) limpiar selección dependiente
     setTipoId(null, 'manualRamaSelect-resetTipo');
+    setViviendaId(null);
     pendingTipoIdRef.current = null;
 
-    await loadTiposForRama(String(newRamaId));
+    // 4) asegurar sincronización con backend/caché
+    await loadTiposForRama(normalizedNewRamaId, {
+      useCacheFirst: true,
+    });
   };
 
   const handleAddRamaIngreso = () => {
@@ -827,6 +924,10 @@ const IngresoFormScreen: React.FC<Props> = ({ navigation, route }) => {
       Alert.alert('Campo obligatorio', 'Selecciona una cuenta de cargo.');
       return;
     }
+    if (isRamaViviendas && !viviendaId) {
+      Alert.alert('Campo obligatorio', 'Selecciona una vivienda para esta rama de ingreso.');
+      return;
+    }
 
     const importeNumber = parseImporte(importe);
     if (importeNumber == null || importeNumber <= 0) {
@@ -842,7 +943,7 @@ const IngresoFormScreen: React.FC<Props> = ({ navigation, route }) => {
       fecha_inicio: fechaInicio,
       rama_id: String(ramaId),
       tipo_id: String(tipoId),
-      referencia_vivienda_id: viviendaId,
+      referencia_vivienda_id: isRamaViviendas ? viviendaId : null,
       cuenta_id: String(cuentaId),
       activo,
       cobrado,
@@ -854,13 +955,17 @@ const IngresoFormScreen: React.FC<Props> = ({ navigation, route }) => {
       if (isEdit && ingresoSource?.id) {
         await updateIngreso(ingresoSource.id, payload);
         baselineRef.current = getSnapshot();
-        Alert.alert('Ingreso actualizado', 'Los cambios se han guardado correctamente.', [{ text: 'OK', onPress: navigateBack }]);
+        Alert.alert('Ingreso actualizado', 'Los cambios se han guardado correctamente.', [
+          { text: 'OK', onPress: navigateBack },
+        ]);
       } else {
         await createIngreso(payload);
         baselineRef.current = getSnapshot();
         Alert.alert(
           'Ingreso creado',
-          mode === 'extraordinario' ? 'Ingreso extraordinario creado correctamente.' : 'Ingreso gestionable creado correctamente.',
+          mode === 'extraordinario'
+            ? 'Ingreso extraordinario creado correctamente.'
+            : 'Ingreso gestionable creado correctamente.',
           [{ text: 'OK', onPress: navigateBack }]
         );
       }
@@ -872,7 +977,11 @@ const IngresoFormScreen: React.FC<Props> = ({ navigation, route }) => {
     }
   };
 
-  const headerTitle = useMemo(() => (mode === 'extraordinario' ? 'Ingreso extraordinario' : 'Ingreso gestionable'), [mode]);
+  const headerTitle = useMemo(
+    () => (mode === 'extraordinario' ? 'Ingreso extraordinario' : 'Ingreso gestionable'),
+    [mode]
+  );
+
   const headerSubtitle = useMemo(() => {
     if (readOnly) return 'Consulta';
     if (duplicate) return 'Duplicado';
@@ -884,7 +993,12 @@ const IngresoFormScreen: React.FC<Props> = ({ navigation, route }) => {
     return (
       <Screen>
         <View style={styles.topArea}>
-          <Header title={headerTitle} subtitle={headerSubtitle} showBack onBackPress={handleBackPress} />
+          <Header
+            title={headerTitle}
+            subtitle={headerSubtitle}
+            showBack
+            onBackPress={handleBackPress}
+          />
         </View>
         <View style={stylesLocal.loader}>
           <ActivityIndicator />
@@ -898,7 +1012,12 @@ const IngresoFormScreen: React.FC<Props> = ({ navigation, route }) => {
   return (
     <Screen>
       <View style={styles.topArea}>
-        <Header title={headerTitle} subtitle={headerSubtitle} showBack onBackPress={handleBackPress} />
+        <Header
+          title={headerTitle}
+          subtitle={headerSubtitle}
+          showBack
+          onBackPress={handleBackPress}
+        />
       </View>
 
       <ScrollView
@@ -991,7 +1110,9 @@ const IngresoFormScreen: React.FC<Props> = ({ navigation, route }) => {
 
             {DEBUG_AUX && (
               <Text style={styles.helperText}>
-                DEBUG: tipoId={String(tipoId ?? 'null')} | pendingRama={String(pendingRamaIdRef.current ?? 'null')} | pendingTipo={String(pendingTipoIdRef.current ?? 'null')} | tipos={tipos.length}
+                DEBUG: tipoId={String(tipoId ?? 'null')} | pendingRama=
+                {String(pendingRamaIdRef.current ?? 'null')} | pendingTipo=
+                {String(pendingTipoIdRef.current ?? 'null')} | tipos={tipos.length}
               </Text>
             )}
           </View>
@@ -1030,7 +1151,7 @@ const IngresoFormScreen: React.FC<Props> = ({ navigation, route }) => {
         </FormSection>
 
         <FormSection title="Vinculaciones">
-          {isTipoVivienda && (
+          {isRamaViviendas && (
             <View style={styles.field}>
               <Text style={styles.label}>Vivienda</Text>
               <View style={styles.accountsRow}>
@@ -1116,7 +1237,10 @@ const IngresoFormScreen: React.FC<Props> = ({ navigation, route }) => {
 
         {canShowAdvancedSection && (
           <FormSection title="Opciones avanzadas">
-            <TouchableOpacity style={styles.advancedToggle} onPress={() => setShowAdvanced((p) => !p)}>
+            <TouchableOpacity
+              style={styles.advancedToggle}
+              onPress={() => setShowAdvanced((p) => !p)}
+            >
               <Ionicons
                 name={showAdvanced ? 'chevron-up' : 'chevron-down'}
                 size={16}
@@ -1168,28 +1292,48 @@ const IngresoFormScreen: React.FC<Props> = ({ navigation, route }) => {
                 <View style={styles.fieldRowTwoCols}>
                   <View style={styles.col}>
                     <Text style={styles.label}>Creado el</Text>
-                    <TextInput style={[styles.input, styles.inputAdvanced]} editable={false} value={createOn ? formatDateDisplay(createOn) : ''} />
+                    <TextInput
+                      style={[styles.input, styles.inputAdvanced]}
+                      editable={false}
+                      value={createOn ? formatDateDisplay(createOn) : ''}
+                    />
                   </View>
                   <View style={styles.col}>
                     <Text style={styles.label}>Inactivado el</Text>
-                    <TextInput style={[styles.input, styles.inputAdvanced]} editable={false} value={inactivatedOn ? formatDateDisplay(inactivatedOn) : ''} />
+                    <TextInput
+                      style={[styles.input, styles.inputAdvanced]}
+                      editable={false}
+                      value={inactivatedOn ? formatDateDisplay(inactivatedOn) : ''}
+                    />
                   </View>
                 </View>
 
                 <View style={styles.fieldRowTwoCols}>
                   <View style={styles.col}>
                     <Text style={styles.label}>Último cobro</Text>
-                    <TextInput style={[styles.input, styles.inputAdvanced]} editable={false} value={ultimoIngresoOn ? formatDateDisplay(ultimoIngresoOn) : ''} />
+                    <TextInput
+                      style={[styles.input, styles.inputAdvanced]}
+                      editable={false}
+                      value={ultimoIngresoOn ? formatDateDisplay(ultimoIngresoOn) : ''}
+                    />
                   </View>
                   <View style={styles.col}>
                     <Text style={styles.label}>Modificado el</Text>
-                    <TextInput style={[styles.input, styles.inputAdvanced]} editable={false} value={modifiedOn ? formatDateDisplay(modifiedOn) : ''} />
+                    <TextInput
+                      style={[styles.input, styles.inputAdvanced]}
+                      editable={false}
+                      value={modifiedOn ? formatDateDisplay(modifiedOn) : ''}
+                    />
                   </View>
                 </View>
 
                 <View style={styles.field}>
                   <Text style={styles.label}>Usuario</Text>
-                  <TextInput style={[styles.input, styles.inputAdvanced]} editable={false} value={userName ?? ''} />
+                  <TextInput
+                    style={[styles.input, styles.inputAdvanced]}
+                    editable={false}
+                    value={userName ?? ''}
+                  />
                 </View>
               </>
             )}

@@ -73,6 +73,13 @@ def _get_default_tipo_ingreso_alquiler_id() -> str:
     return "VIV-TIPO_INGRESO-FKV95F"
 
 
+def _get_default_rama_ingreso_alquiler_id() -> str:
+    """
+    Rama ingreso fija solicitada para rentas de alquiler.
+    """
+    return "VIV-TIPORAMAINGRESO-6F29A938"
+
+
 def _get_default_cuenta_alquiler_id() -> str:
     """
     Cuenta bancaria por defecto solicitada para crear ingresos automáticos de alquiler.
@@ -131,10 +138,40 @@ def _get_ingreso_by_contrato(
         .filter(
             models.Ingreso.user_id == user_id,
             models.Ingreso.contrato_alquiler == contrato_id,
-            models.Ingreso.inactivatedon.is_(None),
         )
         .first()
     )
+
+
+def _get_inquilino_principal_nombre(contrato: models.Contrato) -> Optional[str]:
+    for p in (contrato.participantes or []):
+        if (
+            getattr(p, "inactivatedon", None) is None
+            and p.persona is not None
+            and p.rol == "inquilino"
+            and bool(p.es_principal)
+        ):
+            return p.persona.nombre_completo or p.persona.id
+    return None
+
+
+def _build_ingreso_concepto(contrato: models.Contrato) -> str:
+    """
+    Regla solicitada:
+    ALQ + NOMBRE INQUILINO PRINCIPAL + REFERENCIA CASA
+
+    Fallback si aún no existe principal:
+    ALQ SIN_INQUILINO + REFERENCIA CASA
+    """
+    referencia = (
+        getattr(contrato.patrimonio_rel, "referencia", None)
+        or contrato.patrimonio_id
+        or "SIN_REFERENCIA"
+    )
+
+    principal = _get_inquilino_principal_nombre(contrato) or "SIN_INQUILINO"
+
+    return normalize_upper_ascii(f"ALQ {principal} {referencia}") or f"ALQ {principal} {referencia}"
 
 
 def _build_participantes_resumen(contrato: models.Contrato) -> ParticipantesResumenOut:
@@ -254,7 +291,8 @@ def _create_ingreso_for_contrato(
     - rango_cobro: 1-3
     - periodicidad: MENSUAL
     - tipo_id: VIV-TIPO_INGRESO-FKV95F
-    - concepto: ALQUILER VIVIENDAS
+    - rama_id: VIV-TIPORAMAINGRESO-6F29A938
+    - concepto: ALQ + INQUILINO PRINCIPAL + REFERENCIA CASA
     - cuenta_id: BANCO-679A92B7
     - contrato_alquiler: id del contrato
     """
@@ -263,9 +301,10 @@ def _create_ingreso_for_contrato(
         rango_cobro="1-3",
         periodicidad="MENSUAL",
         tipo_id=_get_default_tipo_ingreso_alquiler_id(),
+        rama_id=_get_default_rama_ingreso_alquiler_id(),
         referencia_vivienda_id=contrato.patrimonio_id,
         contrato_alquiler=contrato.id,
-        concepto="ALQUILER VIVIENDAS",
+        concepto=_build_ingreso_concepto(contrato),
         importe=float(contrato.renta_mensual) if contrato.renta_mensual is not None else 0.0,
         activo=True,
         cobrado=False,
@@ -305,16 +344,27 @@ def _sync_ingreso_for_contrato(
     ingreso.rango_cobro = "1-3"
     ingreso.periodicidad = "MENSUAL"
     ingreso.tipo_id = _get_default_tipo_ingreso_alquiler_id()
+    ingreso.rama_id = _get_default_rama_ingreso_alquiler_id()
     ingreso.referencia_vivienda_id = contrato.patrimonio_id
     ingreso.contrato_alquiler = contrato.id
-    ingreso.concepto = "ALQUILER VIVIENDAS"
+    ingreso.concepto = _build_ingreso_concepto(contrato)
     ingreso.importe = float(contrato.renta_mensual) if contrato.renta_mensual is not None else 0.0
     ingreso.fecha_inicio = contrato.fecha_inicio
     ingreso.cuenta_id = _get_default_cuenta_alquiler_id()
     ingreso.modifiedon = datetime.utcnow()
 
     estado = (contrato.estado or "").strip().lower()
-    ingreso.activo = estado not in {"finalizado", "cancelado"} and contrato.inactivatedon is None
+    contrato_inactivo = contrato.inactivatedon is not None
+    contrato_baja = estado in {"finalizado", "cancelado"} or contrato_inactivo
+
+    if contrato_baja:
+        ingreso.activo = False
+        ingreso.kpi = False
+        ingreso.inactivatedon = datetime.utcnow()
+    else:
+        ingreso.activo = True
+        ingreso.kpi = True
+        ingreso.inactivatedon = None
 
     return ingreso
 
@@ -522,6 +572,8 @@ def crear_contrato(
 
     db.add(row)
     db.flush()
+
+    row = _get_owned_contrato(db, row.id, current_user.id)
 
     _create_ingreso_for_contrato(
         db=db,
@@ -762,6 +814,16 @@ def crear_participante_contrato(
     )
 
     db.add(row)
+    db.flush()
+
+    # recargamos contrato y sincronizamos concepto del ingreso por si cambia principal
+    contrato = _get_owned_contrato(db, contrato.id, current_user.id)
+    _sync_ingreso_for_contrato(
+        db=db,
+        contrato=contrato,
+        user_id=current_user.id,
+    )
+
     db.commit()
     db.refresh(row)
 
@@ -842,6 +904,15 @@ def actualizar_participante_contrato(
     if payload.inactivatedon is not None:
         row.inactivatedon = payload.inactivatedon
 
+    db.flush()
+
+    contrato = _get_owned_contrato(db, row.contrato_id, current_user.id)
+    _sync_ingreso_for_contrato(
+        db=db,
+        contrato=contrato,
+        user_id=current_user.id,
+    )
+
     db.commit()
     db.refresh(row)
 
@@ -878,7 +949,17 @@ def eliminar_participante_contrato(
             detail="Participante no encontrado",
         )
 
+    contrato_id = row.contrato_id
     row.inactivatedon = datetime.utcnow()
+
+    db.flush()
+
+    contrato = _get_owned_contrato(db, contrato_id, current_user.id)
+    _sync_ingreso_for_contrato(
+        db=db,
+        contrato=contrato,
+        user_id=current_user.id,
+    )
 
     db.commit()
     return None
