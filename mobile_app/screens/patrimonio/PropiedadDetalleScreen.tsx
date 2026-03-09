@@ -677,6 +677,7 @@ export default function PropiedadDetalleScreen({ route, navigation }: Props) {
               variant="primary"
             />
           </View>
+          <View style={styles.actionsRow}></View>
 
           {alquilerLoading ? (
             <ActivityIndicator style={{ marginVertical: spacing.sm }} />

@@ -518,42 +518,52 @@ def _ensure_objeto_alquiler_is_valid_for_patrimonio(
 # Helpers de ingresos automáticos por contrato
 # ==========================================================
 
-def _get_first_inquilino_name_for_concept(contrato: models.Contrato) -> str:
-    """
-    Regla definida:
-    - usar el primer inquilino activo por fecha de creación
-    - truncado a 8 caracteres
-    - si no existe, usar SIN_INQ
-    """
-    participantes = [
-        p for p in (contrato.participantes or [])
-        if getattr(p, "inactivatedon", None) is None
-        and p.rol == "inquilino"
-        and p.persona is not None
-    ]
-
-    participantes.sort(key=lambda p: (p.createon or datetime.min, p.id or ""))
-
-    if not participantes:
-        return "SIN_INQ"
-
-    nombre = str(participantes[0].persona.nombre_completo or "").strip()
-    if not nombre:
-        return "SIN_INQ"
-
-    normalized = normalize_upper_ascii(nombre)
-    return normalized[:8] if normalized else "SIN_INQ"
-
-
 def _build_ingreso_concepto_for_contrato(contrato: models.Contrato) -> str:
+    """
+    Construye el concepto del ingreso automático del alquiler.
+
+    Regla actual:
+    - ALQ. <OBJETO_ALQUILADO> <REFERENCIA_VIVIENDA>
+
+    Ejemplos:
+    - ALQ. COMPLETA FUENSAN2_JAVA
+    - ALQ. GARAJE ALLENDE2_ALCA
+    - ALQ. HAB 2 SAAVEDRA2_SAN
+    """
     referencia = (
         getattr(contrato.patrimonio_rel, "referencia", None)
         or contrato.patrimonio_id
         or "SIN_REFERENCIA"
     )
 
-    tenant = _get_first_inquilino_name_for_concept(contrato)
-    return normalize_upper_ascii(f"ALQ {tenant} {referencia}")
+    objeto_alquiler = getattr(contrato, "objeto_alquiler", None) or "completa"
+    objeto_label = _get_objeto_alquiler_label(objeto_alquiler) or objeto_alquiler
+
+    return normalize_upper_ascii(f"ALQ. {objeto_label} {referencia}")
+
+
+def _build_ingreso_concepto_for_contrato(contrato: models.Contrato) -> str:
+    """
+    Construye el concepto del ingreso automático del alquiler.
+
+    Regla:
+    - ALQ. <OBJETO_ALQUILADO> <REFERENCIA_VIVIENDA>
+
+    Ejemplos:
+    - ALQ. COMPLETA FUENSAN2_JAVA
+    - ALQ. GARAJE ALLENDE2_ALCA
+    - ALQ. HAB 2 SAAVEDRA2_SAN
+    """
+    referencia = (
+        getattr(contrato.patrimonio_rel, "referencia", None)
+        or contrato.patrimonio_id
+        or "SIN_REFERENCIA"
+    )
+
+    objeto_alquiler = getattr(contrato, "objeto_alquiler", None) or "completa"
+    objeto_label = _get_objeto_alquiler_label(objeto_alquiler) or objeto_alquiler
+
+    return normalize_upper_ascii(f"ALQ. {objeto_label} {referencia}")
 
 
 def _create_ingreso_for_contrato(
