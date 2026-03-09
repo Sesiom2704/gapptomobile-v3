@@ -51,8 +51,9 @@ import patrimonioApi, {
 } from '../../services/patrimonioApi';
 
 import {
-  getContratoActivoResumenByPatrimonio,
-  type ContratoResumenActivo,
+  listContratos,
+  getObjetoAlquilerLabel,
+  type ContratoRow,
 } from '../../services/gestionAlquilerApi';
 
 import { EuroformatEuro, formatFechaCorta } from '../../utils/format';
@@ -240,8 +241,8 @@ export default function PropiedadDetalleScreen({ route, navigation }: Props) {
 
   // ---- Alquiler ----
   const [alquilerLoading, setAlquilerLoading] = useState(false);
-  const [alquilerResumen, setAlquilerResumen] = useState<ContratoResumenActivo | null>(null);
-
+  const [contratosPropiedad, setContratosPropiedad] = useState<ContratoRow[]>([]);
+  const [participantesExpanded, setParticipantesExpanded] = useState<Record<string, boolean>>({});
   // KPI info modal
   const [kpiInfoOpen, setKpiInfoOpen] = useState(false);
   const [kpiInfoKey, setKpiInfoKey] = useState<string>('cap_rate_pct');
@@ -379,12 +380,10 @@ export default function PropiedadDetalleScreen({ route, navigation }: Props) {
     setAlquilerLoading(true);
 
     try {
-      const response = await getContratoActivoResumenByPatrimonio(patrimonioId);
-      setAlquilerResumen(response ?? null);
+      const response = await listContratos({ patrimonio_id: patrimonioId });
+      setContratosPropiedad(Array.isArray(response) ? response : []);
     } catch {
-      // Silencioso a propósito: si la vivienda no tiene contrato activo
-      // o si hay cualquier incidencia puntual, no rompemos la pantalla.
-      setAlquilerResumen(null);
+      setContratosPropiedad([]);
     } finally {
       setAlquilerLoading(false);
     }
@@ -433,21 +432,21 @@ export default function PropiedadDetalleScreen({ route, navigation }: Props) {
     navigation?.navigate?.('ContratoCreate', { patrimonioId });
   }, [navigation, patrimonioId]);
 
-  const goVerContrato = useCallback(() => {
-    if (!alquilerResumen?.contrato_id) return;
+  const goVerContrato = useCallback((contratoId: string) => {
+    if (!contratoId) return;
     navigation?.navigate?.('ContratoDetalle', {
       patrimonioId,
-      contratoId: alquilerResumen.contrato_id,
+      contratoId,
     });
-  }, [navigation, patrimonioId, alquilerResumen]);
+  }, [navigation, patrimonioId]);
 
-  const goParticipantes = useCallback(() => {
-    if (!alquilerResumen?.contrato_id) return;
+  const goParticipantes = useCallback((contratoId: string) => {
+    if (!contratoId) return;
     navigation?.navigate?.('ContratoParticipantes', {
       patrimonioId,
-      contratoId: alquilerResumen.contrato_id,
+      contratoId,
     });
-  }, [navigation, patrimonioId, alquilerResumen]);
+  }, [navigation, patrimonioId]);
 
   const totalInv = safeNum(compra?.total_inversion) ?? null;
 
@@ -455,22 +454,26 @@ export default function PropiedadDetalleScreen({ route, navigation }: Props) {
     navigation.navigate('PropiedadesRanking');
   };
 
-  const hasContratoActivo = useMemo(() => {
-    return !!alquilerResumen?.contrato_id && String(alquilerResumen?.estado || '').toLowerCase() === 'activo';
-  }, [alquilerResumen]);
+  const contratosOrdenados = useMemo(() => {
+    return [...contratosPropiedad].sort((a, b) => {
+      const aInicio = String(a.fecha_inicio ?? '');
+      const bInicio = String(b.fecha_inicio ?? '');
+      if (aInicio !== bInicio) return bInicio.localeCompare(aInicio);
 
-  const badgeStyle = useMemo(() => {
-    return getEstadoBadgeStyle(alquilerResumen?.estado);
-  }, [alquilerResumen?.estado]);
+      const aCreate = String(a.createon ?? '');
+      const bCreate = String(b.createon ?? '');
+      return bCreate.localeCompare(aCreate);
+    });
+  }, [contratosPropiedad]);
 
-  const participantes = alquilerResumen?.participantes_resumen;
+  const hasContratos = contratosOrdenados.length > 0;
 
-  const otrosInquilinos = useMemo(() => {
-  const principal = participantes?.inquilino_principal ?? null;
-  const lista = participantes?.inquilinos ?? [];
-
-    return lista.filter((nombre) => !samePersonName(nombre, principal));
-  }, [participantes]);
+  const toggleParticipantes = useCallback((contratoId: string) => {
+    setParticipantesExpanded((prev) => ({
+      ...prev,
+      [contratoId]: !prev[contratoId],
+    }));
+  }, []);
 
   // -------------------------
   // Componentes UI locales
@@ -666,126 +669,153 @@ export default function PropiedadDetalleScreen({ route, navigation }: Props) {
         <View style={styles.card}>
           <CardTitle icon="document-text-outline" text="Alquiler" />
 
+          <View style={styles.actionsRow}>
+            <ActionButton
+              label="Crear contrato"
+              icon="add-outline"
+              onPress={goCrearContrato}
+              variant="primary"
+            />
+          </View>
+
           {alquilerLoading ? (
             <ActivityIndicator style={{ marginVertical: spacing.sm }} />
-          ) : hasContratoActivo && alquilerResumen ? (
-            <>
-              <View style={styles.alquilerHeaderRow}>
-                <View
-                  style={[
-                    styles.estadoBadge,
-                    {
-                      backgroundColor: badgeStyle.backgroundColor,
-                      borderColor: badgeStyle.borderColor,
-                    },
-                  ]}
-                >
-                  <Text style={[styles.estadoBadgeText, { color: badgeStyle.textColor }]}>
-                    {formatEstadoContrato(alquilerResumen.estado)}
-                  </Text>
-                </View>
-
-                <Text style={styles.alquilerRenta}>
-                  {alquilerResumen.renta_mensual != null
-                    ? `${EuroformatEuro(alquilerResumen.renta_mensual)} / mes`
-                    : 'Renta no informada'}
+          ) : !hasContratos ? (
+            <View style={styles.emptyAlquilerBox}>
+              <View
+                style={[
+                  styles.estadoBadge,
+                  {
+                    backgroundColor: colors.neutralSoft,
+                    borderColor: colors.border,
+                  },
+                ]}
+              >
+                <Text style={[styles.estadoBadgeText, { color: colors.textSecondary }]}>
+                  Sin contratos
                 </Text>
               </View>
 
-              <View style={styles.metaGrid}>
-                <Meta
-                  label="Inicio"
-                  value={
-                    alquilerResumen.fecha_inicio
-                      ? formatFechaCorta(alquilerResumen.fecha_inicio)
-                      : '—'
-                  }
-                />
-                <Meta
-                  label="Fin"
-                  value={
-                    alquilerResumen.fecha_fin ? formatFechaCorta(alquilerResumen.fecha_fin) : '—'
-                  }
-                />
-                <Meta
-                  label="Fianza"
-                  value={
-                    alquilerResumen.fianza != null
-                      ? EuroformatEuro(alquilerResumen.fianza)
-                      : '—'
-                  }
-                />
-                <Meta label="Contrato" value={alquilerResumen.contrato_id} />
-              </View>
-
-              <View style={styles.alquilerParticipantesBox}>
-                <Text style={styles.alquilerSectionTitle}>Participantes</Text>
-
-                <MiniRow
-                  label="Inquilino principal"
-                  value={participantes?.inquilino_principal || '—'}
-                />
-                <MiniRow
-                  label="Otros inquilinos"
-                  value={otrosInquilinos.length ? otrosInquilinos.join(', ') : '—'}
-                />
-                <MiniRow
-                  label="Avalistas"
-                  value={
-                    participantes?.avalistas?.length
-                      ? participantes.avalistas.join(', ')
-                      : '—'
-                  }
-                />
-                <MiniRow label="Gestor" value={participantes?.gestor || '—'} />
-              </View>
-
-              <View style={styles.actionsRow}>
-                <ActionButton
-                  label="Ver contrato"
-                  icon="eye-outline"
-                  onPress={goVerContrato}
-                  variant="secondary"
-                />
-                <ActionButton
-                  label="Participantes"
-                  icon="people-outline"
-                  onPress={goParticipantes}
-                  variant="primary"
-                />
-              </View>
-            </>
+              <Text style={styles.emptyAlquilerText}>
+                Esta propiedad todavía no tiene contratos registrados.
+              </Text>
+            </View>
           ) : (
-            <>
-              <View style={styles.emptyAlquilerBox}>
-                <View
-                  style={[
-                    styles.estadoBadge,
-                    {
-                      backgroundColor: colors.neutralSoft,
-                      borderColor: colors.border,
-                    },
-                  ]}
-                >
-                  <Text style={[styles.estadoBadgeText, { color: colors.textSecondary }]}>
-                    Sin contrato activo
-                  </Text>
-                </View>
+            <View style={styles.contractsList}>
+              {contratosOrdenados.map((contrato) => {
+                const badgeStyle = getEstadoBadgeStyle(contrato.estado);
+                const participantes = contrato.participantes_resumen;
+                const expanded = !!participantesExpanded[contrato.id];
 
-                <Text style={styles.emptyAlquilerText}>
-                  Esta vivienda no tiene un contrato activo asociado.
-                </Text>
-              </View>
+                const principal = participantes?.inquilino_principal ?? null;
+                const otrosInquilinos = (participantes?.inquilinos ?? []).filter(
+                  (nombre) => !samePersonName(nombre, principal)
+                );
 
-              <View style={styles.actionsRow}>
-                <ActionButton
-                  label="Crear contrato"
-                  icon="add-outline"
-                  onPress={goCrearContrato}
-                  variant="primary"
-                />
-              </View>
-            </>
+                return (
+                  <View key={contrato.id} style={styles.contractCard}>
+                    <View style={styles.alquilerHeaderRow}>
+                      <View
+                        style={[
+                          styles.estadoBadge,
+                          {
+                            backgroundColor: badgeStyle.backgroundColor,
+                            borderColor: badgeStyle.borderColor,
+                          },
+                        ]}
+                      >
+                        <Text style={[styles.estadoBadgeText, { color: badgeStyle.textColor }]}>
+                          {formatEstadoContrato(contrato.estado)}
+                        </Text>
+                      </View>
+
+                      <Text style={styles.alquilerRenta}>
+                        {contrato.renta_mensual != null
+                          ? `${EuroformatEuro(contrato.renta_mensual)} / mes`
+                          : 'Renta no informada'}
+                      </Text>
+                    </View>
+
+                    <View style={styles.metaGrid}>
+                      <Meta
+                        label="Contrato"
+                        value={contrato.id}
+                      />
+                      <Meta
+                        label="Objeto alquilado"
+                        value={contrato.objeto_alquiler_label || getObjetoAlquilerLabel(contrato.objeto_alquiler)}
+                      />
+                      <Meta
+                        label="Inicio"
+                        value={contrato.fecha_inicio ? formatFechaCorta(contrato.fecha_inicio) : '—'}
+                      />
+                      <Meta
+                        label="Fin"
+                        value={contrato.fecha_fin ? formatFechaCorta(contrato.fecha_fin) : '—'}
+                      />
+                      <Meta
+                        label="Fianza"
+                        value={contrato.fianza != null ? EuroformatEuro(contrato.fianza) : '—'}
+                      />
+                    </View>
+
+                    <TouchableOpacity
+                      onPress={() => toggleParticipantes(contrato.id)}
+                      activeOpacity={0.85}
+                      style={styles.participantesToggle}
+                    >
+                      <View style={styles.participantesToggleLeft}>
+                        <Ionicons name="people-outline" size={16} color={colors.primary} />
+                        <Text style={styles.participantesToggleText}>Participantes</Text>
+                      </View>
+
+                      <Ionicons
+                        name={expanded ? 'chevron-up-outline' : 'chevron-down-outline'}
+                        size={18}
+                        color={colors.textSecondary}
+                      />
+                    </TouchableOpacity>
+
+                    {expanded ? (
+                      <View style={styles.alquilerParticipantesBox}>
+                        <MiniRow
+                          label="Inquilino principal"
+                          value={participantes?.inquilino_principal || '—'}
+                        />
+                        <MiniRow
+                          label="Otros inquilinos"
+                          value={otrosInquilinos.length ? otrosInquilinos.join(', ') : '—'}
+                        />
+                        <MiniRow
+                          label="Avalistas"
+                          value={
+                            participantes?.avalistas?.length
+                              ? participantes.avalistas.join(', ')
+                              : '—'
+                          }
+                        />
+                        <MiniRow label="Gestor" value={participantes?.gestor || '—'} />
+                      </View>
+                    ) : null}
+
+                    <View style={styles.actionsRow}>
+                      <ActionButton
+                        label="Ver contrato"
+                        icon="eye-outline"
+                        onPress={() => goVerContrato(contrato.id)}
+                        variant="secondary"
+                      />
+                      <ActionButton
+                        label="Participantes"
+                        icon="people-outline"
+                        onPress={() => goParticipantes(contrato.id)}
+                        variant="primary"
+                      />
+                    </View>
+                  </View>
+                );
+              })}
+            </View>
           )}
         </View>
 
@@ -1250,6 +1280,39 @@ const styles = StyleSheet.create({
     color: colors.textMuted,
     textAlign: 'center',
     fontWeight: '700',
+  },
+
+  contractsList: {
+    gap: spacing.sm,
+  },
+  contractCard: {
+    borderWidth: 1,
+    borderColor: colors.border,
+    borderRadius: radius.md,
+    backgroundColor: colors.surface,
+    padding: spacing.sm,
+  },
+  participantesToggle: {
+    marginTop: spacing.xs,
+    minHeight: 40,
+    borderWidth: 1,
+    borderColor: colors.border,
+    borderRadius: radius.md,
+    backgroundColor: colors.background,
+    paddingHorizontal: spacing.sm,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
+  participantesToggleLeft: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  participantesToggleText: {
+    fontSize: 12,
+    fontWeight: '800',
+    color: colors.textPrimary,
   },
 
   // Tabla breakdown

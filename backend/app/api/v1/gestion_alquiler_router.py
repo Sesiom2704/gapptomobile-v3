@@ -1,6 +1,6 @@
 """
 Archivo: backend/app/api/v1/gestion_alquiler_router.py
-Versión: 3.2.0
+Versión: 3.2.1
 
 Descripción:
 - API v1 del módulo de gestión de alquileres.
@@ -275,6 +275,26 @@ def _is_contrato_no_operativo(contrato: models.Contrato) -> bool:
 # Helpers de objeto_alquiler y compatibilidad
 # ==========================================================
 
+def _get_tipo_inmueble_code(patrimonio: models.Patrimonio) -> str:
+    """
+    Extrae el código real de tipo_inmueble tanto si llega como string
+    como si llega como enum SQLAlchemy/Postgres.
+    """
+    raw = getattr(patrimonio, "tipo_inmueble", None)
+
+    if raw is None:
+        return ""
+
+    # Caso enum Python / SQLAlchemy
+    if hasattr(raw, "value"):
+        return str(raw.value or "").strip().upper()
+
+    # Caso nombre de enum
+    if hasattr(raw, "name"):
+        return str(raw.name or "").strip().upper()
+
+    return str(raw).strip().upper()
+
 def _is_habitacion_code(value: str) -> bool:
     return bool(re.match(r"^habitacion_\d+$", value or ""))
 
@@ -302,13 +322,14 @@ def _build_allowed_objeto_codes_for_patrimonio(patrimonio: models.Patrimonio) ->
     habitaciones = int(getattr(patrimonio, "habitaciones", 0) or 0)
     garaje = bool(getattr(patrimonio, "garaje", False))
     trastero = bool(getattr(patrimonio, "trastero", False))
-    tipo_inmueble = str(getattr(patrimonio, "tipo_inmueble", "") or "").upper()
+    tipo_inmueble = _get_tipo_inmueble_code(patrimonio)
 
     if tipo_inmueble != "VIVIENDA":
         return ["completa"]
 
     options: list[str] = ["completa"]
 
+    # Vivienda solo se muestra cuando hay anexos
     if garaje or trastero:
         options.append("vivienda")
 
@@ -327,12 +348,12 @@ def _build_allowed_objeto_codes_for_patrimonio(patrimonio: models.Patrimonio) ->
     if trastero:
         options.append("vivienda_trastero")
 
+    # Habitaciones solo si hay más de 1
     if habitaciones > 1:
         for i in range(1, habitaciones + 1):
             options.append(f"habitacion_{i}")
 
     return options
-
 
 def _objeto_uses_garaje(code: str) -> bool:
     return code in {"completa", "garaje", "garaje_trastero", "vivienda_garaje"}
