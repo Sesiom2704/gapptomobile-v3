@@ -1,25 +1,15 @@
-// mobile_app/navigation/PropiedadesStack.tsx
-//
-// Stack de navegación de Propiedades / Patrimonio (v3)
-//
-// Cambios incluidos:
-// - Se mantiene la navegación actual sin alterar funcionalidades existentes.
-// - Se activan las pantallas del módulo de alquileres/contratos.
-// - Se mantienen las rutas dentro del mismo stack de patrimonio para respetar
-//   el flujo natural: Propiedad -> Contrato -> Participantes.
-// - Se corrigen imports según la ruta real elegida:
-//     - screens/Alquiler/ContratoCreateScreen
-//     - screens/Alquiler/ContratoDetalleScreen
-//     - screens/Alquiler/ContratoParticipantesScreen
-//
-// Pantallas activadas:
-//   1) ContratoCreate
-//   2) ContratoDetalle
-//   3) ContratoParticipantes
-//
-// Nota:
-// - En esta fase la navegación ya queda operativa.
-// - La conexión con backend y datos reales se hará en el siguiente paso.
+/**
+ * Archivo: mobile_app/navigation/PropiedadesStack.tsx
+ * Versión: 4.0.0
+ *
+ * Responsabilidad:
+ * - Stack de navegación del módulo de patrimonio / propiedades / contratos.
+ *
+ * Cambios:
+ * - Añade el nuevo screen global de contratos: ContratoList.
+ * - Amplía ContratoCreate con parámetros de retorno al screen de origen.
+ * - Mantiene operativas las rutas actuales del módulo de alquileres.
+ */
 
 import React from 'react';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
@@ -30,13 +20,14 @@ import PropiedadDetalleScreen from '../screens/patrimonio/PropiedadDetalleScreen
 import PropiedadKpisScreen from '../screens/patrimonio/PropiedadKpisScreen';
 import LocalidadFormScreen from '../screens/ubicaciones/LocalidadFormScreen';
 
+import ContratoListScreen from '../screens/Alquiler/ContratoListScreen';
 import ContratoCreateScreen from '../screens/Alquiler/ContratoCreateScreen';
 import ContratoDetalleScreen from '../screens/Alquiler/ContratoDetalleScreen';
 import ContratoParticipantesScreen from '../screens/Alquiler/ContratoParticipantesScreen';
 
 export type PropiedadesStackParamList = {
   PropiedadesRanking: undefined;
-  PropiedadForm: { patrimonioId?: string } | undefined; // sin id => alta
+  PropiedadForm: { patrimonioId?: string } | undefined;
   PropiedadDetalle: { patrimonioId: string };
   PropiedadKpis: { patrimonioId: string };
 
@@ -48,15 +39,24 @@ export type PropiedadesStackParamList = {
       }
     | undefined;
 
-  // -----------------------------------------
-  // Rutas del módulo de alquileres
-  // -----------------------------------------
+  /**
+   * Listado global de contratos.
+   */
+  ContratoList: undefined;
 
+  /**
+   * Formulario de contrato.
+   * - Se reutiliza para alta y edición.
+   * - Si recibe returnToScreen/returnParams, al guardar vuelve al origen.
+   */
   ContratoCreate: {
     patrimonioId: string;
     contrato?: any;
     readOnly?: boolean;
     duplicate?: boolean;
+
+    returnToScreen?: keyof PropiedadesStackParamList;
+    returnParams?: Record<string, any>;
   };
 
   ContratoDetalle: {
@@ -113,9 +113,14 @@ const PropiedadesStack: React.FC = () => {
         options={{ title: 'Nueva Localidad' }}
       />
 
-      {/* ==========================================================
-          PANTALLAS DEL MÓDULO DE ALQUILER / CONTRATOS
-         ========================================================== */}
+      {/* =========================================================
+          MÓDULO GLOBAL DE CONTRATOS
+         ========================================================= */}
+      <Stack.Screen
+        name="ContratoList"
+        component={ContratoListScreen}
+        options={{ title: 'Contratos' }}
+      />
 
       <Stack.Screen
         name="ContratoCreate"

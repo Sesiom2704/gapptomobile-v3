@@ -1,32 +1,12 @@
-// mobile_app/screens/patrimonio/PropiedadDetalleScreen.tsx
 //
-// Detalle de propiedad (v5)
+// Detalle de propiedad (v6)
 //
 // Cambios incluidos:
-// - Selector de periodo con flechas (UX tipo DayToDayKpisScreen).
-// - Tres modos de análisis:
-//     1) LAST_12  (default) -> "Últimos 12 meses"
-//     2) ALL_TIME           -> "Todos los tiempos" (desde adquisición)
-//     3) YEAR               -> "Resumen {YYYY}"
-// - Nuevo bloque "Alquiler" dentro del detalle de propiedad.
-//   - Muestra estado contractual de la vivienda.
-//   - Permite crear contrato si no existe contrato activo.
-//   - Permite ver contrato y gestionar participantes si existe.
+// - Se mantiene toda la funcionalidad actual.
+// - El alta de contrato ahora informa del screen de retorno.
+// - Tras guardar contrato desde propiedad, vuelve al detalle de la propiedad.
+// - No se pierde ninguna utilidad existente.
 //
-// Cambios de esta versión:
-// - El bloque Alquiler ya no usa llamada directa con api.get(...)
-// - Se conecta con mobile_app/services/gestionAlquilerApi.ts
-// - Se reutiliza el tipo ContratoResumenActivo del servicio
-//
-// Backend esperado:
-// - GET /api/v1/gestion-alquiler/patrimonios/:patrimonioId/resumen-activo
-//
-// Notas:
-// - Si no existe contrato activo, el backend devuelve null.
-// - Las rutas de navegación activas son:
-//     - ContratoCreate
-//     - ContratoDetalle
-//     - ContratoParticipantes
 
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
@@ -61,7 +41,6 @@ import { api } from '../../services/api';
 
 import KpiInfoModal from '../../components/modals/KpiInfoModal';
 
-// ---- Tipos analytics ----
 type ResumenYTD = {
   year: number;
   ingresos_ytd: number;
@@ -171,7 +150,6 @@ function getEstadoBadgeStyle(estado?: string | null) {
   };
 }
 
-// Textos KPI (modal)
 const KPI_INFO: Record<string, { title: string; desc: string }> = {
   cap_rate_pct: {
     title: 'Cap Rate',
@@ -239,17 +217,14 @@ export default function PropiedadDetalleScreen({ route, navigation }: Props) {
   const [breakdownI, setBreakdownI] = useState<Breakdown | null>(null);
   const [kpi, setKpi] = useState<Kpis | null>(null);
 
-  // ---- Alquiler ----
   const [alquilerLoading, setAlquilerLoading] = useState(false);
   const [contratosPropiedad, setContratosPropiedad] = useState<ContratoRow[]>([]);
+  const [contratosExpanded, setContratosExpanded] = useState<Record<string, boolean>>({});
   const [participantesExpanded, setParticipantesExpanded] = useState<Record<string, boolean>>({});
-  // KPI info modal
+
   const [kpiInfoOpen, setKpiInfoOpen] = useState(false);
   const [kpiInfoKey, setKpiInfoKey] = useState<string>('cap_rate_pct');
 
-  // -------------------------
-  // Period selector state
-  // -------------------------
   const [periodMode, setPeriodMode] = useState<PeriodMode>('LAST_12');
   const [selectedYear, setSelectedYear] = useState<number>(currentYear);
 
@@ -324,9 +299,6 @@ export default function PropiedadDetalleScreen({ route, navigation }: Props) {
     }
   }, [periodMode, currentYear]);
 
-  // -------------------------
-  // KPI info modal handlers
-  // -------------------------
   const openKpiInfo = (key: string) => {
     setKpiInfoKey(key);
     setKpiInfoOpen(true);
@@ -429,7 +401,11 @@ export default function PropiedadDetalleScreen({ route, navigation }: Props) {
   }, [navigation, patrimonioId]);
 
   const goCrearContrato = useCallback(() => {
-    navigation?.navigate?.('ContratoCreate', { patrimonioId });
+    navigation?.navigate?.('ContratoCreate', {
+      patrimonioId,
+      returnToScreen: 'PropiedadDetalle',
+      returnParams: { patrimonioId },
+    });
   }, [navigation, patrimonioId]);
 
   const goVerContrato = useCallback((contratoId: string) => {
@@ -437,6 +413,7 @@ export default function PropiedadDetalleScreen({ route, navigation }: Props) {
     navigation?.navigate?.('ContratoDetalle', {
       patrimonioId,
       contratoId,
+      contrato: { patrimonioId },
     });
   }, [navigation, patrimonioId]);
 
@@ -468,6 +445,13 @@ export default function PropiedadDetalleScreen({ route, navigation }: Props) {
 
   const hasContratos = contratosOrdenados.length > 0;
 
+  const toggleContrato = useCallback((contratoId: string) => {
+    setContratosExpanded((prev) => ({
+      ...prev,
+      [contratoId]: !prev[contratoId],
+    }));
+  }, []);
+
   const toggleParticipantes = useCallback((contratoId: string) => {
     setParticipantesExpanded((prev) => ({
       ...prev,
@@ -475,9 +459,6 @@ export default function PropiedadDetalleScreen({ route, navigation }: Props) {
     }));
   }, []);
 
-  // -------------------------
-  // Componentes UI locales
-  // -------------------------
   const CardTitle: React.FC<{ icon: any; text: string; right?: React.ReactNode }> = ({
     icon,
     text,
@@ -625,7 +606,6 @@ export default function PropiedadDetalleScreen({ route, navigation }: Props) {
         {loading && !base ? <ActivityIndicator style={{ marginVertical: spacing.md }} /> : null}
         {err ? <Text style={{ color: colors.danger, marginBottom: spacing.sm }}>{err}</Text> : null}
 
-        {/* VIVIENDA */}
         <View style={styles.card}>
           <CardTitle icon="home-outline" text="Vivienda" />
 
@@ -665,7 +645,6 @@ export default function PropiedadDetalleScreen({ route, navigation }: Props) {
           </View>
         </View>
 
-        {/* ALQUILER */}
         <View style={styles.card}>
           <CardTitle icon="document-text-outline" text="Alquiler" />
 
@@ -677,6 +656,7 @@ export default function PropiedadDetalleScreen({ route, navigation }: Props) {
               variant="primary"
             />
           </View>
+
           <View style={styles.actionsRow}></View>
 
           {alquilerLoading ? (
@@ -706,8 +686,6 @@ export default function PropiedadDetalleScreen({ route, navigation }: Props) {
               {contratosOrdenados.map((contrato) => {
                 const badgeStyle = getEstadoBadgeStyle(contrato.estado);
                 const participantes = contrato.participantes_resumen;
-                const expanded = !!participantesExpanded[contrato.id];
-
                 const principal = participantes?.inquilino_principal ?? null;
                 const otrosInquilinos = (participantes?.inquilinos ?? []).filter(
                   (nombre) => !samePersonName(nombre, principal)
@@ -715,104 +693,135 @@ export default function PropiedadDetalleScreen({ route, navigation }: Props) {
 
                 return (
                   <View key={contrato.id} style={styles.contractCard}>
-                    <View style={styles.alquilerHeaderRow}>
-                      <View
-                        style={[
-                          styles.estadoBadge,
-                          {
-                            backgroundColor: badgeStyle.backgroundColor,
-                            borderColor: badgeStyle.borderColor,
-                          },
-                        ]}
-                      >
-                        <Text style={[styles.estadoBadgeText, { color: badgeStyle.textColor }]}>
-                          {formatEstadoContrato(contrato.estado)}
-                        </Text>
-                      </View>
+                    {(() => {
+                      const contratoExpanded = !!contratosExpanded[contrato.id];
+                      const participantesOpen = !!participantesExpanded[contrato.id];
 
-                      <Text style={styles.alquilerRenta}>
-                        {contrato.renta_mensual != null
-                          ? `${EuroformatEuro(contrato.renta_mensual)} / mes`
-                          : 'Renta no informada'}
-                      </Text>
-                    </View>
+                      return (
+                        <>
+                          <TouchableOpacity
+                            onPress={() => toggleContrato(contrato.id)}
+                            activeOpacity={0.85}
+                            style={styles.contractToggle}
+                          >
+                            <View style={styles.contractToggleTop}>
+                              <View
+                                style={[
+                                  styles.estadoBadge,
+                                  {
+                                    backgroundColor: badgeStyle.backgroundColor,
+                                    borderColor: badgeStyle.borderColor,
+                                  },
+                                ]}
+                              >
+                                <Text style={[styles.estadoBadgeText, { color: badgeStyle.textColor }]}>
+                                  {formatEstadoContrato(contrato.estado)}
+                                </Text>
+                              </View>
 
-                    <View style={styles.metaGrid}>
-                      <Meta
-                        label="Contrato"
-                        value={contrato.id}
-                      />
-                      <Meta
-                        label="Objeto alquilado"
-                        value={contrato.objeto_alquiler_label || getObjetoAlquilerLabel(contrato.objeto_alquiler)}
-                      />
-                      <Meta
-                        label="Inicio"
-                        value={contrato.fecha_inicio ? formatFechaCorta(contrato.fecha_inicio) : '—'}
-                      />
-                      <Meta
-                        label="Fin"
-                        value={contrato.fecha_fin ? formatFechaCorta(contrato.fecha_fin) : '—'}
-                      />
-                      <Meta
-                        label="Fianza"
-                        value={contrato.fianza != null ? EuroformatEuro(contrato.fianza) : '—'}
-                      />
-                    </View>
+                              <Text style={styles.alquilerRenta}>
+                                {contrato.renta_mensual != null
+                                  ? `${EuroformatEuro(contrato.renta_mensual)} / mes`
+                                  : 'Renta no informada'}
+                              </Text>
+                            </View>
 
-                    <TouchableOpacity
-                      onPress={() => toggleParticipantes(contrato.id)}
-                      activeOpacity={0.85}
-                      style={styles.participantesToggle}
-                    >
-                      <View style={styles.participantesToggleLeft}>
-                        <Ionicons name="people-outline" size={16} color={colors.primary} />
-                        <Text style={styles.participantesToggleText}>Participantes</Text>
-                      </View>
+                            <View style={styles.contractToggleBottom}>
+                              <Text style={styles.contractToggleText}>
+                                {contrato.objeto_alquiler_label || getObjetoAlquilerLabel(contrato.objeto_alquiler)}
+                              </Text>
 
-                      <Ionicons
-                        name={expanded ? 'chevron-up-outline' : 'chevron-down-outline'}
-                        size={18}
-                        color={colors.textSecondary}
-                      />
-                    </TouchableOpacity>
+                              <Ionicons
+                                name={contratoExpanded ? 'chevron-up-outline' : 'chevron-down-outline'}
+                                size={18}
+                                color={colors.textSecondary}
+                              />
+                            </View>
+                          </TouchableOpacity>
 
-                    {expanded ? (
-                      <View style={styles.alquilerParticipantesBox}>
-                        <MiniRow
-                          label="Inquilino principal"
-                          value={participantes?.inquilino_principal || '—'}
-                        />
-                        <MiniRow
-                          label="Otros inquilinos"
-                          value={otrosInquilinos.length ? otrosInquilinos.join(', ') : '—'}
-                        />
-                        <MiniRow
-                          label="Avalistas"
-                          value={
-                            participantes?.avalistas?.length
-                              ? participantes.avalistas.join(', ')
-                              : '—'
-                          }
-                        />
-                        <MiniRow label="Gestor" value={participantes?.gestor || '—'} />
-                      </View>
-                    ) : null}
+                          {contratoExpanded ? (
+                            <>
+                              <View style={styles.metaGrid}>
+                                <Meta label="Contrato" value={contrato.id} />
+                                <Meta
+                                  label="Objeto alquilado"
+                                  value={
+                                    contrato.objeto_alquiler_label ||
+                                    getObjetoAlquilerLabel(contrato.objeto_alquiler)
+                                  }
+                                />
+                                <Meta
+                                  label="Inicio"
+                                  value={contrato.fecha_inicio ? formatFechaCorta(contrato.fecha_inicio) : '—'}
+                                />
+                                <Meta
+                                  label="Fin"
+                                  value={contrato.fecha_fin ? formatFechaCorta(contrato.fecha_fin) : '—'}
+                                />
+                                <Meta
+                                  label="Fianza"
+                                  value={contrato.fianza != null ? EuroformatEuro(contrato.fianza) : '—'}
+                                />
+                              </View>
 
-                    <View style={styles.actionsRow}>
-                      <ActionButton
-                        label="Ver contrato"
-                        icon="eye-outline"
-                        onPress={() => goVerContrato(contrato.id)}
-                        variant="secondary"
-                      />
-                      <ActionButton
-                        label="Participantes"
-                        icon="people-outline"
-                        onPress={() => goParticipantes(contrato.id)}
-                        variant="primary"
-                      />
-                    </View>
+                              <TouchableOpacity
+                                onPress={() => toggleParticipantes(contrato.id)}
+                                activeOpacity={0.85}
+                                style={styles.participantesToggle}
+                              >
+                                <View style={styles.participantesToggleLeft}>
+                                  <Ionicons name="people-outline" size={16} color={colors.primary} />
+                                  <Text style={styles.participantesToggleText}>Participantes</Text>
+                                </View>
+
+                                <Ionicons
+                                  name={participantesOpen ? 'chevron-up-outline' : 'chevron-down-outline'}
+                                  size={18}
+                                  color={colors.textSecondary}
+                                />
+                              </TouchableOpacity>
+
+                              {participantesOpen ? (
+                                <View style={styles.alquilerParticipantesBox}>
+                                  <MiniRow
+                                    label="Inquilino principal"
+                                    value={participantes?.inquilino_principal || '—'}
+                                  />
+                                  <MiniRow
+                                    label="Otros inquilinos"
+                                    value={otrosInquilinos.length ? otrosInquilinos.join(', ') : '—'}
+                                  />
+                                  <MiniRow
+                                    label="Avalistas"
+                                    value={
+                                      participantes?.avalistas?.length
+                                        ? participantes.avalistas.join(', ')
+                                        : '—'
+                                    }
+                                  />
+                                  <MiniRow label="Gestor" value={participantes?.gestor || '—'} />
+                                </View>
+                              ) : null}
+
+                              <View style={styles.actionsRow}>
+                                <ActionButton
+                                  label="Ver contrato"
+                                  icon="eye-outline"
+                                  onPress={() => goVerContrato(contrato.id)}
+                                  variant="secondary"
+                                />
+                                <ActionButton
+                                  label="Participantes"
+                                  icon="people-outline"
+                                  onPress={() => goParticipantes(contrato.id)}
+                                  variant="primary"
+                                />
+                              </View>
+                            </>
+                          ) : null}
+                        </>
+                      );
+                    })()}
                   </View>
                 );
               })}
@@ -820,7 +829,6 @@ export default function PropiedadDetalleScreen({ route, navigation }: Props) {
           )}
         </View>
 
-        {/* ADQUISICIÓN */}
         <View style={styles.card}>
           <CardTitle icon="pricetag-outline" text="Adquisición" />
 
@@ -867,13 +875,11 @@ export default function PropiedadDetalleScreen({ route, navigation }: Props) {
           )}
         </View>
 
-        {/* PERIODO (selector global) */}
         <View style={styles.card}>
           <CardTitle icon="time-outline" text="Periodo" />
           <PeriodSelector />
         </View>
 
-        {/* KPIs */}
         <View style={styles.card}>
           <CardTitle icon="analytics-outline" text="KPIs" />
 
@@ -911,7 +917,6 @@ export default function PropiedadDetalleScreen({ route, navigation }: Props) {
           )}
         </View>
 
-        {/* Resumen */}
         <View style={styles.card}>
           <CardTitle
             icon="calendar-number-outline"
@@ -951,7 +956,6 @@ export default function PropiedadDetalleScreen({ route, navigation }: Props) {
           )}
         </View>
 
-        {/* Detalle gastos */}
         {breakdownG ? (
           <View style={styles.card}>
             <CardTitle icon="receipt-outline" text="Detalle gastos" />
@@ -959,7 +963,6 @@ export default function PropiedadDetalleScreen({ route, navigation }: Props) {
           </View>
         ) : null}
 
-        {/* Detalle ingresos */}
         {breakdownI ? (
           <View style={styles.card}>
             <CardTitle icon="cash-outline" text="Detalle ingresos" />
@@ -1094,7 +1097,6 @@ const styles = StyleSheet.create({
     padding: spacing.sm,
   },
 
-  // ---- Alquiler ----
   alquilerHeaderRow: {
     flexDirection: 'row',
     justifyContent: 'space-between',
@@ -1192,7 +1194,6 @@ const styles = StyleSheet.create({
     color: colors.primary,
   },
 
-  // fila adquisición alineada (label | [€ + %] con ancho fijo)
   rowBetween3: {
     flexDirection: 'row',
     alignItems: 'baseline',
@@ -1227,7 +1228,6 @@ const styles = StyleSheet.create({
     textAlign: 'center',
   },
 
-  // KPIs
   kpiGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: spacing.sm },
   kpiBox: {
     width: '48%',
@@ -1245,7 +1245,6 @@ const styles = StyleSheet.create({
   kpiLabel: { fontSize: 11, color: colors.textSecondary, fontWeight: '800' },
   kpiValue: { marginTop: 4, fontSize: 14, color: colors.textPrimary, fontWeight: '900' },
 
-  // Period selector
   periodRow: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -1315,8 +1314,28 @@ const styles = StyleSheet.create({
     fontWeight: '800',
     color: colors.textPrimary,
   },
+  contractToggle: {
+    gap: spacing.xs,
+  },
+  contractToggleTop: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    gap: spacing.sm,
+  },
+  contractToggleBottom: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    gap: spacing.sm,
+  },
+  contractToggleText: {
+    flex: 1,
+    fontSize: 12,
+    fontWeight: '800',
+    color: colors.textPrimary,
+  },
 
-  // Tabla breakdown
   tableRow: { flexDirection: 'row', paddingVertical: 6, alignItems: 'flex-start' },
   tableHeader: { borderBottomWidth: 1, borderBottomColor: colors.border, marginBottom: 6 },
   tableFooter: { borderTopWidth: 1, borderTopColor: colors.border, marginTop: 6, paddingTop: 6 },

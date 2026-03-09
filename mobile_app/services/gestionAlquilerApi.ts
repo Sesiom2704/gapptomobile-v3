@@ -1,13 +1,15 @@
 /**
  * Archivo: mobile_app/services/gestionAlquilerApi.ts
- * Versión: 3.2.0
+ * Versión: 4.0.0
  *
  * Servicio API para el módulo Gestión de Alquileres.
  *
- * Mejoras:
- * - Soporte a objeto_alquiler en contratos
- * - Endpoint de opciones dinámicas por patrimonio
- * - Helpers de etiquetas para mostrar objeto de alquiler
+ * Mejoras de esta versión:
+ * - Mantiene soporte a objeto_alquiler en contratos.
+ * - Añade helper de desactivación lógica de contrato.
+ * - La "eliminación" funcional de contrato se resuelve con:
+ *   - inactivatedon = now()
+ *   - estado = 'cancelado' (opcional, aplicado por defecto en helper)
  */
 
 import axios from 'axios';
@@ -242,7 +244,8 @@ function normalizeContratoRow(r: ContratoRow): ContratoRow {
     ...r,
     patrimonio_id: String(r.patrimonio_id ?? ''),
     objeto_alquiler: String(r.objeto_alquiler ?? 'completa'),
-    objeto_alquiler_label: r.objeto_alquiler_label ?? getObjetoAlquilerLabel(r.objeto_alquiler ?? 'completa'),
+    objeto_alquiler_label:
+      r.objeto_alquiler_label ?? getObjetoAlquilerLabel(r.objeto_alquiler ?? 'completa'),
     incluye_luz: r.incluye_luz ?? false,
     incluye_agua: r.incluye_agua ?? false,
     incluye_internet: r.incluye_internet ?? false,
@@ -266,7 +269,7 @@ function normalizeParticipanteRow(r: ContratoParticipanteRow): ContratoParticipa
 export function getObjetoAlquilerLabel(code?: string | null): string {
   const c = String(code ?? '').trim().toLowerCase();
 
-  if (c === 'completa') return 'Completa';
+  if (c === 'completa') return 'Completo';
   if (c === 'vivienda') return 'Vivienda';
   if (c === 'garaje') return 'Garaje';
   if (c === 'trastero') return 'Trastero';
@@ -416,7 +419,10 @@ export async function getContrato(contratoId: string): Promise<ContratoRow> {
   }
 }
 
-export async function updateContrato(contratoId: string, payload: ContratoUpdate): Promise<ContratoRow> {
+export async function updateContrato(
+  contratoId: string,
+  payload: ContratoUpdate
+): Promise<ContratoRow> {
   const url = `${ENDPOINT_CONTRATOS}/${encodeURIComponent(contratoId)}`;
   try {
     const res = await api.put<ContratoRow>(url, payload);
@@ -425,6 +431,27 @@ export async function updateContrato(contratoId: string, payload: ContratoUpdate
     logAxiosError('[gestionAlquilerApi] Error actualizando contrato', err);
     throw err;
   }
+}
+
+/**
+ * Desactivación lógica del contrato.
+ * Se usa como "eliminar contrato" desde UI.
+ */
+export async function inactivateContrato(
+  contratoId: string,
+  options?: {
+    estadoCancelado?: boolean;
+  }
+): Promise<ContratoRow> {
+  const payload: ContratoUpdate = {
+    inactivatedon: new Date().toISOString(),
+  };
+
+  if (options?.estadoCancelado !== false) {
+    payload.estado = 'cancelado';
+  }
+
+  return updateContrato(contratoId, payload);
 }
 
 export async function getContratoActivoResumenByPatrimonio(
@@ -508,6 +535,7 @@ const gestionAlquilerApi = {
   createContrato,
   getContrato,
   updateContrato,
+  inactivateContrato,
   getContratoActivoResumenByPatrimonio,
   listContratoParticipantes,
   createContratoParticipante,

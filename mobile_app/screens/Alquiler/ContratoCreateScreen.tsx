@@ -1,14 +1,18 @@
 /**
  * Archivo: mobile_app/screens/Alquiler/ContratoCreateScreen.tsx
- * Versión: 3.2.0
+ * Versión: 4.0.0
  *
- * Formulario de alta/edición de contratos.
+ * Responsabilidad:
+ * - Formulario de alta/edición de contratos.
  *
- * Mejoras:
- * - Nuevo selector de objeto de alquiler
- * - Carga dinámica de opciones válidas desde backend
- * - Opciones incompatibles visibles pero deshabilitadas
- * - Envío y edición del nuevo campo objeto_alquiler
+ * Mejoras de esta versión:
+ * - Soporta retorno al screen de origen tras guardar.
+ * - Si recibe returnToScreen y returnParams, vuelve a ese contexto.
+ * - Si no recibe origen, mantiene fallback al detalle del contrato.
+ *
+ * Importante:
+ * - No se pierde ninguna funcionalidad actual del formulario.
+ * - Se mantiene la validación de objeto de alquiler y datos principales.
  */
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
@@ -23,7 +27,6 @@ import {
   ActivityIndicator,
 } from 'react-native';
 import DateTimePicker from '@react-native-community/datetimepicker';
-import { Ionicons } from '@expo/vector-icons';
 
 import { Screen } from '../../components/layout/Screen';
 import { Header } from '../../components/layout/Header';
@@ -53,6 +56,9 @@ type Props = {
       contrato?: ContratoRow | any;
       readOnly?: boolean;
       duplicate?: boolean;
+
+      returnToScreen?: string;
+      returnParams?: Record<string, any>;
     };
   };
 };
@@ -121,12 +127,13 @@ const ContratoCreateScreen: React.FC<Props> = ({ navigation, route }) => {
   const readOnly = route?.params?.readOnly === true;
   const duplicate = route?.params?.duplicate === true;
 
+  const returnToScreen = route?.params?.returnToScreen;
+  const returnParams = route?.params?.returnParams ?? undefined;
+
   const isEdit = !!contratoSource && !duplicate;
   const contratoId = contratoSource?.id ? String(contratoSource.id) : null;
 
-  const [estado, setEstado] = useState<EstadoContrato>(
-    contratoSource?.estado ?? 'activo'
-  );
+  const [estado, setEstado] = useState<EstadoContrato>(contratoSource?.estado ?? 'activo');
 
   const [objetoAlquiler, setObjetoAlquiler] = useState<ObjetoAlquilerCode>(
     contratoSource?.objeto_alquiler ?? 'completa'
@@ -150,17 +157,13 @@ const ContratoCreateScreen: React.FC<Props> = ({ navigation, route }) => {
     contratoSource?.fianza != null ? String(contratoSource.fianza) : ''
   );
 
-  const [incrementoIpc, setIncrementoIpc] = useState<boolean>(
-    !!contratoSource?.incremento_ipc
-  );
+  const [incrementoIpc, setIncrementoIpc] = useState<boolean>(!!contratoSource?.incremento_ipc);
 
   const [incluyeLuz, setIncluyeLuz] = useState<boolean>(!!contratoSource?.incluye_luz);
   const [incluyeAgua, setIncluyeAgua] = useState<boolean>(!!contratoSource?.incluye_agua);
   const [incluyeInternet, setIncluyeInternet] = useState<boolean>(!!contratoSource?.incluye_internet);
 
-  const [observaciones, setObservaciones] = useState<string>(
-    contratoSource?.observaciones ?? ''
-  );
+  const [observaciones, setObservaciones] = useState<string>(contratoSource?.observaciones ?? '');
 
   const [showInicioPicker, setShowInicioPicker] = useState(false);
   const [showFinPicker, setShowFinPicker] = useState(false);
@@ -229,6 +232,22 @@ const ContratoCreateScreen: React.FC<Props> = ({ navigation, route }) => {
   const navigateBack = useCallback(() => {
     navigation.goBack();
   }, [navigation]);
+
+  const navigateAfterSave = useCallback(
+    (saved: ContratoRow) => {
+      if (returnToScreen) {
+        navigation.navigate(returnToScreen, returnParams);
+        return;
+      }
+
+      navigation.replace('ContratoDetalle', {
+        patrimonioId,
+        contratoId: saved.id,
+        contrato: saved,
+      });
+    },
+    [navigation, patrimonioId, returnToScreen, returnParams]
+  );
 
   useEffect(() => {
     if (readOnly) return;
@@ -342,7 +361,10 @@ const ContratoCreateScreen: React.FC<Props> = ({ navigation, route }) => {
     }
 
     if (!opcionSeleccionada.enabled) {
-      Alert.alert('No disponible', String(opcionSeleccionada.disabled_reason || 'Esta opción no está disponible.'));
+      Alert.alert(
+        'No disponible',
+        String(opcionSeleccionada.disabled_reason || 'Esta opción no está disponible.')
+      );
       return;
     }
 
@@ -416,13 +438,7 @@ const ContratoCreateScreen: React.FC<Props> = ({ navigation, route }) => {
         [
           {
             text: 'OK',
-            onPress: () => {
-              navigation.replace('ContratoDetalle', {
-                patrimonioId,
-                contratoId: saved.id,
-                contrato: saved,
-              });
-            },
+            onPress: () => navigateAfterSave(saved),
           },
         ]
       );
@@ -481,7 +497,8 @@ const ContratoCreateScreen: React.FC<Props> = ({ navigation, route }) => {
           ) : (
             <>
               <Text style={styles.helperText}>
-                Se muestran todas las opciones válidas. Las incompatibles con contratos activos aparecen deshabilitadas.
+                Se muestran todas las opciones válidas. Las incompatibles con contratos activos
+                aparecen deshabilitadas.
               </Text>
 
               <View style={stylesLocal.optionGrid}>

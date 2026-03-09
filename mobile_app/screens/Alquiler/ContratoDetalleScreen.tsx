@@ -1,12 +1,21 @@
 /**
  * Archivo: mobile_app/screens/Alquiler/ContratoDetalleScreen.tsx
- * Versión: 3.2.0
+ * Versión: 4.0.0
  *
- * Detalle de contrato.
+ * Responsabilidad:
+ * - Detalle de contrato.
+ * - Muestra datos contractuales, vivienda, participantes y acciones.
  *
- * Mejoras:
- * - Muestra objeto_alquiler y su etiqueta
- * - Mantiene resto de funcionalidades actuales
+ * Mejoras de esta versión:
+ * - Soporta retorno contextual al editar contrato.
+ * - Si el detalle recibe origen, lo reenvía al formulario de edición.
+ * - La acción "Finalizar contrato" ahora usa desactivación lógica real:
+ *   - inactivatedon = now()
+ *   - estado = cancelado
+ *
+ * Reglas:
+ * - No se realiza borrado físico.
+ * - Si no se recibe contexto de retorno, mantiene comportamiento por defecto.
  */
 
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
@@ -31,6 +40,7 @@ import { EuroformatEuro, formatFechaCorta } from '../../utils/format';
 import {
   getContrato,
   getObjetoAlquilerLabel,
+  inactivateContrato,
   type ContratoRow,
   type ParticipantesResumen,
 } from '../../services/gestionAlquilerApi';
@@ -67,6 +77,9 @@ type Props = {
       patrimonioId: string;
       contratoId: string;
       contrato?: Partial<ContratoRow>;
+
+      returnToScreen?: string;
+      returnParams?: Record<string, any>;
     };
   };
 };
@@ -159,6 +172,9 @@ export default function ContratoDetalleScreen({ navigation, route }: Props) {
   const contratoId = String(route?.params?.contratoId ?? '');
   const contratoInicial = route?.params?.contrato ?? null;
 
+  const returnToScreen = route?.params?.returnToScreen;
+  const returnParams = route?.params?.returnParams ?? undefined;
+
   const [loading, setLoading] = useState<boolean>(true);
   const [refreshing, setRefreshing] = useState(false);
   const [err, setErr] = useState<string | null>(null);
@@ -167,36 +183,38 @@ export default function ContratoDetalleScreen({ navigation, route }: Props) {
     mapContratoToView(contratoId, patrimonioId, contratoInicial)
   );
 
-  const loadContrato = useCallback(async (isPull = false) => {
-    if (!contratoId) {
-      setErr('No se ha recibido el identificador del contrato.');
-      setLoading(false);
-      setRefreshing(false);
-      return;
-    }
-
-    if (!isPull) setLoading(true);
-    if (isPull) setRefreshing(true);
-    setErr(null);
-
-    try {
-      const data = await getContrato(contratoId);
-      setContrato(mapContratoToView(contratoId, patrimonioId, data));
-    } catch (error: any) {
-      const detail =
-        error?.response?.data?.detail ||
-        'No se pudo cargar el detalle del contrato.';
-
-      setErr(String(detail));
-
-      if (!contratoInicial) {
-        setContrato(mapContratoToView(contratoId, patrimonioId, null));
+  const loadContrato = useCallback(
+    async (isPull = false) => {
+      if (!contratoId) {
+        setErr('No se ha recibido el identificador del contrato.');
+        setLoading(false);
+        setRefreshing(false);
+        return;
       }
-    } finally {
-      if (!isPull) setLoading(false);
-      if (isPull) setRefreshing(false);
-    }
-  }, [contratoId, patrimonioId, contratoInicial]);
+
+      if (!isPull) setLoading(true);
+      if (isPull) setRefreshing(true);
+      setErr(null);
+
+      try {
+        const data = await getContrato(contratoId);
+        setContrato(mapContratoToView(contratoId, patrimonioId, data));
+      } catch (error: any) {
+        const detail =
+          error?.response?.data?.detail || 'No se pudo cargar el detalle del contrato.';
+
+        setErr(String(detail));
+
+        if (!contratoInicial) {
+          setContrato(mapContratoToView(contratoId, patrimonioId, null));
+        }
+      } finally {
+        if (!isPull) setLoading(false);
+        if (isPull) setRefreshing(false);
+      }
+    },
+    [contratoId, patrimonioId, contratoInicial]
+  );
 
   useEffect(() => {
     void loadContrato(false);
@@ -236,8 +254,10 @@ export default function ContratoDetalleScreen({ navigation, route }: Props) {
         observaciones: contrato.observaciones,
         participantes_resumen: contrato.participantes_resumen,
       },
+      returnToScreen,
+      returnParams,
     });
-  }, [navigation, patrimonioId, contrato]);
+  }, [navigation, patrimonioId, contrato, returnToScreen, returnParams]);
 
   const handleParticipantes = useCallback(() => {
     navigation.navigate('ContratoParticipantes', {
@@ -248,10 +268,40 @@ export default function ContratoDetalleScreen({ navigation, route }: Props) {
 
   const handleFinalizarContrato = useCallback(() => {
     Alert.alert(
-      'Finalizar contrato',
-      'La acción de finalización se conectará en el siguiente paso del backend.'
+      'Eliminar contrato',
+      'El contrato no se eliminará físicamente. Se marcará como cancelado e inactivo.\n\n¿Quieres continuar?',
+      [
+        { text: 'Cancelar', style: 'cancel' },
+        {
+          text: 'Eliminar contrato',
+          style: 'destructive',
+          onPress: async () => {
+            try {
+              await inactivateContrato(contratoId, { estadoCancelado: true });
+
+              Alert.alert('Contrato desactivado', 'El contrato se ha marcado como inactivo.', [
+                {
+                  text: 'OK',
+                  onPress: () => {
+                    if (returnToScreen) {
+                      navigation.navigate(returnToScreen, returnParams);
+                      return;
+                    }
+
+                    navigation.goBack();
+                  },
+                },
+              ]);
+            } catch (error: any) {
+              const detail =
+                error?.response?.data?.detail || 'No se pudo desactivar el contrato.';
+              Alert.alert('Error', String(detail));
+            }
+          },
+        },
+      ]
     );
-  }, []);
+  }, [contratoId, navigation, returnToScreen, returnParams]);
 
   const onRefresh = () => {
     void loadContrato(true);
@@ -299,13 +349,7 @@ export default function ContratoDetalleScreen({ navigation, route }: Props) {
         <Ionicons
           name={icon}
           size={16}
-          color={
-            isPrimary
-              ? colors.surface
-              : isDanger
-              ? colors.danger
-              : colors.primary
-          }
+          color={isPrimary ? colors.surface : isDanger ? colors.danger : colors.primary}
         />
         <Text
           style={[
@@ -383,9 +427,7 @@ export default function ContratoDetalleScreen({ navigation, route }: Props) {
 
           <View style={{ marginTop: spacing.xs }}>
             <Text style={styles.metaLabel}>Dirección</Text>
-            <Text style={styles.textValue}>
-              {contrato.direccion_completa || '—'}
-            </Text>
+            <Text style={styles.textValue}>{contrato.direccion_completa || '—'}</Text>
           </View>
         </View>
 
@@ -409,10 +451,7 @@ export default function ContratoDetalleScreen({ navigation, route }: Props) {
               label="Fianza"
               value={contrato.fianza != null ? EuroformatEuro(contrato.fianza) : '—'}
             />
-            <Meta
-              label="Actualiza IPC"
-              value={contrato.incremento_ipc ? 'Sí' : 'No'}
-            />
+            <Meta label="Actualiza IPC" value={contrato.incremento_ipc ? 'Sí' : 'No'} />
           </View>
         </View>
 
@@ -456,17 +495,12 @@ export default function ContratoDetalleScreen({ navigation, route }: Props) {
                 : '—'
             }
           />
-          <MiniRow
-            label="Gestor"
-            value={contrato.participantes_resumen?.gestor || '—'}
-          />
+          <MiniRow label="Gestor" value={contrato.participantes_resumen?.gestor || '—'} />
         </View>
 
         <View style={styles.card}>
           <CardTitle icon="create-outline" text="Observaciones" />
-          <Text style={styles.textValue}>
-            {contrato.observaciones?.trim() || 'Sin observaciones.'}
-          </Text>
+          <Text style={styles.textValue}>{contrato.observaciones?.trim() || 'Sin observaciones.'}</Text>
         </View>
 
         <View style={styles.card}>
@@ -488,8 +522,8 @@ export default function ContratoDetalleScreen({ navigation, route }: Props) {
             />
 
             <ActionButton
-              label="Finalizar contrato"
-              icon="close-circle-outline"
+              label="Eliminar contrato"
+              icon="trash-outline"
               onPress={handleFinalizarContrato}
               variant="danger"
             />
