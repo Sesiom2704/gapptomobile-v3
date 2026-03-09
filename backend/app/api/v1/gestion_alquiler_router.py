@@ -522,37 +522,13 @@ def _build_ingreso_concepto_for_contrato(contrato: models.Contrato) -> str:
     """
     Construye el concepto del ingreso automático del alquiler.
 
-    Regla actual:
-    - ALQ. <OBJETO_ALQUILADO> <REFERENCIA_VIVIENDA>
-
-    Ejemplos:
-    - ALQ. COMPLETA FUENSAN2_JAVA
-    - ALQ. GARAJE ALLENDE2_ALCA
-    - ALQ. HAB 2 SAAVEDRA2_SAN
-    """
-    referencia = (
-        getattr(contrato.patrimonio_rel, "referencia", None)
-        or contrato.patrimonio_id
-        or "SIN_REFERENCIA"
-    )
-
-    objeto_alquiler = getattr(contrato, "objeto_alquiler", None) or "completa"
-    objeto_label = _get_objeto_alquiler_label(objeto_alquiler) or objeto_alquiler
-
-    return normalize_upper_ascii(f"ALQ. {objeto_label} {referencia}")
-
-
-def _build_ingreso_concepto_for_contrato(contrato: models.Contrato) -> str:
-    """
-    Construye el concepto del ingreso automático del alquiler.
-
     Regla:
-    - ALQ. <OBJETO_ALQUILADO> <REFERENCIA_VIVIENDA>
+    - ALQ <OBJETO_ALQUILADO> <REFERENCIA_VIVIENDA>
 
     Ejemplos:
-    - ALQ. COMPLETA FUENSAN2_JAVA
-    - ALQ. GARAJE ALLENDE2_ALCA
-    - ALQ. HAB 2 SAAVEDRA2_SAN
+    - ALQ COMPLETA FUENSAN2_JAVA
+    - ALQ GARAJE ALLENDE2_ALCA
+    - ALQ HAB 1 SAAVEDRA2_SAN
     """
     referencia = (
         getattr(contrato.patrimonio_rel, "referencia", None)
@@ -563,8 +539,7 @@ def _build_ingreso_concepto_for_contrato(contrato: models.Contrato) -> str:
     objeto_alquiler = getattr(contrato, "objeto_alquiler", None) or "completa"
     objeto_label = _get_objeto_alquiler_label(objeto_alquiler) or objeto_alquiler
 
-    return normalize_upper_ascii(f"ALQ. {objeto_label} {referencia}")
-
+    return normalize_upper_ascii(f"ALQ {objeto_label} {referencia}")
 
 def _create_ingreso_for_contrato(
     db: Session,
