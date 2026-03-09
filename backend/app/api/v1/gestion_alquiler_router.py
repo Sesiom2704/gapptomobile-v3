@@ -1,24 +1,34 @@
 """
-API v1 - GESTIÓN DE ALQUILERES
+Archivo: backend/app/api/v1/gestion_alquiler_router.py
+Versión: 3.1.0
 
-Incluye:
-- Personas
-- Contratos
-- Participantes de contrato
-- Resumen activo por patrimonio (para detalle de propiedad en mobile)
+Descripción:
+- API v1 del módulo de gestión de alquileres.
+- Mantiene personas, contratos, participantes y resumen activo por patrimonio.
+- Integra sincronización automática con ingresos recurrentes asociados a contratos.
+
+Mejoras incluidas en esta versión:
+1. Nuevo endpoint para listar contratos:
+   - GET /api/v1/gestion-alquiler/contratos
+   - Permite filtrar por patrimonio_id.
+   - Devuelve participantes_resumen para uso directo en frontend.
+
+2. Corrección de coherencia al crear ingresos automáticos:
+   - Si el contrato nace en estado no operativo (finalizado/cancelado)
+     o ya viene inactivado, el ingreso automático también nace:
+       * activo = False
+       * kpi = False
+       * inactivatedon = now
+
+3. Se mantiene toda la lógica existente:
+   - creación de contrato -> creación automática de ingreso
+   - actualización de contrato -> sincronización automática de ingreso
+   - cambios en participantes -> re-sincronización de concepto del ingreso
 
 Reglas generales:
 - Todas las entidades están ligadas a user_id.
 - Cada usuario solo puede ver y modificar sus propios registros.
 - La lógica de validación funcional mínima se resuelve aquí.
-
-Integración adicional:
-- Al crear un contrato se crea automáticamente un ingreso recurrente en `ingresos`.
-- Al actualizar un contrato, el ingreso asociado se sincroniza.
-- Si el contrato se finaliza/cancela/inactiva, el ingreso asociado se desactiva:
-    * activo = False
-    * kpi = False
-    * inactivatedon = now
 """
 
 from __future__ import annotations
@@ -290,6 +300,19 @@ def _validate_rol_participante(rol: Optional[str]) -> str:
     return value
 
 
+def _is_contrato_no_operativo(contrato: models.Contrato) -> bool:
+    """
+    Determina si el contrato debe dejar el ingreso asociado inactivo y fuera de KPI.
+
+    Regla:
+    - estado finalizado o cancelado
+    - o contrato inactivado lógicamente
+    """
+    estado = (contrato.estado or "").strip().lower()
+    contrato_inactivo = contrato.inactivatedon is not None
+    return estado in {"finalizado", "cancelado"} or contrato_inactivo
+
+
 # ==========================================================
 # Helpers de ingresos automáticos por contrato
 # ==========================================================
@@ -312,8 +335,12 @@ def _create_ingreso_for_contrato(
     - concepto dinámico:
         ALQ <INQUILINO_PRINCIPAL> <REFERENCIA>
         o ALQ SIN_INQUILINO <REFERENCIA>
+
+    Regla de coherencia añadida:
+    - si el contrato nace no operativo, el ingreso también nace no operativo
     """
     now = datetime.utcnow()
+    contrato_no_operativo = _is_contrato_no_operativo(contrato)
 
     ingreso = models.Ingreso(
         id=generate_ingreso_id(db),
@@ -325,14 +352,14 @@ def _create_ingreso_for_contrato(
         contrato_alquiler=contrato.id,
         concepto=_build_ingreso_concepto_for_contrato(contrato),
         importe=float(contrato.renta_mensual) if contrato.renta_mensual is not None else 0.0,
-        activo=True,
+        activo=not contrato_no_operativo,
         cobrado=False,
         createon=now,
         modifiedon=now,
         fecha_inicio=contrato.fecha_inicio,
-        kpi=True,
+        kpi=not contrato_no_operativo,
         ingresos_cobrados=0,
-        inactivatedon=None,
+        inactivatedon=now if contrato_no_operativo else None,
         cuenta_id=_get_default_cuenta_alquiler_id(),
         user_id=user_id,
         ultimo_ingreso_on=None,
@@ -366,9 +393,7 @@ def _sync_ingreso_for_contrato(
         return ingreso
 
     now = datetime.utcnow()
-    estado = (contrato.estado or "").strip().lower()
-    contrato_inactivo = contrato.inactivatedon is not None
-    contrato_no_operativo = estado in {"finalizado", "cancelado"} or contrato_inactivo
+    contrato_no_operativo = _is_contrato_no_operativo(contrato)
 
     ingreso.rango_cobro = "1-3"
     ingreso.periodicidad = "MENSUAL"
@@ -549,6 +574,58 @@ def actualizar_persona(
 # CONTRATOS
 # ==========================================================
 
+@router.get(
+    "/contratos",
+    response_model=List[ContratoSchema],
+    summary="Listar contratos",
+)
+def listar_contratos(
+    patrimonio_id: Optional[str] = Query(
+        None,
+        description="Filtra contratos por vivienda/patrimonio.",
+    ),
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(require_user),
+):
+    """
+    Devuelve contratos del usuario con relaciones cargadas.
+
+    Uso previsto:
+    - selector de contratos en formularios de ingresos
+    - listados resumidos
+    - precarga de contratos por vivienda en frontend
+
+    Notas:
+    - No se filtra por estado: devuelve activos, pendientes, finalizados y cancelados.
+    - También devuelve contratos inactivados lógicamente si existen.
+    - El frontend decidirá cómo agrupar o atenuar visualmente cada estado.
+    """
+    query = (
+        db.query(models.Contrato)
+        .options(
+            joinedload(models.Contrato.patrimonio_rel),
+            joinedload(models.Contrato.participantes).joinedload(models.ContratoParticipante.persona),
+        )
+        .filter(models.Contrato.user_id == current_user.id)
+    )
+
+    if patrimonio_id:
+        _get_owned_patrimonio(db, patrimonio_id, current_user.id)
+        query = query.filter(models.Contrato.patrimonio_id == patrimonio_id)
+
+    rows = (
+        query
+        .order_by(
+            models.Contrato.patrimonio_id.asc(),
+            models.Contrato.fecha_inicio.desc(),
+            models.Contrato.createon.desc(),
+        )
+        .all()
+    )
+
+    return [_contrato_to_schema(r) for r in rows]
+
+
 @router.post(
     "/contratos",
     response_model=ContratoSchema,
@@ -600,8 +677,8 @@ def crear_contrato(
     db.add(row)
     db.flush()
 
-    # Importante:
-    # recargamos el contrato con relaciones para poder construir bien el concepto
+    # Recargamos el contrato con relaciones para construir bien el concepto
+    # y aplicar correctamente el estado operativo del ingreso asociado.
     contrato_loaded = _get_owned_contrato(db, row.id, current_user.id)
 
     _create_ingreso_for_contrato(
@@ -855,7 +932,7 @@ def crear_participante_contrato(
     db.flush()
 
     # Re-sincronizamos el ingreso porque puede cambiar el concepto
-    # si se añade/cambia el inquilino principal
+    # si se añade/cambia el inquilino principal.
     contrato_loaded = _get_owned_contrato(db, contrato.id, current_user.id)
     _sync_ingreso_for_contrato(
         db=db,
@@ -945,7 +1022,7 @@ def actualizar_participante_contrato(
 
     db.flush()
 
-    # Re-sincronizamos ingreso por posible cambio de principal/rol
+    # Re-sincronizamos ingreso por posible cambio de principal/rol.
     contrato_loaded = _get_owned_contrato(db, row.contrato_id, current_user.id)
     _sync_ingreso_for_contrato(
         db=db,
@@ -992,7 +1069,7 @@ def eliminar_participante_contrato(
     row.inactivatedon = datetime.utcnow()
     db.flush()
 
-    # Re-sincronizamos por si ese participante era el principal
+    # Re-sincronizamos por si ese participante era el principal.
     contrato_loaded = _get_owned_contrato(db, row.contrato_id, current_user.id)
     _sync_ingreso_for_contrato(
         db=db,
