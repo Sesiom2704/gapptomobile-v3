@@ -1,25 +1,21 @@
 """
-Schemas Pydantic para el módulo de GESTIÓN DE ALQUILERES en GapptoMobile v2/v3.
+Archivo: backend/app/schemas/gestion_alquiler.py
+Versión: 3.2.0
 
-Incluye:
-- Personas:
-    * PersonaCreate / PersonaUpdate / PersonaSchema / PersonaPickerOut
-- Contratos:
-    * ContratoCreate / ContratoUpdate / ContratoSchema
-    * ContratoResumenActivoOut
-- Participantes:
-    * ContratoParticipanteCreate / ContratoParticipanteUpdate / ContratoParticipanteSchema
+Descripción:
+Schemas Pydantic para el módulo de gestión de alquileres.
 
-Reglas generales:
-- La lógica del router se encargará de:
-    * Normalizar nombre_completo y dni.
-    * Limpiar teléfono.
-    * Validar ownership por user_id.
-    * Validar reglas funcionales del contrato y participantes.
+Funcionalidades incluidas:
+- Personas
+- Contratos
+- Participantes
+- Nuevas opciones dinámicas de objeto de alquiler por patrimonio
+- Soporte al nuevo campo contratos.objeto_alquiler
 
-Nota sobre ingresos:
-- Este fichero NO requiere cambios obligatorios por la introducción de ramas de ingreso.
-- La relación con ingresos sigue yendo por contrato_alquiler en el módulo de ingresos.
+Notas de diseño:
+- objeto_alquiler se guarda como código técnico estable.
+- El frontend mostrará etiquetas legibles.
+- El backend valida qué opciones son válidas para cada patrimonio.
 """
 
 from __future__ import annotations
@@ -111,7 +107,6 @@ class ContratoParticipanteSchema(BaseModel):
     modifiedon: Optional[datetime] = None
     inactivatedon: Optional[datetime] = None
 
-    # Datos expandidos de persona
     nombre_completo: Optional[str] = None
     dni: Optional[str] = None
     telefono: Optional[str] = None
@@ -131,8 +126,24 @@ class ParticipantesResumenOut(BaseModel):
 # CONTRATOS
 # ==========================
 
+class ContratoObjetoOpcionOut(BaseModel):
+    code: str
+    label: str
+    enabled: bool = True
+    disabled_reason: Optional[str] = None
+
+
+class ContratoObjetoOpcionesOut(BaseModel):
+    patrimonio_id: str
+    opciones: List[ContratoObjetoOpcionOut] = Field(default_factory=list)
+
+
 class ContratoBase(BaseModel):
     patrimonio_id: Optional[str] = Field(None, description="ID de la vivienda asociada.")
+    objeto_alquiler: Optional[str] = Field(
+        None,
+        description="Código técnico del objeto alquilado."
+    )
     fecha_inicio: Optional[date] = Field(None, description="Fecha de inicio del contrato.")
     fecha_fin: Optional[date] = Field(None, description="Fecha de fin del contrato.")
     renta_mensual: Optional[float] = Field(None, description="Renta mensual.")
@@ -147,12 +158,14 @@ class ContratoBase(BaseModel):
 
 class ContratoCreate(ContratoBase):
     patrimonio_id: str
+    objeto_alquiler: str
     fecha_inicio: date
     estado: Optional[str] = "activo"
     incremento_ipc: Optional[bool] = False
 
 
 class ContratoUpdate(BaseModel):
+    objeto_alquiler: Optional[str] = None
     fecha_inicio: Optional[date] = None
     fecha_fin: Optional[date] = None
     renta_mensual: Optional[float] = None
@@ -177,6 +190,7 @@ class ContratoSchema(ContratoBase):
     referencia_vivienda: Optional[str] = None
     direccion_completa: Optional[str] = None
 
+    objeto_alquiler_label: Optional[str] = None
     participantes_resumen: Optional[ParticipantesResumenOut] = None
 
     model_config = ConfigDict(from_attributes=True)
@@ -190,6 +204,8 @@ class ContratoResumenActivoOut(BaseModel):
     renta_mensual: Optional[float] = None
     fianza: Optional[float] = None
     incremento_ipc: Optional[bool] = False
+    objeto_alquiler: Optional[str] = None
+    objeto_alquiler_label: Optional[str] = None
     participantes_resumen: Optional[ParticipantesResumenOut] = None
 
 
@@ -204,6 +220,8 @@ __all__ = [
     "ContratoParticipanteUpdate",
     "ContratoParticipanteSchema",
     "ParticipantesResumenOut",
+    "ContratoObjetoOpcionOut",
+    "ContratoObjetoOpcionesOut",
     "ContratoBase",
     "ContratoCreate",
     "ContratoUpdate",

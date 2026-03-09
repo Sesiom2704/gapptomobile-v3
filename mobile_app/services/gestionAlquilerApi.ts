@@ -1,29 +1,18 @@
-// mobile_app/services/gestionAlquilerApi.ts
-//
-// Servicio API para el módulo Gestión de Alquileres en GapptoMobile v1.
-//
-// Incluye:
-// - Personas
-// - Contratos
-// - Participantes de contrato
-// - Resumen activo por patrimonio
-//
-// Importante:
-// - Todas las llamadas van contra /api/v1/gestion-alquiler
-// - Este servicio asume que ya tienes configurado el axios instance en:
-//     mobile_app/services/api.ts
-//   con baseURL y auth headers (token) resueltos.
-//
-// Objetivo de esta versión:
-// - Conectar las pantallas ya diseñadas con el backend nuevo.
-// - Mantener el patrón de servicios simple y consistente con patrimonioApi.ts.
+/**
+ * Archivo: mobile_app/services/gestionAlquilerApi.ts
+ * Versión: 3.2.0
+ *
+ * Servicio API para el módulo Gestión de Alquileres.
+ *
+ * Mejoras:
+ * - Soporte a objeto_alquiler en contratos
+ * - Endpoint de opciones dinámicas por patrimonio
+ * - Helpers de etiquetas para mostrar objeto de alquiler
+ */
 
 import axios from 'axios';
 import { api } from './api';
 
-// =====================================================
-// Base
-// =====================================================
 const BASE = '/api/v1/gestion-alquiler';
 
 const ENDPOINT_PERSONAS = `${BASE}/personas`;
@@ -33,15 +22,15 @@ const ENDPOINT_CONTRATOS = `${BASE}/contratos`;
 const ENDPOINT_PATRIMONIO_RESUMEN_ACTIVO = (patrimonioId: string) =>
   `${BASE}/patrimonios/${encodeURIComponent(patrimonioId)}/resumen-activo`;
 
+const ENDPOINT_PATRIMONIO_OPCIONES_CONTRATO = (patrimonioId: string) =>
+  `${BASE}/patrimonios/${encodeURIComponent(patrimonioId)}/opciones-contrato`;
+
 const ENDPOINT_CONTRATO_PARTICIPANTES = (contratoId: string) =>
   `${BASE}/contratos/${encodeURIComponent(contratoId)}/participantes`;
 
 const ENDPOINT_PARTICIPANTE_BY_ID = (participanteId: string) =>
   `${BASE}/contratos/participantes/${encodeURIComponent(participanteId)}`;
 
-// =====================================================
-// Helpers
-// =====================================================
 function logAxiosError(prefix: string, err: unknown) {
   if (axios.isAxiosError(err)) {
     console.error(prefix, err.response?.data || err.message);
@@ -50,19 +39,18 @@ function logAxiosError(prefix: string, err: unknown) {
   }
 }
 
-// =====================================================
-// Tipos PERSONAS
-// =====================================================
+function safeArray<T>(value: T[] | null | undefined): T[] {
+  return Array.isArray(value) ? value : [];
+}
+
 export type PersonaRow = {
   id: string;
   nombre_completo: string;
-
   dni?: string | null;
   telefono?: string | null;
   email?: string | null;
-  fecha_nacimiento?: string | null; // YYYY-MM-DD
+  fecha_nacimiento?: string | null;
   observaciones?: string | null;
-
   createon?: string | null;
   modifiedon?: string | null;
   inactivatedon?: string | null;
@@ -94,9 +82,6 @@ export type PersonaUpdate = {
   inactivatedon?: string | null;
 };
 
-// =====================================================
-// Tipos PARTICIPANTES
-// =====================================================
 export type RolParticipante = 'inquilino' | 'avalista' | 'gestor' | string;
 
 export type ParticipantesResumen = {
@@ -110,16 +95,12 @@ export type ContratoParticipanteRow = {
   id: string;
   contrato_id: string;
   persona_id: string;
-
   rol: RolParticipante;
   es_principal: boolean;
   observaciones?: string | null;
-
   createon?: string | null;
   modifiedon?: string | null;
   inactivatedon?: string | null;
-
-  // Expansión de persona
   nombre_completo?: string | null;
   dni?: string | null;
   telefono?: string | null;
@@ -140,9 +121,6 @@ export type ContratoParticipanteUpdate = {
   inactivatedon?: string | null;
 };
 
-// =====================================================
-// Tipos CONTRATOS
-// =====================================================
 export type EstadoContrato =
   | 'activo'
   | 'pendiente'
@@ -150,14 +128,39 @@ export type EstadoContrato =
   | 'cancelado'
   | string;
 
+export type ObjetoAlquilerCode =
+  | 'completa'
+  | 'vivienda'
+  | 'garaje'
+  | 'trastero'
+  | 'garaje_trastero'
+  | 'vivienda_garaje'
+  | 'vivienda_trastero'
+  | `habitacion_${number}`
+  | string;
+
+export type ContratoObjetoOpcionRow = {
+  code: ObjetoAlquilerCode;
+  label: string;
+  enabled: boolean;
+  disabled_reason?: string | null;
+};
+
+export type ContratoObjetoOpcionesResponse = {
+  patrimonio_id: string;
+  opciones: ContratoObjetoOpcionRow[];
+};
+
 export type ContratoRow = {
   id: string;
   user_id?: number | null;
 
   patrimonio_id: string;
+  objeto_alquiler: ObjetoAlquilerCode;
+  objeto_alquiler_label?: string | null;
 
-  fecha_inicio?: string | null; // YYYY-MM-DD
-  fecha_fin?: string | null; // YYYY-MM-DD
+  fecha_inicio?: string | null;
+  fecha_fin?: string | null;
 
   renta_mensual?: number | null;
   fianza?: number | null;
@@ -183,7 +186,8 @@ export type ContratoRow = {
 
 export type ContratoCreate = {
   patrimonio_id: string;
-  fecha_inicio: string; // YYYY-MM-DD
+  objeto_alquiler: ObjetoAlquilerCode;
+  fecha_inicio: string;
   fecha_fin?: string | null;
   renta_mensual?: number | null;
   fianza?: number | null;
@@ -196,6 +200,7 @@ export type ContratoCreate = {
 };
 
 export type ContratoUpdate = {
+  objeto_alquiler?: ObjetoAlquilerCode | null;
   fecha_inicio?: string | null;
   fecha_fin?: string | null;
   renta_mensual?: number | null;
@@ -216,12 +221,15 @@ export type ContratoResumenActivo = {
   fecha_fin?: string | null;
   renta_mensual?: number | null;
   fianza?: number | null;
+  objeto_alquiler?: ObjetoAlquilerCode | null;
+  objeto_alquiler_label?: string | null;
   participantes_resumen?: ParticipantesResumen | null;
 };
 
-// =====================================================
-// Normalizadores
-// =====================================================
+export type ListContratosParams = {
+  patrimonio_id?: string;
+};
+
 function normalizePersonaRow(r: PersonaRow): PersonaRow {
   return {
     ...r,
@@ -232,10 +240,19 @@ function normalizePersonaRow(r: PersonaRow): PersonaRow {
 function normalizeContratoRow(r: ContratoRow): ContratoRow {
   return {
     ...r,
+    patrimonio_id: String(r.patrimonio_id ?? ''),
+    objeto_alquiler: String(r.objeto_alquiler ?? 'completa'),
+    objeto_alquiler_label: r.objeto_alquiler_label ?? getObjetoAlquilerLabel(r.objeto_alquiler ?? 'completa'),
     incluye_luz: r.incluye_luz ?? false,
     incluye_agua: r.incluye_agua ?? false,
     incluye_internet: r.incluye_internet ?? false,
     incremento_ipc: r.incremento_ipc ?? false,
+    participantes_resumen: r.participantes_resumen ?? {
+      inquilino_principal: null,
+      inquilinos: [],
+      avalistas: [],
+      gestor: null,
+    },
   };
 }
 
@@ -246,14 +263,51 @@ function normalizeParticipanteRow(r: ContratoParticipanteRow): ContratoParticipa
   };
 }
 
-// =====================================================
-// PERSONAS
-// =====================================================
+export function getObjetoAlquilerLabel(code?: string | null): string {
+  const c = String(code ?? '').trim().toLowerCase();
+
+  if (c === 'completa') return 'Completa';
+  if (c === 'vivienda') return 'Vivienda';
+  if (c === 'garaje') return 'Garaje';
+  if (c === 'trastero') return 'Trastero';
+  if (c === 'garaje_trastero') return 'Garaje + Trastero';
+  if (c === 'vivienda_garaje') return 'Vivienda + Garaje';
+  if (c === 'vivienda_trastero') return 'Vivienda + Trastero';
+
+  if (c.startsWith('habitacion_')) {
+    const n = c.replace('habitacion_', '');
+    return `Hab ${n}`;
+  }
+
+  return c || '—';
+}
+
+export function getContratoDisplayTenantName(contrato: ContratoRow | null | undefined): string {
+  if (!contrato) return '';
+
+  const resumen = contrato.participantes_resumen;
+  const principal = String(resumen?.inquilino_principal ?? '').trim();
+  if (principal) return principal;
+
+  const firstInquilino = safeArray(resumen?.inquilinos)
+    .map((x) => String(x ?? '').trim())
+    .find((x) => x.length > 0);
+  if (firstInquilino) return firstInquilino;
+
+  return '';
+}
+
+export function getContratoDisplaySubtitle(contrato: ContratoRow | null | undefined): string {
+  if (!contrato) return '';
+  const tenant = getContratoDisplayTenantName(contrato);
+  const objeto = getObjetoAlquilerLabel(contrato.objeto_alquiler);
+  return tenant ? `${tenant} · ${objeto}` : objeto;
+}
+
 export async function listPersonas(params?: {
   q?: string;
   activas?: boolean;
 }): Promise<PersonaRow[]> {
-  console.log('[gestionAlquilerApi] GET personas ->', ENDPOINT_PERSONAS, params);
   try {
     const res = await api.get<PersonaRow[]>(ENDPOINT_PERSONAS, { params });
     const data = Array.isArray(res.data) ? res.data : [];
@@ -267,7 +321,6 @@ export async function listPersonas(params?: {
 export async function listPersonasPicker(params?: {
   q?: string;
 }): Promise<PersonaPickerRow[]> {
-  console.log('[gestionAlquilerApi] GET personas picker ->', ENDPOINT_PERSONAS_PICKER, params);
   try {
     const res = await api.get<PersonaPickerRow[]>(ENDPOINT_PERSONAS_PICKER, { params });
     return Array.isArray(res.data) ? res.data : [];
@@ -279,7 +332,6 @@ export async function listPersonasPicker(params?: {
 
 export async function getPersona(personaId: string): Promise<PersonaRow> {
   const url = `${ENDPOINT_PERSONAS}/${encodeURIComponent(personaId)}`;
-  console.log('[gestionAlquilerApi] GET persona ->', url);
   try {
     const res = await api.get<PersonaRow>(url);
     return normalizePersonaRow(res.data);
@@ -290,7 +342,6 @@ export async function getPersona(personaId: string): Promise<PersonaRow> {
 }
 
 export async function createPersona(payload: PersonaCreate): Promise<PersonaRow> {
-  console.log('[gestionAlquilerApi] POST crear persona ->', ENDPOINT_PERSONAS, payload);
   try {
     const res = await api.post<PersonaRow>(ENDPOINT_PERSONAS, payload);
     return normalizePersonaRow(res.data);
@@ -302,7 +353,6 @@ export async function createPersona(payload: PersonaCreate): Promise<PersonaRow>
 
 export async function updatePersona(personaId: string, payload: PersonaUpdate): Promise<PersonaRow> {
   const url = `${ENDPOINT_PERSONAS}/${encodeURIComponent(personaId)}`;
-  console.log('[gestionAlquilerApi] PUT actualizar persona ->', url, payload);
   try {
     const res = await api.put<PersonaRow>(url, payload);
     return normalizePersonaRow(res.data);
@@ -312,11 +362,40 @@ export async function updatePersona(personaId: string, payload: PersonaUpdate): 
   }
 }
 
-// =====================================================
-// CONTRATOS
-// =====================================================
+export async function listContratos(params?: ListContratosParams): Promise<ContratoRow[]> {
+  try {
+    const res = await api.get<ContratoRow[]>(ENDPOINT_CONTRATOS, { params });
+    const data = Array.isArray(res.data) ? res.data : [];
+    return data.map(normalizeContratoRow);
+  } catch (err) {
+    logAxiosError('[gestionAlquilerApi] Error listando contratos', err);
+    throw err;
+  }
+}
+
+export async function listOpcionesContratoPorPatrimonio(params: {
+  patrimonioId: string;
+  contratoIdExclude?: string | null;
+}): Promise<ContratoObjetoOpcionesResponse> {
+  const url = ENDPOINT_PATRIMONIO_OPCIONES_CONTRATO(params.patrimonioId);
+  try {
+    const res = await api.get<ContratoObjetoOpcionesResponse>(url, {
+      params: {
+        contrato_id_exclude: params.contratoIdExclude || undefined,
+      },
+    });
+
+    return {
+      patrimonio_id: String(res.data?.patrimonio_id ?? params.patrimonioId),
+      opciones: Array.isArray(res.data?.opciones) ? res.data.opciones : [],
+    };
+  } catch (err) {
+    logAxiosError('[gestionAlquilerApi] Error cargando opciones de contrato por patrimonio', err);
+    throw err;
+  }
+}
+
 export async function createContrato(payload: ContratoCreate): Promise<ContratoRow> {
-  console.log('[gestionAlquilerApi] POST crear contrato ->', ENDPOINT_CONTRATOS, payload);
   try {
     const res = await api.post<ContratoRow>(ENDPOINT_CONTRATOS, payload);
     return normalizeContratoRow(res.data);
@@ -328,7 +407,6 @@ export async function createContrato(payload: ContratoCreate): Promise<ContratoR
 
 export async function getContrato(contratoId: string): Promise<ContratoRow> {
   const url = `${ENDPOINT_CONTRATOS}/${encodeURIComponent(contratoId)}`;
-  console.log('[gestionAlquilerApi] GET contrato ->', url);
   try {
     const res = await api.get<ContratoRow>(url);
     return normalizeContratoRow(res.data);
@@ -340,7 +418,6 @@ export async function getContrato(contratoId: string): Promise<ContratoRow> {
 
 export async function updateContrato(contratoId: string, payload: ContratoUpdate): Promise<ContratoRow> {
   const url = `${ENDPOINT_CONTRATOS}/${encodeURIComponent(contratoId)}`;
-  console.log('[gestionAlquilerApi] PUT actualizar contrato ->', url, payload);
   try {
     const res = await api.put<ContratoRow>(url, payload);
     return normalizeContratoRow(res.data);
@@ -354,7 +431,6 @@ export async function getContratoActivoResumenByPatrimonio(
   patrimonioId: string
 ): Promise<ContratoResumenActivo | null> {
   const url = ENDPOINT_PATRIMONIO_RESUMEN_ACTIVO(patrimonioId);
-  console.log('[gestionAlquilerApi] GET resumen contrato activo patrimonio ->', url);
   try {
     const res = await api.get<ContratoResumenActivo | null>(url);
     return res.data ?? null;
@@ -364,14 +440,10 @@ export async function getContratoActivoResumenByPatrimonio(
   }
 }
 
-// =====================================================
-// PARTICIPANTES
-// =====================================================
 export async function listContratoParticipantes(
   contratoId: string
 ): Promise<ContratoParticipanteRow[]> {
   const url = ENDPOINT_CONTRATO_PARTICIPANTES(contratoId);
-  console.log('[gestionAlquilerApi] GET participantes contrato ->', url);
   try {
     const res = await api.get<ContratoParticipanteRow[]>(url);
     const data = Array.isArray(res.data) ? res.data : [];
@@ -387,7 +459,6 @@ export async function createContratoParticipante(
   payload: ContratoParticipanteCreate
 ): Promise<ContratoParticipanteRow> {
   const url = ENDPOINT_CONTRATO_PARTICIPANTES(contratoId);
-  console.log('[gestionAlquilerApi] POST crear participante contrato ->', url, payload);
   try {
     const res = await api.post<ContratoParticipanteRow>(url, payload);
     return normalizeParticipanteRow(res.data);
@@ -402,7 +473,6 @@ export async function updateContratoParticipante(
   payload: ContratoParticipanteUpdate
 ): Promise<ContratoParticipanteRow> {
   const url = ENDPOINT_PARTICIPANTE_BY_ID(participanteId);
-  console.log('[gestionAlquilerApi] PUT actualizar participante ->', url, payload);
   try {
     const res = await api.put<ContratoParticipanteRow>(url, payload);
     return normalizeParticipanteRow(res.data);
@@ -414,7 +484,6 @@ export async function updateContratoParticipante(
 
 export async function deleteContratoParticipante(participanteId: string): Promise<void> {
   const url = ENDPOINT_PARTICIPANTE_BY_ID(participanteId);
-  console.log('[gestionAlquilerApi] DELETE participante ->', url);
   try {
     await api.delete(url);
   } catch (err) {
@@ -423,38 +492,30 @@ export async function deleteContratoParticipante(participanteId: string): Promis
   }
 }
 
-// =====================================================
-// Helper genérico
-// =====================================================
 async function httpGet<T>(path: string): Promise<T> {
   const res = await api.get<T>(path);
   return res.data;
 }
 
-// =====================================================
-// Export agrupado
-// =====================================================
 const gestionAlquilerApi = {
-  // personas
   listPersonas,
   listPersonasPicker,
   getPersona,
   createPersona,
   updatePersona,
-
-  // contratos
+  listContratos,
+  listOpcionesContratoPorPatrimonio,
   createContrato,
   getContrato,
   updateContrato,
   getContratoActivoResumenByPatrimonio,
-
-  // participantes
   listContratoParticipantes,
   createContratoParticipante,
   updateContratoParticipante,
   deleteContratoParticipante,
-
-  // helper
+  getObjetoAlquilerLabel,
+  getContratoDisplayTenantName,
+  getContratoDisplaySubtitle,
   httpGet,
 };
 

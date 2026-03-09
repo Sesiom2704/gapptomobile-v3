@@ -1,24 +1,30 @@
 /**
  * Archivo: mobile_app/screens/ingresos/IngresoFormScreen.tsx
+ * Versión: 3.1.0
  *
- * Flujo funcional v3:
+ * Flujo funcional:
  * - Primero se selecciona la rama de ingreso.
  * - Después se muestran solo los tipos asociados a esa rama.
+ * - Si la rama es VIVIENDAS, se habilita la selección de vivienda.
+ * - Si además hay una vivienda seleccionada, se muestran los contratos
+ *   asociados a esa vivienda para poder vincular el ingreso.
  *
- * Ajustes aplicados:
- * 1) UX inmediata al seleccionar rama:
- *    - Se precargan los tipos por rama en segundo plano.
- *    - Si la rama ya está en caché, los tipos aparecen al instante.
- *
- * 2) Viviendas:
- *    - La sección de vivienda se habilita por RAMA (VIVIENDAS),
- *      no por tipo de ingreso.
- *
- * 3) Mantiene toda la lógica actual:
+ * Mejoras incluidas en esta versión:
+ * 1) Precarga silenciosa de contratos al cargar el formulario.
+ * 2) Selector de contrato asociado:
+ *    - opción NINGUNO
+ *    - contratos de la vivienda seleccionada
+ *    - estilos por estado: activo / pendiente / finalizado / cancelado
+ * 3) Limpieza automática de contrato_alquiler:
+ *    - al cambiar vivienda
+ *    - al cambiar rama a una no-VIVIENDAS
+ * 4) Mantiene toda la lógica actual:
  *    - retorno desde AuxEntityForm
  *    - edición / duplicado / readonly
  *    - protección anti-reset
  *    - create/update
+ * 5) Metadatos avanzados:
+ *    - fechas/hora mostradas con formato corto reutilizable
  */
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
@@ -63,10 +69,18 @@ import {
 } from '../../services/ingresosApi';
 
 import {
+  listContratos,
+  getContratoDisplaySubtitle,
+  type ContratoRow,
+  type EstadoContrato,
+} from '../../services/gestionAlquilerApi';
+
+import {
   EuroformatEuro,
   parseImporte,
   appendMonthYearSuffix,
   formatFechaCorta,
+  formatDateTimeShort,
 } from '../../utils/format';
 import { useResetFormOnFocus } from '../../utils/formsUtils';
 
@@ -161,15 +175,6 @@ function parseDateString(value: string | null | undefined): Date {
   return new Date();
 }
 
-function formatDateDisplay(value: string): string {
-  const isoParts = value.split('-');
-  if (isoParts.length === 3) {
-    const [y, m, d] = isoParts;
-    return `${d}/${m}/${y}`;
-  }
-  return value;
-}
-
 function getRangoFromDateString(dateStr: string): string {
   const d = parseDateString(dateStr);
   const day = d.getDate();
@@ -245,6 +250,26 @@ function isAuxRamaIngreso(res: any): boolean {
   );
 }
 
+function normalizeEstadoContrato(value: EstadoContrato | null | undefined): EstadoContrato {
+  return String(value ?? '').trim().toLowerCase();
+}
+
+function getContratoVariant(estado: EstadoContrato | null | undefined): 'default' | 'warning' | 'neutral' | 'dangerMuted' {
+  const normalized = normalizeEstadoContrato(estado);
+  if (normalized === 'pendiente') return 'warning';
+  if (normalized === 'finalizado') return 'neutral';
+  if (normalized === 'cancelado') return 'dangerMuted';
+  return 'default';
+}
+
+function getContratoStatusLabel(estado: EstadoContrato | null | undefined): string {
+  const normalized = normalizeEstadoContrato(estado);
+  if (normalized === 'pendiente') return 'Pendiente';
+  if (normalized === 'finalizado') return 'Finalizado';
+  if (normalized === 'cancelado') return 'Cancelado';
+  return 'Activo';
+}
+
 // ---- Componente ----
 const IngresoFormScreen: React.FC<Props> = ({ navigation, route }) => {
   const styles = commonFormStyles;
@@ -270,6 +295,7 @@ const IngresoFormScreen: React.FC<Props> = ({ navigation, route }) => {
   const [tipos, setTipos] = useState<TipoIngreso[]>([]);
   const [cuentas, setCuentas] = useState<Cuenta[]>([]);
   const [viviendas, setViviendas] = useState<Vivienda[]>([]);
+  const [contratos, setContratos] = useState<ContratoRow[]>([]);
 
   // Form state
   const [concepto, setConcepto] = useState<string>(ingresoSource?.concepto ?? '');
@@ -299,6 +325,9 @@ const IngresoFormScreen: React.FC<Props> = ({ navigation, route }) => {
   const [cuentaId, setCuentaId] = useState<string | null>(ingresoSource?.cuenta_id ?? null);
   const [viviendaId, setViviendaId] = useState<string | null>(
     ingresoSource?.referencia_vivienda_id ?? null
+  );
+  const [contratoAlquilerId, setContratoAlquilerId] = useState<string | null>(
+    ingresoSource?.contrato_alquiler ?? null
   );
 
   const [importe, setImporte] = useState<string>(
@@ -378,6 +407,7 @@ const IngresoFormScreen: React.FC<Props> = ({ navigation, route }) => {
 
     setCuentaId(null);
     setViviendaId(null);
+    setContratoAlquilerId(null);
 
     setImporte('');
 
@@ -477,7 +507,6 @@ const IngresoFormScreen: React.FC<Props> = ({ navigation, route }) => {
               }
             }
 
-            // Refresco silencioso opcional si se solicita
             if (!forceRefresh) return;
           }
         }
@@ -515,16 +544,18 @@ const IngresoFormScreen: React.FC<Props> = ({ navigation, route }) => {
     try {
       setLoading(true);
 
-      const [ramasRes, cuentasRes, viviendasRes] = await Promise.all([
+      const [ramasRes, cuentasRes, viviendasRes, contratosRes] = await Promise.all([
         fetchRamasIngreso(),
         fetchCuentas(),
         fetchViviendas(),
+        listContratos(),
       ]);
 
       const ramasNorm = (ramasRes ?? []).map((r: any) => normalizeRamaIngreso(r));
       setRamas(ramasNorm);
       setCuentas(cuentasRes || []);
       setViviendas(viviendasRes || []);
+      setContratos(contratosRes || []);
 
       // ✅ Preload silencioso de tipos por todas las ramas para UX inmediata
       void preloadTiposIngresoPorRamas(ramasNorm.map((r) => r.id));
@@ -551,6 +582,8 @@ const IngresoFormScreen: React.FC<Props> = ({ navigation, route }) => {
           ramaId,
           'tipoId=',
           tipoId,
+          'contratos=',
+          contratosRes?.length ?? 0,
           'pendingRamaId=',
           pendingRamaIdRef.current,
           'pendingTipoId=',
@@ -559,7 +592,10 @@ const IngresoFormScreen: React.FC<Props> = ({ navigation, route }) => {
       }
     } catch (err) {
       console.error('[IngresoForm] Error cargando catálogos', err);
-      Alert.alert('Error', 'No se pudieron cargar ramas, tipos, cuentas o viviendas. Inténtalo de nuevo.');
+      Alert.alert(
+        'Error',
+        'No se pudieron cargar ramas, tipos, cuentas, viviendas o contratos. Inténtalo de nuevo.'
+      );
     } finally {
       setLoading(false);
       setRefreshing(false);
@@ -712,6 +748,7 @@ const IngresoFormScreen: React.FC<Props> = ({ navigation, route }) => {
     tipoId: string | null;
     cuentaId: string | null;
     viviendaId: string | null;
+    contratoAlquilerId: string | null;
     importe: string;
     fechaInicio: string;
     rangoCobro: string;
@@ -728,6 +765,7 @@ const IngresoFormScreen: React.FC<Props> = ({ navigation, route }) => {
       tipoId,
       cuentaId,
       viviendaId,
+      contratoAlquilerId,
       importe,
       fechaInicio,
       rangoCobro,
@@ -742,6 +780,7 @@ const IngresoFormScreen: React.FC<Props> = ({ navigation, route }) => {
     tipoId,
     cuentaId,
     viviendaId,
+    contratoAlquilerId,
     importe,
     fechaInicio,
     rangoCobro,
@@ -833,8 +872,23 @@ const IngresoFormScreen: React.FC<Props> = ({ navigation, route }) => {
   const ramaSeleccionada = ramas.find((r) => String(r.id) === String(ramaId)) || null;
   const tipoSeleccionado = tipos.find((t) => String(t.id) === String(tipoId)) || null;
 
-  // ✅ Regla corregida: la vivienda depende de la RAMA, no del tipo
-  const isRamaViviendas = !!ramaSeleccionada && ramaSeleccionada.nombre.toUpperCase().includes('VIVIENDA');
+  void tipoSeleccionado;
+
+  // Regla: la vivienda depende de la rama VIVIENDAS
+  const isRamaViviendas =
+    !!ramaSeleccionada && String(ramaSeleccionada.nombre ?? '').trim().toUpperCase() === 'VIVIENDAS';
+
+  const contratosDeViviendaSeleccionada = useMemo(() => {
+    if (!viviendaId) return [];
+    return (contratos ?? []).filter((c) => String(c.patrimonio_id) === String(viviendaId));
+  }, [contratos, viviendaId]);
+
+  const contratoSeleccionado = useMemo(() => {
+    if (!contratoAlquilerId) return null;
+    return contratos.find((c) => String(c.id) === String(contratoAlquilerId)) ?? null;
+  }, [contratos, contratoAlquilerId]);
+
+  void contratoSeleccionado;
 
   const handleSelectRama = async (newRamaId: string) => {
     if (readOnly) return;
@@ -842,6 +896,10 @@ const IngresoFormScreen: React.FC<Props> = ({ navigation, route }) => {
     const normalizedNewRamaId = String(newRamaId ?? '');
     const sameRama = String(ramaId ?? '') === normalizedNewRamaId;
     if (sameRama) return;
+
+    const nuevaRama = ramas.find((r) => String(r.id) === normalizedNewRamaId) ?? null;
+    const nuevaEsViviendas =
+      !!nuevaRama && String(nuevaRama.nombre ?? '').trim().toUpperCase() === 'VIVIENDAS';
 
     // 1) selección visual inmediata
     setRamaId(normalizedNewRamaId, 'manualRamaSelect');
@@ -857,8 +915,13 @@ const IngresoFormScreen: React.FC<Props> = ({ navigation, route }) => {
 
     // 3) limpiar selección dependiente
     setTipoId(null, 'manualRamaSelect-resetTipo');
-    setViviendaId(null);
     pendingTipoIdRef.current = null;
+
+    // Si salimos de VIVIENDAS, limpiamos vivienda y contrato
+    if (!nuevaEsViviendas) {
+      setViviendaId(null);
+      setContratoAlquilerId(null);
+    }
 
     // 4) asegurar sincronización con backend/caché
     await loadTiposForRama(normalizedNewRamaId, {
@@ -905,6 +968,21 @@ const IngresoFormScreen: React.FC<Props> = ({ navigation, route }) => {
     });
   };
 
+  const handleSelectVivienda = (nextViviendaId: string) => {
+    if (readOnly) return;
+
+    const normalizedNext = String(nextViviendaId ?? '');
+    const current = String(viviendaId ?? '');
+
+    if (normalizedNext === current) return;
+
+    setViviendaId(normalizedNext);
+
+    // Regla funcional:
+    // al cambiar de vivienda, se limpia siempre el contrato asociado.
+    setContratoAlquilerId(null);
+  };
+
   const handleSave = async () => {
     if (readOnly) return;
 
@@ -944,6 +1022,7 @@ const IngresoFormScreen: React.FC<Props> = ({ navigation, route }) => {
       rama_id: String(ramaId),
       tipo_id: String(tipoId),
       referencia_vivienda_id: isRamaViviendas ? viviendaId : null,
+      contrato_alquiler: isRamaViviendas ? contratoAlquilerId : null,
       cuenta_id: String(cuentaId),
       activo,
       cobrado,
@@ -1161,14 +1240,61 @@ const IngresoFormScreen: React.FC<Props> = ({ navigation, route }) => {
                       label={getViviendaLabel(viv)}
                       subLabel={viv.direccion_completa ?? ''}
                       selected={viviendaId === viv.id}
-                      onPress={() => {
-                        if (readOnly) return;
-                        setViviendaId(viv.id);
-                      }}
+                      onPress={() => handleSelectVivienda(viv.id)}
                     />
                   </View>
                 ))}
               </View>
+            </View>
+          )}
+
+          {isRamaViviendas && viviendaId && (
+            <View style={styles.field}>
+              <Text style={styles.label}>Contrato asociado</Text>
+
+              <View style={styles.segmentosRow}>
+                <View style={styles.segmentoWrapper}>
+                  <PillButton
+                    label="NINGUNO"
+                    selected={contratoAlquilerId == null}
+                    onPress={() => {
+                      if (readOnly) return;
+                      setContratoAlquilerId(null);
+                    }}
+                  />
+                </View>
+
+                {contratosDeViviendaSeleccionada.map((contrato) => {
+                  const tenantName = getContratoDisplaySubtitle(contrato);
+                  const estadoLabel = getContratoStatusLabel(contrato.estado);
+
+                  return (
+                    <View key={contrato.id} style={styles.segmentoWrapper}>
+                      <PillButton
+                        label={contrato.id}
+                        selected={String(contratoAlquilerId) === String(contrato.id)}
+                        onPress={() => {
+                          if (readOnly) return;
+                          setContratoAlquilerId(String(contrato.id));
+                        }}
+                        numberOfLines={2}
+                        variant={getContratoVariant(contrato.estado)}
+                        subLabel={tenantName ? `${tenantName} · ${estadoLabel}` : estadoLabel}
+                      />
+                    </View>
+                  );
+                })}
+              </View>
+
+              {contratosDeViviendaSeleccionada.length === 0 ? (
+                <Text style={styles.helperText}>
+                  No hay contratos asociados a esta vivienda. Puedes dejar NINGUNO o crear un contrato.
+                </Text>
+              ) : (
+                <Text style={styles.helperText}>
+                  Se muestran contratos activos, pendientes, finalizados y cancelados de la vivienda seleccionada.
+                </Text>
+              )}
             </View>
           )}
 
@@ -1295,7 +1421,7 @@ const IngresoFormScreen: React.FC<Props> = ({ navigation, route }) => {
                     <TextInput
                       style={[styles.input, styles.inputAdvanced]}
                       editable={false}
-                      value={createOn ? formatDateDisplay(createOn) : ''}
+                      value={createOn ? formatDateTimeShort(createOn) : ''}
                     />
                   </View>
                   <View style={styles.col}>
@@ -1303,7 +1429,7 @@ const IngresoFormScreen: React.FC<Props> = ({ navigation, route }) => {
                     <TextInput
                       style={[styles.input, styles.inputAdvanced]}
                       editable={false}
-                      value={inactivatedOn ? formatDateDisplay(inactivatedOn) : ''}
+                      value={inactivatedOn ? formatDateTimeShort(inactivatedOn) : ''}
                     />
                   </View>
                 </View>
@@ -1314,7 +1440,7 @@ const IngresoFormScreen: React.FC<Props> = ({ navigation, route }) => {
                     <TextInput
                       style={[styles.input, styles.inputAdvanced]}
                       editable={false}
-                      value={ultimoIngresoOn ? formatDateDisplay(ultimoIngresoOn) : ''}
+                      value={ultimoIngresoOn ? formatDateTimeShort(ultimoIngresoOn) : ''}
                     />
                   </View>
                   <View style={styles.col}>
@@ -1322,7 +1448,7 @@ const IngresoFormScreen: React.FC<Props> = ({ navigation, route }) => {
                     <TextInput
                       style={[styles.input, styles.inputAdvanced]}
                       editable={false}
-                      value={modifiedOn ? formatDateDisplay(modifiedOn) : ''}
+                      value={modifiedOn ? formatDateTimeShort(modifiedOn) : ''}
                     />
                   </View>
                 </View>

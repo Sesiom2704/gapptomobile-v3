@@ -1030,29 +1030,7 @@ const ContratoParticipantesScreen: React.FC<Props> = ({ navigation, route }) => 
               disabled={saving}
             />
           </View>
-        </FormSection>
-
-        <FormSection title="Siguiente evolución">
-          <View style={stylesLocal.infoBox}>
-            <View style={stylesLocal.infoRow}>
-              <Ionicons name="people-outline" size={18} color={colors.primary} />
-              <Text style={stylesLocal.infoTitle}>Próximos refinamientos</Text>
-            </View>
-
-            <Text style={styles.helperText}>
-              Ya puedes editar la relación contractual. El siguiente paso natural sería añadir buscador y filtros dentro del listado actual.
-            </Text>
-
-            <View style={stylesLocal.infoList}>
-              <Text style={stylesLocal.infoItem}>• búsqueda entre participantes actuales</Text>
-              <Text style={stylesLocal.infoItem}>• filtros por rol</Text>
-              <Text style={stylesLocal.infoItem}>• acciones masivas</Text>
-              <Text style={stylesLocal.infoItem}>• histórico de cambios</Text>
-            </View>
-          </View>
-        </FormSection>
-
-        <View style={{ marginTop: 12 }}>
+          <View style={{ marginTop: 12 }}>
           <FormActionButton
             label="Confirmar pantalla"
             onPress={handleSaveVisual}
@@ -1060,6 +1038,7 @@ const ContratoParticipantesScreen: React.FC<Props> = ({ navigation, route }) => 
             variant="primary"
           />
         </View>
+        </FormSection>
       </ScrollView>
     </Screen>
   );

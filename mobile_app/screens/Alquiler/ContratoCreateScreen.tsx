@@ -1,28 +1,14 @@
 /**
  * Archivo: mobile_app/screens/Alquiler/ContratoCreateScreen.tsx
+ * Versión: 3.2.0
  *
- * Formulario de contrato de alquiler (v3)
+ * Formulario de alta/edición de contratos.
  *
- * Objetivo de esta versión:
- * - Mantener el diseño y la UX base del alta/edición de contratos.
- * - Conectar el formulario con backend real mediante gestionAlquilerApi.
- * - Mantener coherencia visual con formularios existentes como IngresoFormScreen.
- *
- * Cambios incluidos:
- * - Conexión real con backend:
- *     * createContrato(...)
- *     * updateContrato(...)
- * - Validación de datos obligatorios antes de guardar.
- * - Conversión segura de importes string -> number.
- * - Navegación al detalle del contrato tras crear/editar.
- * - Actualización del baseline tras guardado correcto.
- * - Nuevo campo funcional:
- *     * incremento_ipc
- *
- * Reglas funcionales:
- * - patrimonioId llega desde la ficha de propiedad.
- * - Si existe route.params.contrato y no es duplicate, se trabaja en edición.
- * - Si duplicate === true, se usa como base visual pero se crea un nuevo contrato.
+ * Mejoras:
+ * - Nuevo selector de objeto de alquiler
+ * - Carga dinámica de opciones válidas desde backend
+ * - Opciones incompatibles visibles pero deshabilitadas
+ * - Envío y edición del nuevo campo objeto_alquiler
  */
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
@@ -34,6 +20,7 @@ import {
   ScrollView,
   TouchableOpacity,
   RefreshControl,
+  ActivityIndicator,
 } from 'react-native';
 import DateTimePicker from '@react-native-community/datetimepicker';
 import { Ionicons } from '@expo/vector-icons';
@@ -51,8 +38,11 @@ import { colors } from '../../theme';
 import {
   createContrato,
   updateContrato,
+  listOpcionesContratoPorPatrimonio,
   type ContratoRow,
   type EstadoContrato,
+  type ContratoObjetoOpcionRow,
+  type ObjetoAlquilerCode,
 } from '../../services/gestionAlquilerApi';
 
 type Props = {
@@ -67,7 +57,6 @@ type Props = {
   };
 };
 
-// ---- Helpers ----
 function toApiDate(d: Date): string {
   const year = d.getFullYear();
   const month = String(d.getMonth() + 1).padStart(2, '0');
@@ -135,11 +124,12 @@ const ContratoCreateScreen: React.FC<Props> = ({ navigation, route }) => {
   const isEdit = !!contratoSource && !duplicate;
   const contratoId = contratoSource?.id ? String(contratoSource.id) : null;
 
-  // -------------------------
-  // Estado del formulario
-  // -------------------------
   const [estado, setEstado] = useState<EstadoContrato>(
     contratoSource?.estado ?? 'activo'
+  );
+
+  const [objetoAlquiler, setObjetoAlquiler] = useState<ObjetoAlquilerCode>(
+    contratoSource?.objeto_alquiler ?? 'completa'
   );
 
   const [fechaInicio, setFechaInicio] = useState<string>(() => {
@@ -172,19 +162,18 @@ const ContratoCreateScreen: React.FC<Props> = ({ navigation, route }) => {
     contratoSource?.observaciones ?? ''
   );
 
-  // Date pickers
   const [showInicioPicker, setShowInicioPicker] = useState(false);
   const [showFinPicker, setShowFinPicker] = useState(false);
 
-  // Flags UI
   const [saving, setSaving] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
 
-  // -------------------------
-  // Back / dirty control
-  // -------------------------
+  const [loadingOpciones, setLoadingOpciones] = useState(false);
+  const [opcionesObjeto, setOpcionesObjeto] = useState<ContratoObjetoOpcionRow[]>([]);
+
   type Snapshot = {
     estado: EstadoContrato;
+    objetoAlquiler: string;
     fechaInicio: string;
     fechaFin: string;
     rentaMensual: string;
@@ -199,6 +188,7 @@ const ContratoCreateScreen: React.FC<Props> = ({ navigation, route }) => {
   const getSnapshot = useCallback((): Snapshot => {
     return {
       estado,
+      objetoAlquiler: String(objetoAlquiler ?? ''),
       fechaInicio,
       fechaFin,
       rentaMensual,
@@ -211,6 +201,7 @@ const ContratoCreateScreen: React.FC<Props> = ({ navigation, route }) => {
     };
   }, [
     estado,
+    objetoAlquiler,
     fechaInicio,
     fechaFin,
     rentaMensual,
@@ -276,9 +267,42 @@ const ContratoCreateScreen: React.FC<Props> = ({ navigation, route }) => {
     ]);
   };
 
-  // -------------------------
-  // Handlers fecha
-  // -------------------------
+  const loadOpciones = useCallback(async () => {
+    if (!patrimonioId) return;
+
+    setLoadingOpciones(true);
+    try {
+      const data = await listOpcionesContratoPorPatrimonio({
+        patrimonioId,
+        contratoIdExclude: isEdit ? contratoId : null,
+      });
+
+      const opciones = Array.isArray(data?.opciones) ? data.opciones : [];
+      setOpcionesObjeto(opciones);
+
+      const currentExists = opciones.some((o) => o.code === objetoAlquiler);
+
+      if (!currentExists) {
+        const firstEnabled = opciones.find((o) => o.enabled);
+        if (firstEnabled) {
+          setObjetoAlquiler(firstEnabled.code);
+        }
+      }
+    } catch (error: any) {
+      const detail =
+        error?.response?.data?.detail ||
+        'No se pudieron cargar las opciones del objeto de alquiler.';
+      Alert.alert('Error', String(detail));
+      setOpcionesObjeto([]);
+    } finally {
+      setLoadingOpciones(false);
+    }
+  }, [patrimonioId, isEdit, contratoId, objetoAlquiler]);
+
+  useEffect(() => {
+    void loadOpciones();
+  }, [loadOpciones]);
+
   const handleChangeFechaInicio = (_event: any, selectedDate?: Date) => {
     setShowInicioPicker(false);
     if (!selectedDate) return;
@@ -291,22 +315,34 @@ const ContratoCreateScreen: React.FC<Props> = ({ navigation, route }) => {
     setFechaFin(toApiDate(selectedDate));
   };
 
-  // -------------------------
-  // Refresh visual
-  // -------------------------
   const onRefresh = () => {
     setRefreshing(true);
-    setTimeout(() => setRefreshing(false), 350);
+    Promise.resolve(loadOpciones()).finally(() => {
+      setTimeout(() => setRefreshing(false), 250);
+    });
   };
 
-  // -------------------------
-  // Save real
-  // -------------------------
   const handleSave = async () => {
     if (readOnly) return;
 
     if (!patrimonioId) {
       Alert.alert('Error', 'No se ha recibido la vivienda asociada al contrato.');
+      return;
+    }
+
+    if (!objetoAlquiler) {
+      Alert.alert('Campo obligatorio', 'Debes seleccionar qué se alquila en este contrato.');
+      return;
+    }
+
+    const opcionSeleccionada = opcionesObjeto.find((o) => o.code === objetoAlquiler);
+    if (!opcionSeleccionada) {
+      Alert.alert('Validación', 'La opción seleccionada no es válida para este patrimonio.');
+      return;
+    }
+
+    if (!opcionSeleccionada.enabled) {
+      Alert.alert('No disponible', String(opcionSeleccionada.disabled_reason || 'Esta opción no está disponible.'));
       return;
     }
 
@@ -337,6 +373,7 @@ const ContratoCreateScreen: React.FC<Props> = ({ navigation, route }) => {
     try {
       const payload = {
         patrimonio_id: patrimonioId,
+        objeto_alquiler: objetoAlquiler,
         fecha_inicio: fechaInicio,
         fecha_fin: fechaFin || null,
         renta_mensual: rentaMensualNum,
@@ -353,6 +390,7 @@ const ContratoCreateScreen: React.FC<Props> = ({ navigation, route }) => {
 
       if (isEdit && contratoId) {
         saved = await updateContrato(contratoId, {
+          objeto_alquiler: payload.objeto_alquiler,
           fecha_inicio: payload.fecha_inicio,
           fecha_fin: payload.fecha_fin,
           renta_mensual: payload.renta_mensual,
@@ -434,10 +472,54 @@ const ContratoCreateScreen: React.FC<Props> = ({ navigation, route }) => {
               editable={false}
               style={[styles.input, styles.inputAdvanced, styles.inputFilled]}
             />
-            <Text style={styles.helperText}>
-              En esta versión el contrato se crea sobre la vivienda seleccionada desde detalle de propiedad.
-            </Text>
           </View>
+        </FormSection>
+
+        <FormSection title="Objeto del alquiler">
+          {loadingOpciones ? (
+            <ActivityIndicator style={{ marginVertical: 8 }} />
+          ) : (
+            <>
+              <Text style={styles.helperText}>
+                Se muestran todas las opciones válidas. Las incompatibles con contratos activos aparecen deshabilitadas.
+              </Text>
+
+              <View style={stylesLocal.optionGrid}>
+                {opcionesObjeto.map((item) => {
+                  const selected = objetoAlquiler === item.code;
+                  const disabled = !item.enabled || readOnly;
+
+                  return (
+                    <TouchableOpacity
+                      key={String(item.code)}
+                      activeOpacity={disabled ? 1 : 0.9}
+                      disabled={disabled}
+                      onPress={() => setObjetoAlquiler(item.code)}
+                      style={[
+                        stylesLocal.optionCard,
+                        selected && stylesLocal.optionCardSelected,
+                        disabled && stylesLocal.optionCardDisabled,
+                      ]}
+                    >
+                      <Text
+                        style={[
+                          stylesLocal.optionCardTitle,
+                          selected && stylesLocal.optionCardTitleSelected,
+                          disabled && stylesLocal.optionCardTitleDisabled,
+                        ]}
+                      >
+                        {item.label}
+                      </Text>
+
+                      {!item.enabled && item.disabled_reason ? (
+                        <Text style={stylesLocal.optionCardHint}>{item.disabled_reason}</Text>
+                      ) : null}
+                    </TouchableOpacity>
+                  );
+                })}
+              </View>
+            </>
+          )}
         </FormSection>
 
         <FormSection title="Datos principales">
@@ -473,6 +555,17 @@ const ContratoCreateScreen: React.FC<Props> = ({ navigation, route }) => {
                   onPress={() => {
                     if (readOnly) return;
                     setEstado('finalizado');
+                  }}
+                />
+              </View>
+
+              <View style={styles.segmentoWrapper}>
+                <PillButton
+                  label="Cancelado"
+                  selected={estado === 'cancelado'}
+                  onPress={() => {
+                    if (readOnly) return;
+                    setEstado('cancelado');
                   }}
                 />
               </View>
@@ -679,37 +772,6 @@ const ContratoCreateScreen: React.FC<Props> = ({ navigation, route }) => {
           </View>
         </FormSection>
 
-        <FormSection title="Siguiente paso">
-          <View style={stylesLocal.infoBox}>
-            <View style={stylesLocal.infoRow}>
-              <Ionicons name="people-outline" size={18} color={colors.primary} />
-              <Text style={stylesLocal.infoTitle}>Participantes del contrato</Text>
-            </View>
-
-            <Text style={styles.helperText}>
-              Después de guardar este contrato podrás añadir o gestionar:
-            </Text>
-
-            <View style={stylesLocal.infoList}>
-              <Text style={stylesLocal.infoItem}>• Inquilino principal</Text>
-              <Text style={stylesLocal.infoItem}>• Otros inquilinos</Text>
-              <Text style={stylesLocal.infoItem}>• Avalistas</Text>
-              <Text style={stylesLocal.infoItem}>• Gestor asignado</Text>
-            </View>
-
-            <TouchableOpacity
-              disabled
-              activeOpacity={1}
-              style={stylesLocal.secondaryPlaceholderBtn}
-            >
-              <Ionicons name="people-circle-outline" size={16} color={colors.textSecondary} />
-              <Text style={stylesLocal.secondaryPlaceholderBtnText}>
-                Gestión de participantes (se activa tras guardar)
-              </Text>
-            </TouchableOpacity>
-          </View>
-        </FormSection>
-
         {!readOnly ? (
           <View style={{ marginTop: 12 }}>
             <FormActionButton
@@ -717,7 +779,7 @@ const ContratoCreateScreen: React.FC<Props> = ({ navigation, route }) => {
               onPress={handleSave}
               iconName="save-outline"
               variant="primary"
-              disabled={saving}
+              disabled={saving || loadingOpciones}
             />
           </View>
         ) : null}
@@ -733,49 +795,41 @@ const stylesLocal = {
     minHeight: 110,
     paddingTop: 14,
   },
-  infoBox: {
+  optionGrid: {
+    marginTop: 10,
+    gap: 10,
+  },
+  optionCard: {
     borderWidth: 1,
     borderColor: colors.border,
-    borderRadius: 16,
+    borderRadius: 14,
     backgroundColor: colors.surface,
-    padding: 14,
+    paddingVertical: 12,
+    paddingHorizontal: 12,
   },
-  infoRow: {
-    flexDirection: 'row' as const,
-    alignItems: 'center' as const,
-    gap: 8,
-    marginBottom: 8,
+  optionCardSelected: {
+    borderColor: colors.primary,
+    backgroundColor: colors.background,
   },
-  infoTitle: {
+  optionCardDisabled: {
+    opacity: 0.55,
+    backgroundColor: colors.background,
+  },
+  optionCardTitle: {
     fontSize: 13,
     fontWeight: '800' as const,
     color: colors.textPrimary,
   },
-  infoList: {
-    marginTop: 8,
-    gap: 4,
+  optionCardTitleSelected: {
+    color: colors.primary,
   },
-  infoItem: {
-    fontSize: 12,
-    color: colors.textPrimary,
-  },
-  secondaryPlaceholderBtn: {
-    marginTop: 14,
-    minHeight: 44,
-    borderRadius: 14,
-    borderWidth: 1,
-    borderColor: colors.border,
-    backgroundColor: colors.background,
-    flexDirection: 'row' as const,
-    alignItems: 'center' as const,
-    justifyContent: 'center' as const,
-    gap: 8,
-    paddingHorizontal: 12,
-    opacity: 0.85,
-  },
-  secondaryPlaceholderBtnText: {
-    fontSize: 12,
-    fontWeight: '700' as const,
+  optionCardTitleDisabled: {
     color: colors.textSecondary,
+  },
+  optionCardHint: {
+    marginTop: 6,
+    fontSize: 11,
+    color: colors.textSecondary,
+    lineHeight: 16,
   },
 } as const;

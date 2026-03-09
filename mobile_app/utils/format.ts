@@ -1,4 +1,21 @@
-// utils/format.ts
+/**
+ * Archivo: mobile_app/utils/format.ts
+ * Versión: 3.1.0
+ *
+ * Responsabilidad:
+ * - Utilidades de formato numérico y de fechas para frontend.
+ *
+ * Mejoras incluidas:
+ * 1) Nueva utilidad reutilizable para fecha + hora:
+ *    - formatDateTimeShort(...)
+ *    - salida: dd/MM/yy, HH:mm
+ *
+ * 2) Se mantiene compatibilidad con:
+ *    - parseImporte
+ *    - EuroformatEuro
+ *    - formatFechaCorta
+ *    - appendMonthYearSuffix
+ */
 
 // =======================
 // Tipos
@@ -60,7 +77,6 @@ export function parseEuroToNumber(
   let decimalSep: ',' | '.' | null = null;
 
   if (lastComma === -1 && lastDot === -1) {
-    // No hay separadores, intentamos parsear directamente
     const n = Number(normalized);
     return Number.isNaN(n) ? null : n;
   } else if (lastComma > lastDot) {
@@ -70,13 +86,10 @@ export function parseEuroToNumber(
   }
 
   if (decimalSep === ',') {
-    // La coma es el decimal -> los puntos son miles
-    normalized = normalized.replace(/\./g, ''); // quitamos puntos
-    normalized = normalized.replace(',', '.');  // coma -> punto
+    normalized = normalized.replace(/\./g, '');
+    normalized = normalized.replace(',', '.');
   } else if (decimalSep === '.') {
-    // El punto es el decimal -> las comas son miles
-    normalized = normalized.replace(/,/g, '');  // quitamos comas
-    // dejamos el punto como está
+    normalized = normalized.replace(/,/g, '');
   }
 
   const num = Number(normalized);
@@ -99,21 +112,9 @@ export function parseImporte(value?: string): number | null {
  * Formatea un valor numérico a euros siguiendo modos:
  *
  * - 'normal': respeta signo del número
- *   -  1234.5   ->  "1.234,50 €"
- *   - -1234.5   ->  "-1.234,50 €"
- *
  * - 'signed': signo explícito
- *   -  1234.5   ->  "+1.234,50 €"
- *   - -1234.5   ->  "-1.234,50 €"
- *   -  0        ->  "0,00 €"
- *
- * - 'plus': siempre prefijo "+" y valor en absoluto
- *   -  1234.5   ->  "+1.234,50 €"
- *   - -1234.5   ->  "+1.234,50 €"
- *
- * - 'minus': siempre prefijo "-" y valor en absoluto
- *   -  1234.5   ->  "-1.234,50 €"
- *   - -1234.5   ->  "-1.234,50 €"
+ * - 'plus': siempre prefijo "+"
+ * - 'minus': siempre prefijo "-"
  */
 export function EuroformatEuro(
   value: number | string | null | undefined,
@@ -159,6 +160,36 @@ export function EuroformatEuro(
 // Fechas
 // =======================
 
+function buildSafeDate(value: string | Date): Date | null {
+  if (value instanceof Date) {
+    return Number.isNaN(value.getTime()) ? null : value;
+  }
+
+  const raw = String(value ?? '').trim();
+  if (!raw) return null;
+
+  // Caso YYYY-MM-DD sin hora: se fuerza local para evitar desplazamientos raros
+  const isoDateOnly = raw.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (isoDateOnly) {
+    const [, y, m, d] = isoDateOnly;
+    const date = new Date(Number(y), Number(m) - 1, Number(d), 0, 0, 0, 0);
+    return Number.isNaN(date.getTime()) ? null : date;
+  }
+
+  const date = new Date(raw);
+  if (!Number.isNaN(date.getTime())) return date;
+
+  // Intento adicional para "dd/mm/yyyy"
+  const esDateOnly = raw.match(/^(\d{2})\/(\d{2})\/(\d{4})$/);
+  if (esDateOnly) {
+    const [, d, m, y] = esDateOnly;
+    const parsed = new Date(Number(y), Number(m) - 1, Number(d), 0, 0, 0, 0);
+    return Number.isNaN(parsed.getTime()) ? null : parsed;
+  }
+
+  return null;
+}
+
 /**
  * Formatea una fecha en ISO ("YYYY-MM-DD" o "YYYY-MM-DDTHH:mm:ss...")
  * a formato corto "DD/MM/YYYY".
@@ -168,38 +199,57 @@ export function formatFechaCorta(
 ): string {
   if (!value) return '';
 
-  let iso: string;
+  const date = buildSafeDate(value);
+  if (!date) return typeof value === 'string' ? value : '';
 
-  if (value instanceof Date) {
-    iso = value.toISOString();
-  } else if (typeof value === 'string') {
-    iso = value;
-  } else {
-    return '';
-  }
+  const day = String(date.getDate()).padStart(2, '0');
+  const month = String(date.getMonth() + 1).padStart(2, '0');
+  const year = String(date.getFullYear());
 
-  const [datePart] = iso.split('T');
-  const [year, month, day] = datePart.split('-');
+  return `${day}/${month}/${year}`;
+}
 
-  if (!year || !month || !day) {
-    return iso;
-  }
+/**
+ * Formatea fecha y hora en formato corto:
+ * - dd/MM/yy, HH:mm
+ *
+ * Ejemplo:
+ * - 2026-03-09T14:35:00Z -> 09/03/26, 15:35   (según huso del dispositivo)
+ * - 2026-03-09 14:35:00  -> 09/03/26, 14:35   (si el parser del entorno lo interpreta local)
+ *
+ * Uso recomendado:
+ * - campos readonly de formularios
+ * - metadatos de createon / modifiedon / ultimo cobro
+ */
+export function formatDateTimeShort(
+  value: string | Date | null | undefined
+): string {
+  if (!value) return '';
 
-  return `${day.padStart(2, '0')}/${month.padStart(2, '0')}/${year}`;
+  const date = buildSafeDate(value);
+  if (!date) return typeof value === 'string' ? value : '';
+
+  const day = String(date.getDate()).padStart(2, '0');
+  const month = String(date.getMonth() + 1).padStart(2, '0');
+  const year2 = String(date.getFullYear() % 100).padStart(2, '0');
+
+  const hours = String(date.getHours()).padStart(2, '0');
+  const minutes = String(date.getMinutes()).padStart(2, '0');
+
+  return `${day}/${month}/${year2}, ${hours}:${minutes}`;
 }
 
 /**
  * Añade (o reemplaza) un sufijo final " - M/YY" (mes/año) a un texto.
- * - Evita concatenación: "ABC - 12/25" -> (en julio 2026) "ABC - 7/26"
- * - El mes se deja sin padding ("7/26" y no "07/26") como pediste.
+ * - Evita concatenación: "ABC - 12/25" -> "ABC - 7/26"
+ * - El mes se deja sin padding como pediste.
  */
 export function appendMonthYearSuffix(base: string, now: Date = new Date()): string {
   const cleanBase = (base || '').trim();
 
-  // Quita sufijo final tipo " - 12/25" si ya existe
   const withoutSuffix = cleanBase.replace(/\s*-\s*\d{1,2}\/\d{2}\s*$/i, '').trim();
 
-  const mm = String(now.getMonth() + 1); // 1..12 sin 0 delante
+  const mm = String(now.getMonth() + 1);
   const yy = String(now.getFullYear() % 100).padStart(2, '0');
 
   return `${withoutSuffix} - ${mm}/${yy}`.trim();

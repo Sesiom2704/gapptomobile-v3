@@ -1,19 +1,24 @@
-// services/ingresosApi.ts
-//
-// Objetivo:
-// - Mantener toda la funcionalidad actual de ingresos.
-// - Añadir soporte sólido para flujo RAMA -> TIPO.
-// - Mejorar UX: cachear tipos por rama para que, cuando el usuario pulse una rama,
-//   los tipos aparezcan de forma inmediata si ya están precargados.
-// - Mantener compatibilidad legacy con pantallas que siguen importando:
-//     * fetchTiposIngreso
-//     * TipoIngreso
-//
-// Notas:
-// - Se conserva fetchTiposIngreso() como compatibilidad legacy.
-// - Se añade caché en memoria por rama.
-// - Se añaden helpers para precargar tipos por múltiples ramas.
-//
+/**
+ * Archivo: mobile_app/services/ingresosApi.ts
+ * Versión: 3.1.0
+ *
+ * Objetivo:
+ * - Mantener toda la funcionalidad actual de ingresos.
+ * - Añadir soporte sólido para contrato_alquiler en create/update.
+ * - Mantener UX rápida con caché de tipos por rama.
+ * - Mantener compatibilidad legacy con pantallas antiguas.
+ *
+ * Mejoras incluidas:
+ * 1) Se añade contrato_alquiler a:
+ *    - Ingreso
+ *    - IngresoCreatePayload
+ *    - IngresoUpdatePayload
+ *
+ * 2) Se mantiene toda la lógica existente:
+ *    - fetchTiposIngreso
+ *    - caché rama -> tipos
+ *    - CRUD y acciones
+ */
 
 import axios from 'axios';
 import { api } from './api';
@@ -82,21 +87,24 @@ export interface Ingreso {
   tipo_nombre?: string | null;
 
   referencia_vivienda_id?: string | null;
+  contrato_alquiler?: string | null;
+
   concepto: string | null;
   importe: number;
   activo: boolean;
   cobrado: boolean;
   kpi: boolean;
   ingresos_cobrados: number;
+
   createon?: string | null;
   modifiedon?: string | null;
   inactivatedon?: string | null;
   ultimo_ingreso_on?: string | null;
+
   cuenta_id?: string | null;
   cuenta_nombre?: string | null;
 
   omitido_este_mes?: boolean | null;
-  contrato_alquiler?: string | null;
 }
 
 export interface IngresoCreatePayload {
@@ -106,6 +114,7 @@ export interface IngresoCreatePayload {
   rama_id: string;
   tipo_id: string;
   referencia_vivienda_id?: string | null;
+  contrato_alquiler?: string | null;
   concepto: string;
   importe: string | number;
   cuenta_id?: string | null;
@@ -128,6 +137,7 @@ export interface IngresoUpdatePayload {
   rama_id?: string;
   tipo_id?: string;
   referencia_vivienda_id?: string | null;
+  contrato_alquiler?: string | null;
   concepto?: string;
   importe?: string | number;
   cuenta_id?: string | null;
@@ -389,6 +399,8 @@ export async function createIngreso(payload: IngresoCreatePayload): Promise<Ingr
     const body = {
       ...payload,
       importe: parseImporte(rawImporte),
+      contrato_alquiler:
+        payload.contrato_alquiler !== undefined ? payload.contrato_alquiler : undefined,
     };
 
     const resp = await api.post<Ingreso>(url, body);
@@ -409,6 +421,10 @@ export async function updateIngreso(id: string, payload: IngresoUpdatePayload): 
       const rawImporte =
         typeof payload.importe === 'number' ? String(payload.importe) : payload.importe;
       body.importe = parseImporte(rawImporte);
+    }
+
+    if (payload.contrato_alquiler !== undefined) {
+      body.contrato_alquiler = payload.contrato_alquiler;
     }
 
     const resp = await api.patch<Ingreso>(url, body);

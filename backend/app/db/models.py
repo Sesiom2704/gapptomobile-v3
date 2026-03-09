@@ -362,6 +362,7 @@ class Contrato(Base):
     createon = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     modifiedon = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
     inactivatedon = Column(DateTime(timezone=True), nullable=True)
+    objeto_alquiler = Column(String, nullable=False, server_default="completa")
 
     user = relationship("User", back_populates="contratos")
     patrimonio_rel = relationship("Patrimonio", back_populates="contratos")

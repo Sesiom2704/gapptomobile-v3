@@ -1,38 +1,32 @@
 """
 Archivo: backend/app/api/v1/gestion_alquiler_router.py
-Versión: 3.1.0
+Versión: 3.2.0
 
 Descripción:
 - API v1 del módulo de gestión de alquileres.
 - Mantiene personas, contratos, participantes y resumen activo por patrimonio.
 - Integra sincronización automática con ingresos recurrentes asociados a contratos.
+- Añade soporte a objeto_alquiler en contratos.
+- Añade endpoint para calcular opciones disponibles de contrato por patrimonio.
+- Bloquea solapes funcionales con contratos activos ya existentes.
 
-Mejoras incluidas en esta versión:
-1. Nuevo endpoint para listar contratos:
-   - GET /api/v1/gestion-alquiler/contratos
-   - Permite filtrar por patrimonio_id.
-   - Devuelve participantes_resumen para uso directo en frontend.
-
-2. Corrección de coherencia al crear ingresos automáticos:
-   - Si el contrato nace en estado no operativo (finalizado/cancelado)
-     o ya viene inactivado, el ingreso automático también nace:
-       * activo = False
-       * kpi = False
-       * inactivatedon = now
-
-3. Se mantiene toda la lógica existente:
-   - creación de contrato -> creación automática de ingreso
-   - actualización de contrato -> sincronización automática de ingreso
-   - cambios en participantes -> re-sincronización de concepto del ingreso
-
-Reglas generales:
-- Todas las entidades están ligadas a user_id.
-- Cada usuario solo puede ver y modificar sus propios registros.
-- La lógica de validación funcional mínima se resuelve aquí.
+Reglas nuevas:
+1. contratos.objeto_alquiler es obligatorio.
+2. Las opciones disponibles dependen del patrimonio:
+   - completa siempre
+   - vivienda solo si hay garaje o trastero
+   - garaje / trastero si existen
+   - vivienda + garaje / vivienda + trastero / garaje + trastero según proceda
+   - habitaciones solo si habitaciones > 1
+3. Si existe un contrato activo incompatible, la opción se devuelve deshabilitada.
+4. ingresos.concepto pasa a:
+   - ALQ SIN_INQ <REFERENCIA> si no hay inquilinos
+   - ALQ <NOMBRE_TRUNCADO_8> <REFERENCIA> si hay inquilinos
 """
 
 from __future__ import annotations
 
+import re
 from typing import List, Optional
 from datetime import datetime
 
@@ -54,6 +48,8 @@ from backend.app.schemas.gestion_alquiler import (
     ContratoParticipanteUpdate,
     ContratoParticipanteSchema,
     ParticipantesResumenOut,
+    ContratoObjetoOpcionOut,
+    ContratoObjetoOpcionesOut,
 )
 from backend.app.utils.text_utils import normalize_upper_ascii
 from backend.app.utils.id_utils import generate_ingreso_id
@@ -63,6 +59,26 @@ router = APIRouter(
     prefix="/gestion-alquiler",
     tags=["gestion-alquiler"],
 )
+
+OBJETO_ALQUILER_LABELS = {
+    "completa": "Completa",
+    "vivienda": "Vivienda",
+    "garaje": "Garaje",
+    "trastero": "Trastero",
+    "garaje_trastero": "Garaje + Trastero",
+    "vivienda_garaje": "Vivienda + Garaje",
+    "vivienda_trastero": "Vivienda + Trastero",
+}
+
+OBJETO_ALQUILER_ALLOWED_BASE = {
+    "completa",
+    "vivienda",
+    "garaje",
+    "trastero",
+    "garaje_trastero",
+    "vivienda_garaje",
+    "vivienda_trastero",
+}
 
 
 # ==========================================================
@@ -85,23 +101,14 @@ def _normalize_email(value: Optional[str]) -> Optional[str]:
 
 
 def _get_default_tipo_ingreso_alquiler_id() -> str:
-    """
-    Tipo ingreso fijo solicitado para rentas de alquiler.
-    """
     return "VIV-TIPO_INGRESO-FKV95F"
 
 
 def _get_default_rama_ingreso_alquiler_id() -> str:
-    """
-    Rama fija solicitada para rentas de alquiler.
-    """
     return "VIV-TIPORAMAINGRESO-6F29A938"
 
 
 def _get_default_cuenta_alquiler_id() -> str:
-    """
-    Cuenta bancaria por defecto solicitada para crear ingresos automáticos de alquiler.
-    """
     return "BANCO-679A92B7"
 
 
@@ -151,9 +158,6 @@ def _get_ingreso_by_contrato(
     contrato_id: str,
     user_id: int,
 ) -> Optional[models.Ingreso]:
-    """
-    Recupera el ingreso vinculado al contrato.
-    """
     return (
         db.query(models.Ingreso)
         .filter(
@@ -166,12 +170,6 @@ def _get_ingreso_by_contrato(
 
 
 def _build_participantes_resumen(contrato: models.Contrato) -> ParticipantesResumenOut:
-    """
-    Resume participantes activos del contrato.
-
-    Regla importante:
-    - El inquilino principal NO debe aparecer en "otros inquilinos".
-    """
     participantes = [
         p for p in (contrato.participantes or [])
         if getattr(p, "inactivatedon", None) is None and p.persona is not None
@@ -190,10 +188,8 @@ def _build_participantes_resumen(contrato: models.Contrato) -> ParticipantesResu
                 inquilino_principal = nombre
             else:
                 inquilinos.append(nombre)
-
         elif p.rol == "avalista":
             avalistas.append(nombre)
-
         elif p.rol == "gestor":
             if gestor is None:
                 gestor = nombre
@@ -206,59 +202,27 @@ def _build_participantes_resumen(contrato: models.Contrato) -> ParticipantesResu
     )
 
 
-def _build_ingreso_concepto_for_contrato(contrato: models.Contrato) -> str:
-    """
-    Construye el concepto del ingreso automático del alquiler.
-
-    Regla:
-    - ALQ <INQUILINO_PRINCIPAL> <REFERENCIA_VIVIENDA>
-    - Si no existe principal:
-      ALQ SIN_INQUILINO <REFERENCIA_VIVIENDA>
-    """
-    referencia = (
-        getattr(contrato.patrimonio_rel, "referencia", None)
-        or contrato.patrimonio_id
-        or "SIN_REFERENCIA"
-    )
-
-    resumen = _build_participantes_resumen(contrato)
-    inquilino_principal = (resumen.inquilino_principal or "").strip()
-
-    if inquilino_principal:
-        return normalize_upper_ascii(f"ALQ {inquilino_principal} {referencia}")
-
-    return normalize_upper_ascii(f"ALQ SIN_INQUILINO {referencia}")
-
-
-def _persona_to_schema(row: models.Persona) -> PersonaSchema:
-    return PersonaSchema.model_validate(row)
-
-
-def _participante_to_schema(row: models.ContratoParticipante) -> ContratoParticipanteSchema:
-    persona = row.persona
-    return ContratoParticipanteSchema(
-        id=row.id,
-        contrato_id=row.contrato_id,
-        persona_id=row.persona_id,
-        rol=row.rol,
-        es_principal=bool(row.es_principal),
-        observaciones=row.observaciones,
-        createon=row.createon,
-        modifiedon=row.modifiedon,
-        inactivatedon=row.inactivatedon,
-        nombre_completo=getattr(persona, "nombre_completo", None),
-        dni=getattr(persona, "dni", None),
-        telefono=getattr(persona, "telefono", None),
-        email=getattr(persona, "email", None),
-    )
+def _get_objeto_alquiler_label(code: Optional[str]) -> Optional[str]:
+    if not code:
+        return None
+    if code in OBJETO_ALQUILER_LABELS:
+        return OBJETO_ALQUILER_LABELS[code]
+    if code.startswith("habitacion_"):
+        match = re.match(r"^habitacion_(\d+)$", code)
+        if match:
+            return f"Hab {match.group(1)}"
+    return code
 
 
 def _contrato_to_schema(row: models.Contrato) -> ContratoSchema:
     patrimonio = row.patrimonio_rel
+    objeto_alquiler = getattr(row, "objeto_alquiler", None) or "completa"
+
     return ContratoSchema(
         id=row.id,
         user_id=row.user_id,
         patrimonio_id=row.patrimonio_id,
+        objeto_alquiler=objeto_alquiler,
         fecha_inicio=row.fecha_inicio,
         fecha_fin=row.fecha_fin,
         renta_mensual=float(row.renta_mensual) if row.renta_mensual is not None else None,
@@ -274,6 +238,7 @@ def _contrato_to_schema(row: models.Contrato) -> ContratoSchema:
         inactivatedon=row.inactivatedon,
         referencia_vivienda=getattr(patrimonio, "referencia", None),
         direccion_completa=getattr(patrimonio, "direccion_completa", None),
+        objeto_alquiler_label=_get_objeto_alquiler_label(objeto_alquiler),
         participantes_resumen=_build_participantes_resumen(row),
     )
 
@@ -301,44 +266,280 @@ def _validate_rol_participante(rol: Optional[str]) -> str:
 
 
 def _is_contrato_no_operativo(contrato: models.Contrato) -> bool:
-    """
-    Determina si el contrato debe dejar el ingreso asociado inactivo y fuera de KPI.
-
-    Regla:
-    - estado finalizado o cancelado
-    - o contrato inactivado lógicamente
-    """
     estado = (contrato.estado or "").strip().lower()
     contrato_inactivo = contrato.inactivatedon is not None
     return estado in {"finalizado", "cancelado"} or contrato_inactivo
 
 
 # ==========================================================
+# Helpers de objeto_alquiler y compatibilidad
+# ==========================================================
+
+def _is_habitacion_code(value: str) -> bool:
+    return bool(re.match(r"^habitacion_\d+$", value or ""))
+
+
+def _parse_habitacion_num(value: Optional[str]) -> Optional[int]:
+    if not value:
+        return None
+    match = re.match(r"^habitacion_(\d+)$", value)
+    if not match:
+        return None
+    return int(match.group(1))
+
+
+def _validate_objeto_alquiler_code(value: Optional[str]) -> str:
+    code = (value or "").strip().lower()
+    if code in OBJETO_ALQUILER_ALLOWED_BASE or _is_habitacion_code(code):
+        return code
+    raise HTTPException(
+        status_code=status.HTTP_400_BAD_REQUEST,
+        detail="Objeto de alquiler no válido",
+    )
+
+
+def _build_allowed_objeto_codes_for_patrimonio(patrimonio: models.Patrimonio) -> list[str]:
+    habitaciones = int(getattr(patrimonio, "habitaciones", 0) or 0)
+    garaje = bool(getattr(patrimonio, "garaje", False))
+    trastero = bool(getattr(patrimonio, "trastero", False))
+    tipo_inmueble = str(getattr(patrimonio, "tipo_inmueble", "") or "").upper()
+
+    if tipo_inmueble != "VIVIENDA":
+        return ["completa"]
+
+    options: list[str] = ["completa"]
+
+    if garaje or trastero:
+        options.append("vivienda")
+
+    if garaje:
+        options.append("garaje")
+
+    if trastero:
+        options.append("trastero")
+
+    if garaje and trastero:
+        options.append("garaje_trastero")
+
+    if garaje:
+        options.append("vivienda_garaje")
+
+    if trastero:
+        options.append("vivienda_trastero")
+
+    if habitaciones > 1:
+        for i in range(1, habitaciones + 1):
+            options.append(f"habitacion_{i}")
+
+    return options
+
+
+def _objeto_uses_garaje(code: str) -> bool:
+    return code in {"completa", "garaje", "garaje_trastero", "vivienda_garaje"}
+
+
+def _objeto_uses_trastero(code: str) -> bool:
+    return code in {"completa", "trastero", "garaje_trastero", "vivienda_trastero"}
+
+
+def _objeto_housing_mode(code: str) -> str:
+    """
+    Devuelve:
+    - 'completa'
+    - 'vivienda'
+    - 'habitacion'
+    - 'none'
+    """
+    if code == "completa":
+        return "completa"
+    if code in {"vivienda", "vivienda_garaje", "vivienda_trastero"}:
+        return "vivienda"
+    if _is_habitacion_code(code):
+        return "habitacion"
+    return "none"
+
+
+def _objeto_conflicts(candidate: str, existing: str) -> bool:
+    """
+    Comprueba incompatibilidad funcional.
+
+    Reglas:
+    - completa bloquea todo y queda bloqueada por todo
+    - vivienda (o vivienda+anexos) bloquea vivienda y habitaciones
+    - habitación solo choca con la misma habitación, con vivienda, o con completa
+    - garaje choca con cualquier opción que use garaje
+    - trastero choca con cualquier opción que use trastero
+    """
+    c = candidate
+    e = existing
+
+    if c == "completa" or e == "completa":
+        return True
+
+    c_mode = _objeto_housing_mode(c)
+    e_mode = _objeto_housing_mode(e)
+
+    # Vivienda completa vs vivienda / habitaciones
+    if c_mode == "vivienda" and e_mode in {"vivienda", "habitacion"}:
+        return True
+    if e_mode == "vivienda" and c_mode in {"vivienda", "habitacion"}:
+        return True
+
+    # Habitación concreta vs misma habitación
+    if c_mode == "habitacion" and e_mode == "habitacion":
+        return _parse_habitacion_num(c) == _parse_habitacion_num(e)
+
+    # Garaje
+    if _objeto_uses_garaje(c) and _objeto_uses_garaje(e):
+        return True
+
+    # Trastero
+    if _objeto_uses_trastero(c) and _objeto_uses_trastero(e):
+        return True
+
+    return False
+
+
+def _get_active_contracts_for_patrimonio(
+    db: Session,
+    patrimonio_id: str,
+    user_id: int,
+    exclude_contrato_id: Optional[str] = None,
+) -> list[models.Contrato]:
+    query = (
+        db.query(models.Contrato)
+        .filter(
+            models.Contrato.user_id == user_id,
+            models.Contrato.patrimonio_id == patrimonio_id,
+            models.Contrato.estado == "activo",
+            models.Contrato.inactivatedon.is_(None),
+        )
+    )
+
+    if exclude_contrato_id:
+        query = query.filter(models.Contrato.id != exclude_contrato_id)
+
+    return query.all()
+
+
+def _build_objeto_alquiler_options_for_patrimonio(
+    db: Session,
+    patrimonio: models.Patrimonio,
+    user_id: int,
+    exclude_contrato_id: Optional[str] = None,
+) -> list[ContratoObjetoOpcionOut]:
+    allowed_codes = _build_allowed_objeto_codes_for_patrimonio(patrimonio)
+    active_contracts = _get_active_contracts_for_patrimonio(
+        db=db,
+        patrimonio_id=patrimonio.id,
+        user_id=user_id,
+        exclude_contrato_id=exclude_contrato_id,
+    )
+
+    result: list[ContratoObjetoOpcionOut] = []
+
+    for code in allowed_codes:
+        conflict_with: list[str] = []
+
+        for existing in active_contracts:
+            existing_code = getattr(existing, "objeto_alquiler", None) or "completa"
+            if _objeto_conflicts(code, existing_code):
+                conflict_with.append(_get_objeto_alquiler_label(existing_code) or existing_code)
+
+        enabled = len(conflict_with) == 0
+        disabled_reason = None
+
+        if not enabled:
+            disabled_reason = f"No disponible: conflicto con contrato activo ({', '.join(conflict_with)})"
+
+        result.append(
+            ContratoObjetoOpcionOut(
+                code=code,
+                label=_get_objeto_alquiler_label(code) or code,
+                enabled=enabled,
+                disabled_reason=disabled_reason,
+            )
+        )
+
+    return result
+
+
+def _ensure_objeto_alquiler_is_valid_for_patrimonio(
+    db: Session,
+    patrimonio: models.Patrimonio,
+    user_id: int,
+    objeto_alquiler: str,
+    exclude_contrato_id: Optional[str] = None,
+) -> None:
+    options = _build_objeto_alquiler_options_for_patrimonio(
+        db=db,
+        patrimonio=patrimonio,
+        user_id=user_id,
+        exclude_contrato_id=exclude_contrato_id,
+    )
+
+    selected = next((o for o in options if o.code == objeto_alquiler), None)
+
+    if selected is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="El objeto de alquiler no es válido para este patrimonio",
+        )
+
+    if not selected.enabled:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=selected.disabled_reason or "El objeto de alquiler no está disponible",
+        )
+
+
+# ==========================================================
 # Helpers de ingresos automáticos por contrato
 # ==========================================================
+
+def _get_first_inquilino_name_for_concept(contrato: models.Contrato) -> str:
+    """
+    Regla definida:
+    - usar el primer inquilino activo por fecha de creación
+    - truncado a 8 caracteres
+    - si no existe, usar SIN_INQ
+    """
+    participantes = [
+        p for p in (contrato.participantes or [])
+        if getattr(p, "inactivatedon", None) is None
+        and p.rol == "inquilino"
+        and p.persona is not None
+    ]
+
+    participantes.sort(key=lambda p: (p.createon or datetime.min, p.id or ""))
+
+    if not participantes:
+        return "SIN_INQ"
+
+    nombre = str(participantes[0].persona.nombre_completo or "").strip()
+    if not nombre:
+        return "SIN_INQ"
+
+    normalized = normalize_upper_ascii(nombre)
+    return normalized[:8] if normalized else "SIN_INQ"
+
+
+def _build_ingreso_concepto_for_contrato(contrato: models.Contrato) -> str:
+    referencia = (
+        getattr(contrato.patrimonio_rel, "referencia", None)
+        or contrato.patrimonio_id
+        or "SIN_REFERENCIA"
+    )
+
+    tenant = _get_first_inquilino_name_for_concept(contrato)
+    return normalize_upper_ascii(f"ALQ {tenant} {referencia}")
+
 
 def _create_ingreso_for_contrato(
     db: Session,
     contrato: models.Contrato,
     user_id: int,
 ) -> models.Ingreso:
-    """
-    Crea el ingreso recurrente de alquiler asociado al contrato.
-
-    Reglas de negocio:
-    - rango_cobro: 1-3
-    - periodicidad: MENSUAL
-    - tipo_id: VIV-TIPO_INGRESO-FKV95F
-    - rama_id: VIV-TIPORAMAINGRESO-6F29A938
-    - cuenta_id: BANCO-679A92B7
-    - contrato_alquiler: id del contrato
-    - concepto dinámico:
-        ALQ <INQUILINO_PRINCIPAL> <REFERENCIA>
-        o ALQ SIN_INQUILINO <REFERENCIA>
-
-    Regla de coherencia añadida:
-    - si el contrato nace no operativo, el ingreso también nace no operativo
-    """
     now = datetime.utcnow()
     contrato_no_operativo = _is_contrato_no_operativo(contrato)
 
@@ -376,16 +577,6 @@ def _sync_ingreso_for_contrato(
     contrato: models.Contrato,
     user_id: int,
 ) -> models.Ingreso:
-    """
-    Sincroniza el ingreso automático vinculado al contrato.
-
-    Si no existe, lo crea.
-    Si existe, actualiza:
-    - datos económicos
-    - referencia a contrato/vivienda
-    - concepto
-    - estado operativo
-    """
     ingreso = _get_ingreso_by_contrato(db, contrato.id, user_id)
 
     if ingreso is None:
@@ -451,7 +642,7 @@ def listar_personas(
         )
 
     rows = query.order_by(models.Persona.nombre_completo.asc()).all()
-    return [_persona_to_schema(r) for r in rows]
+    return [PersonaSchema.model_validate(r) for r in rows]
 
 
 @router.get(
@@ -501,7 +692,7 @@ def get_persona(
     current_user: models.User = Depends(require_user),
 ):
     row = _get_owned_persona(db, persona_id, current_user.id)
-    return _persona_to_schema(row)
+    return PersonaSchema.model_validate(row)
 
 
 @router.post(
@@ -528,7 +719,7 @@ def crear_persona(
     db.add(row)
     db.commit()
     db.refresh(row)
-    return _persona_to_schema(row)
+    return PersonaSchema.model_validate(row)
 
 
 @router.put(
@@ -567,7 +758,7 @@ def actualizar_persona(
 
     db.commit()
     db.refresh(row)
-    return _persona_to_schema(row)
+    return PersonaSchema.model_validate(row)
 
 
 # ==========================================================
@@ -587,19 +778,6 @@ def listar_contratos(
     db: Session = Depends(get_db),
     current_user: models.User = Depends(require_user),
 ):
-    """
-    Devuelve contratos del usuario con relaciones cargadas.
-
-    Uso previsto:
-    - selector de contratos en formularios de ingresos
-    - listados resumidos
-    - precarga de contratos por vivienda en frontend
-
-    Notas:
-    - No se filtra por estado: devuelve activos, pendientes, finalizados y cancelados.
-    - También devuelve contratos inactivados lógicamente si existen.
-    - El frontend decidirá cómo agrupar o atenuar visualmente cada estado.
-    """
     query = (
         db.query(models.Contrato)
         .options(
@@ -626,6 +804,38 @@ def listar_contratos(
     return [_contrato_to_schema(r) for r in rows]
 
 
+@router.get(
+    "/patrimonios/{patrimonio_id}/opciones-contrato",
+    response_model=ContratoObjetoOpcionesOut,
+    summary="Opciones válidas de objeto de alquiler para un patrimonio",
+)
+def get_opciones_contrato_por_patrimonio(
+    patrimonio_id: str,
+    contrato_id_exclude: Optional[str] = Query(
+        None,
+        description="Contrato a excluir del cálculo, útil en edición."
+    ),
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(require_user),
+):
+    patrimonio = _get_owned_patrimonio(db, patrimonio_id, current_user.id)
+
+    if contrato_id_exclude:
+        _get_owned_contrato(db, contrato_id_exclude, current_user.id)
+
+    opciones = _build_objeto_alquiler_options_for_patrimonio(
+        db=db,
+        patrimonio=patrimonio,
+        user_id=current_user.id,
+        exclude_contrato_id=contrato_id_exclude,
+    )
+
+    return ContratoObjetoOpcionesOut(
+        patrimonio_id=patrimonio.id,
+        opciones=opciones,
+    )
+
+
 @router.post(
     "/contratos",
     response_model=ContratoSchema,
@@ -637,31 +847,22 @@ def crear_contrato(
     db: Session = Depends(get_db),
     current_user: models.User = Depends(require_user),
 ):
-    _get_owned_patrimonio(db, payload.patrimonio_id, current_user.id)
-
+    patrimonio = _get_owned_patrimonio(db, payload.patrimonio_id, current_user.id)
     estado = _validate_estado_contrato(payload.estado)
+    objeto_alquiler = _validate_objeto_alquiler_code(payload.objeto_alquiler)
 
-    # Regla mínima: no permitir otro contrato activo para la misma vivienda
-    if estado == "activo":
-        existing = (
-            db.query(models.Contrato)
-            .filter(
-                models.Contrato.user_id == current_user.id,
-                models.Contrato.patrimonio_id == payload.patrimonio_id,
-                models.Contrato.estado == "activo",
-                models.Contrato.inactivatedon.is_(None),
-            )
-            .first()
-        )
-        if existing:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Ya existe un contrato activo para esta vivienda",
-            )
+    _ensure_objeto_alquiler_is_valid_for_patrimonio(
+        db=db,
+        patrimonio=patrimonio,
+        user_id=current_user.id,
+        objeto_alquiler=objeto_alquiler,
+        exclude_contrato_id=None,
+    )
 
     row = models.Contrato(
         user_id=current_user.id,
         patrimonio_id=payload.patrimonio_id,
+        objeto_alquiler=objeto_alquiler,
         fecha_inicio=payload.fecha_inicio,
         fecha_fin=payload.fecha_fin,
         renta_mensual=payload.renta_mensual,
@@ -677,8 +878,6 @@ def crear_contrato(
     db.add(row)
     db.flush()
 
-    # Recargamos el contrato con relaciones para construir bien el concepto
-    # y aplicar correctamente el estado operativo del ingreso asociado.
     contrato_loaded = _get_owned_contrato(db, row.id, current_user.id)
 
     _create_ingreso_for_contrato(
@@ -720,30 +919,26 @@ def actualizar_contrato(
     current_user: models.User = Depends(require_user),
 ):
     row = _get_owned_contrato(db, contrato_id, current_user.id)
+    patrimonio = _get_owned_patrimonio(db, row.patrimonio_id, current_user.id)
 
     next_estado = row.estado
     if payload.estado is not None:
         next_estado = _validate_estado_contrato(payload.estado)
 
-    # Si pasa a activo, comprobamos que no exista otro activo en la misma vivienda
-    if next_estado == "activo":
-        existing = (
-            db.query(models.Contrato)
-            .filter(
-                models.Contrato.user_id == current_user.id,
-                models.Contrato.patrimonio_id == row.patrimonio_id,
-                models.Contrato.estado == "activo",
-                models.Contrato.inactivatedon.is_(None),
-                models.Contrato.id != row.id,
-            )
-            .first()
-        )
-        if existing:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Ya existe otro contrato activo para esta vivienda",
-            )
+    next_objeto_alquiler = getattr(row, "objeto_alquiler", None) or "completa"
+    if payload.objeto_alquiler is not None:
+        next_objeto_alquiler = _validate_objeto_alquiler_code(payload.objeto_alquiler)
 
+    _ensure_objeto_alquiler_is_valid_for_patrimonio(
+        db=db,
+        patrimonio=patrimonio,
+        user_id=current_user.id,
+        objeto_alquiler=next_objeto_alquiler,
+        exclude_contrato_id=row.id,
+    )
+
+    if payload.objeto_alquiler is not None:
+        row.objeto_alquiler = next_objeto_alquiler
     if payload.fecha_inicio is not None:
         row.fecha_inicio = payload.fecha_inicio
     if payload.fecha_fin is not None:
@@ -767,10 +962,6 @@ def actualizar_contrato(
     if payload.inactivatedon is not None:
         row.inactivatedon = payload.inactivatedon
 
-    # Volvemos a cargar con relaciones para:
-    # - resumen participantes
-    # - referencia vivienda
-    # - concepto dinámico del ingreso
     contrato_loaded = _get_owned_contrato(db, row.id, current_user.id)
 
     _sync_ingreso_for_contrato(
@@ -816,6 +1007,8 @@ def get_resumen_contrato_activo_por_patrimonio(
     if not row:
         return None
 
+    objeto_alquiler = getattr(row, "objeto_alquiler", None) or "completa"
+
     return ContratoResumenActivoOut(
         contrato_id=row.id,
         estado=row.estado,
@@ -824,6 +1017,8 @@ def get_resumen_contrato_activo_por_patrimonio(
         renta_mensual=float(row.renta_mensual) if row.renta_mensual is not None else None,
         fianza=float(row.fianza) if row.fianza is not None else None,
         incremento_ipc=bool(getattr(row, "incremento_ipc", False)),
+        objeto_alquiler=objeto_alquiler,
+        objeto_alquiler_label=_get_objeto_alquiler_label(objeto_alquiler),
         participantes_resumen=_build_participantes_resumen(row),
     )
 
@@ -855,7 +1050,24 @@ def listar_participantes_contrato(
         .all()
     )
 
-    return [_participante_to_schema(r) for r in rows]
+    return [
+        ContratoParticipanteSchema(
+            id=r.id,
+            contrato_id=r.contrato_id,
+            persona_id=r.persona_id,
+            rol=r.rol,
+            es_principal=bool(r.es_principal),
+            observaciones=r.observaciones,
+            createon=r.createon,
+            modifiedon=r.modifiedon,
+            inactivatedon=r.inactivatedon,
+            nombre_completo=getattr(r.persona, "nombre_completo", None),
+            dni=getattr(r.persona, "dni", None),
+            telefono=getattr(r.persona, "telefono", None),
+            email=getattr(r.persona, "email", None),
+        )
+        for r in rows
+    ]
 
 
 @router.post(
@@ -876,7 +1088,6 @@ def crear_participante_contrato(
     rol = _validate_rol_participante(payload.rol)
     es_principal = bool(payload.es_principal)
 
-    # Regla: solo un inquilino principal activo por contrato
     if es_principal:
         if rol != "inquilino":
             raise HTTPException(
@@ -901,7 +1112,6 @@ def crear_participante_contrato(
                 detail="Ya existe un inquilino principal para este contrato",
             )
 
-    # Evitar duplicado exacto activo contrato-persona-rol
     duplicated = (
         db.query(models.ContratoParticipante)
         .filter(
@@ -931,8 +1141,6 @@ def crear_participante_contrato(
     db.add(row)
     db.flush()
 
-    # Re-sincronizamos el ingreso porque puede cambiar el concepto
-    # si se añade/cambia el inquilino principal.
     contrato_loaded = _get_owned_contrato(db, contrato.id, current_user.id)
     _sync_ingreso_for_contrato(
         db=db,
@@ -950,7 +1158,21 @@ def crear_participante_contrato(
         .first()
     )
 
-    return _participante_to_schema(row)
+    return ContratoParticipanteSchema(
+        id=row.id,
+        contrato_id=row.contrato_id,
+        persona_id=row.persona_id,
+        rol=row.rol,
+        es_principal=bool(row.es_principal),
+        observaciones=row.observaciones,
+        createon=row.createon,
+        modifiedon=row.modifiedon,
+        inactivatedon=row.inactivatedon,
+        nombre_completo=getattr(row.persona, "nombre_completo", None),
+        dni=getattr(row.persona, "dni", None),
+        telefono=getattr(row.persona, "telefono", None),
+        email=getattr(row.persona, "email", None),
+    )
 
 
 @router.put(
@@ -1022,7 +1244,6 @@ def actualizar_participante_contrato(
 
     db.flush()
 
-    # Re-sincronizamos ingreso por posible cambio de principal/rol.
     contrato_loaded = _get_owned_contrato(db, row.contrato_id, current_user.id)
     _sync_ingreso_for_contrato(
         db=db,
@@ -1039,7 +1260,21 @@ def actualizar_participante_contrato(
         .filter(models.ContratoParticipante.id == row.id)
         .first()
     )
-    return _participante_to_schema(row)
+    return ContratoParticipanteSchema(
+        id=row.id,
+        contrato_id=row.contrato_id,
+        persona_id=row.persona_id,
+        rol=row.rol,
+        es_principal=bool(row.es_principal),
+        observaciones=row.observaciones,
+        createon=row.createon,
+        modifiedon=row.modifiedon,
+        inactivatedon=row.inactivatedon,
+        nombre_completo=getattr(row.persona, "nombre_completo", None),
+        dni=getattr(row.persona, "dni", None),
+        telefono=getattr(row.persona, "telefono", None),
+        email=getattr(row.persona, "email", None),
+    )
 
 
 @router.delete(
@@ -1069,7 +1304,6 @@ def eliminar_participante_contrato(
     row.inactivatedon = datetime.utcnow()
     db.flush()
 
-    # Re-sincronizamos por si ese participante era el principal.
     contrato_loaded = _get_owned_contrato(db, row.contrato_id, current_user.id)
     _sync_ingreso_for_contrato(
         db=db,

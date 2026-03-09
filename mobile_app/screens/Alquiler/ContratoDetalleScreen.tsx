@@ -1,28 +1,12 @@
 /**
  * Archivo: mobile_app/screens/Alquiler/ContratoDetalleScreen.tsx
+ * Versión: 3.2.0
  *
- * Detalle de contrato de alquiler (v3)
+ * Detalle de contrato.
  *
- * Objetivo de esta versión:
- * - Mantener la pantalla de detalle de contrato dentro del flujo de patrimonio.
- * - Conectar carga real desde backend por contratoId.
- * - Mantener coherencia visual con PropiedadDetalleScreen y ContratoCreateScreen.
- *
- * Cambios incluidos:
- * - Carga real con getContrato(...)
- * - Refresh real contra backend
- * - Estado loading / error
- * - Soporte a dato inicial recibido por navegación para transición más fluida
- * - Enlace real a edición y participantes
- * - Nuevo campo mostrado:
- *     * incremento_ipc
- * - Fix visual:
- *     * “Otros inquilinos” ya no repite al inquilino principal
- *
- * Próximo paso previsto:
- * - Conectar participantes reales.
- * - Añadir acción real de finalizar contrato.
- * - Añadir histórico contractual de la vivienda si se decide.
+ * Mejoras:
+ * - Muestra objeto_alquiler y su etiqueta
+ * - Mantiene resto de funcionalidades actuales
  */
 
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
@@ -46,6 +30,7 @@ import { radius } from '../../theme/radius';
 import { EuroformatEuro, formatFechaCorta } from '../../utils/format';
 import {
   getContrato,
+  getObjetoAlquilerLabel,
   type ContratoRow,
   type ParticipantesResumen,
 } from '../../services/gestionAlquilerApi';
@@ -68,8 +53,10 @@ type ContratoDetalleView = {
   incluye_agua: boolean;
   incluye_internet: boolean;
 
-  observaciones?: string | null;
+  objeto_alquiler: string;
+  objeto_alquiler_label: string;
 
+  observaciones?: string | null;
   participantes_resumen?: ParticipantesResumen | null;
 };
 
@@ -138,6 +125,8 @@ function mapContratoToView(
   patrimonioId: string,
   incoming?: Partial<ContratoRow> | null
 ): ContratoDetalleView {
+  const objeto = String(incoming?.objeto_alquiler ?? 'completa');
+
   return {
     contrato_id: contratoId,
     patrimonio_id: incoming?.patrimonio_id ?? patrimonioId,
@@ -153,6 +142,8 @@ function mapContratoToView(
     incluye_luz: incoming?.incluye_luz ?? false,
     incluye_agua: incoming?.incluye_agua ?? false,
     incluye_internet: incoming?.incluye_internet ?? false,
+    objeto_alquiler: objeto,
+    objeto_alquiler_label: String(incoming?.objeto_alquiler_label ?? getObjetoAlquilerLabel(objeto)),
     observaciones: incoming?.observaciones ?? null,
     participantes_resumen: incoming?.participantes_resumen ?? {
       inquilino_principal: null,
@@ -232,6 +223,8 @@ export default function ContratoDetalleScreen({ navigation, route }: Props) {
         referencia_vivienda: contrato.referencia_vivienda,
         direccion_completa: contrato.direccion_completa,
         estado: contrato.estado,
+        objeto_alquiler: contrato.objeto_alquiler,
+        objeto_alquiler_label: contrato.objeto_alquiler_label,
         fecha_inicio: contrato.fecha_inicio,
         fecha_fin: contrato.fecha_fin,
         renta_mensual: contrato.renta_mensual,
@@ -346,7 +339,6 @@ export default function ContratoDetalleScreen({ navigation, route }: Props) {
         {loading ? <ActivityIndicator style={{ marginVertical: spacing.md }} /> : null}
         {err ? <Text style={styles.errorText}>{err}</Text> : null}
 
-        {/* Estado */}
         <View style={styles.card}>
           <CardTitle icon="document-text-outline" text="Estado contractual" />
 
@@ -371,13 +363,16 @@ export default function ContratoDetalleScreen({ navigation, route }: Props) {
                 : 'Renta no informada'}
             </Text>
           </View>
-
-          <Text style={styles.helperText}>
-            Esta pantalla muestra el estado operativo del contrato asociado a la vivienda.
-          </Text>
         </View>
 
-        {/* Vivienda */}
+        <View style={styles.card}>
+          <CardTitle icon="layers-outline" text="Objeto alquilado" />
+          <View style={styles.metaGrid}>
+            <Meta label="Código" value={contrato.objeto_alquiler} />
+            <Meta label="Descripción" value={contrato.objeto_alquiler_label} />
+          </View>
+        </View>
+
         <View style={styles.card}>
           <CardTitle icon="home-outline" text="Vivienda vinculada" />
 
@@ -394,7 +389,6 @@ export default function ContratoDetalleScreen({ navigation, route }: Props) {
           </View>
         </View>
 
-        {/* Fechas e importes */}
         <View style={styles.card}>
           <CardTitle icon="calendar-outline" text="Fechas e importes" />
 
@@ -422,7 +416,6 @@ export default function ContratoDetalleScreen({ navigation, route }: Props) {
           </View>
         </View>
 
-        {/* Suministros */}
         <View style={styles.card}>
           <CardTitle icon="flash-outline" text="Suministros incluidos" />
 
@@ -433,7 +426,6 @@ export default function ContratoDetalleScreen({ navigation, route }: Props) {
           </View>
         </View>
 
-        {/* Participantes */}
         <View style={styles.card}>
           <CardTitle
             icon="people-outline"
@@ -470,7 +462,6 @@ export default function ContratoDetalleScreen({ navigation, route }: Props) {
           />
         </View>
 
-        {/* Observaciones */}
         <View style={styles.card}>
           <CardTitle icon="create-outline" text="Observaciones" />
           <Text style={styles.textValue}>
@@ -478,7 +469,6 @@ export default function ContratoDetalleScreen({ navigation, route }: Props) {
           </Text>
         </View>
 
-        {/* Acciones */}
         <View style={styles.card}>
           <CardTitle icon="settings-outline" text="Acciones" />
 
@@ -537,7 +527,6 @@ const styles = StyleSheet.create({
     padding: spacing.md,
     paddingBottom: spacing.xxl,
   },
-
   card: {
     backgroundColor: colors.surface,
     borderRadius: radius.lg,
@@ -546,7 +535,6 @@ const styles = StyleSheet.create({
     padding: spacing.md,
     marginBottom: spacing.md,
   },
-
   blockTitleRow: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -563,7 +551,6 @@ const styles = StyleSheet.create({
     fontWeight: '900',
     color: colors.textPrimary,
   },
-
   estadoHeaderRow: {
     flexDirection: 'row',
     justifyContent: 'space-between',
@@ -589,18 +576,11 @@ const styles = StyleSheet.create({
     fontWeight: '900',
     color: colors.textPrimary,
   },
-
-  helperText: {
-    fontSize: 12,
-    color: colors.textSecondary,
-  },
-
   errorText: {
     color: colors.danger,
     marginBottom: spacing.sm,
     fontSize: 12,
   },
-
   metaGrid: {
     flexDirection: 'row',
     flexWrap: 'wrap',
@@ -620,13 +600,11 @@ const styles = StyleSheet.create({
     fontSize: 12,
     color: colors.textPrimary,
   },
-
   textValue: {
     fontSize: 12,
     color: colors.textPrimary,
     lineHeight: 18,
   },
-
   miniRow: {
     paddingVertical: 5,
   },
@@ -640,13 +618,11 @@ const styles = StyleSheet.create({
     fontSize: 12,
     color: colors.textPrimary,
   },
-
   linkText: {
     fontSize: 12,
     fontWeight: '800',
     color: colors.primary,
   },
-
   actionsColumn: {
     gap: spacing.sm,
     marginTop: spacing.xs,
