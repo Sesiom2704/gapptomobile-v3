@@ -234,7 +234,8 @@ from backend.app.api.v1 import (
     reinicio_router,
     inversiones_router,
     endeudamiento_router,
-    gestion_alquiler_router,  # ✅ NUEVO
+    gestion_alquiler_router,
+    bot_router,  # ✅ NUEVO
 )
 
 API_V1 = "/api/v1"
@@ -264,6 +265,7 @@ app.include_router(analytics_router.router, prefix=API_V1)
 app.include_router(cierre_mensual_router.router, prefix=API_V1)
 app.include_router(reinicio_router.router, prefix=API_V1)
 app.include_router(inversiones_router.router, prefix=API_V1)
+app.include_router(bot_router.router, prefix=API_V1)
 
 # ✅ NUEVO: endeudamiento
 app.include_router(endeudamiento_router.router, prefix=API_V1)
