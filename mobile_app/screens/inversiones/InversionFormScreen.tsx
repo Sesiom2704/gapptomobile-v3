@@ -4,7 +4,7 @@
  * Responsabilidad:
  *   - Pantalla de alta/edición/consulta (readOnly) de una Inversión.
  *   - Carga catálogos (tipos de gasto filtrados por segmento INVERSION, proveedores),
- *     gestiona la lógica de formulario (validaciones + cálculos ROI/Retorno) y guardado.
+ *     gestiona la lógica de formulario (validaciones + cálculos ROI/Retorno/IRR) y guardado.
  *
  * Maneja:
  *   - UI: formulario multipanel con secciones reutilizables (FormSection) y controles tipo “pill”.
@@ -31,6 +31,7 @@
  *   - Proveedor y Dealer: buscador InlineSearchSelect + botón crear (sugerencias limitadas).
  *   - Fecha de creación/modificación: NO se muestra por defecto (NOW/auto en backend).
  *   - Rentabilidad/retorno: cálculo bidireccional con Aporte.
+ *   - IRR: se calcula automáticamente cuando existe Aporte + Retorno + Plazo (meses).
  *   - Resultado final: solo visible en edición cuando el estado sea CERRADA.
  *   - Descripción: se mantiene el formato actual (multilínea).
  */
@@ -92,6 +93,12 @@ type Inversion = {
   roi_esperado_pct?: number | null;
   roi_final_pct?: number | null;
 
+  irr_esperada_pct?: number | null;
+  irr_final_pct?: number | null;
+
+  plazo_esperado_meses?: number | null;
+  plazo_final_meses?: number | null;
+
   created_at?: string | null;
   updated_at?: string | null;
   moneda?: string | null;
@@ -121,9 +128,32 @@ function toNumberLoose(input: string): number {
   return Number.isFinite(n) ? n : 0;
 }
 
+function toIntLoose(input: string): number {
+  if (!input) return 0;
+  const cleaned = String(input).replace(/[^\d]/g, '');
+  const n = Number(cleaned);
+  return Number.isFinite(n) ? n : 0;
+}
+
 function toFixedES(n: number): string {
   if (!Number.isFinite(n)) return '';
   return n.toFixed(2).replace('.', ',');
+}
+
+function calcIrrPct(aporte: number, retorno: number, meses: number): number | null {
+  if (!Number.isFinite(aporte) || !Number.isFinite(retorno) || !Number.isFinite(meses)) return null;
+  if (aporte <= 0 || retorno <= 0 || meses <= 0) return null;
+
+  const moic = retorno / aporte;
+  if (!Number.isFinite(moic) || moic <= 0) return null;
+
+  try {
+    const irr = (moic ** (12 / meses) - 1) * 100;
+    if (!Number.isFinite(irr)) return null;
+    return Number(irr.toFixed(2));
+  } catch {
+    return null;
+  }
 }
 
 async function fetchProveedores(): Promise<Proveedor[]> {
@@ -225,6 +255,12 @@ export const InversionFormScreen: React.FC<Props> = ({ navigation, route }) => {
   const [retornoEsperado, setRetornoEsperado] = useState<string>(
     inversionSource?.retorno_esperado_total != null ? String(inversionSource.retorno_esperado_total) : ''
   );
+  const [plazoEsperadoMeses, setPlazoEsperadoMeses] = useState<string>(
+    inversionSource?.plazo_esperado_meses != null ? String(inversionSource.plazo_esperado_meses) : ''
+  );
+  const [irrEsperadaPct, setIrrEsperadaPct] = useState<string>(
+    inversionSource?.irr_esperada_pct != null ? String(inversionSource.irr_esperada_pct) : ''
+  );
 
   const [aporteFinal, setAporteFinal] = useState<string>(
     inversionSource?.aporte_final != null ? String(inversionSource.aporte_final) : ''
@@ -234,6 +270,12 @@ export const InversionFormScreen: React.FC<Props> = ({ navigation, route }) => {
   );
   const [retornoFinal, setRetornoFinal] = useState<string>(
     inversionSource?.retorno_final_total != null ? String(inversionSource.retorno_final_total) : ''
+  );
+  const [plazoFinalMeses, setPlazoFinalMeses] = useState<string>(
+    inversionSource?.plazo_final_meses != null ? String(inversionSource.plazo_final_meses) : ''
+  );
+  const [irrFinalPct, setIrrFinalPct] = useState<string>(
+    inversionSource?.irr_final_pct != null ? String(inversionSource.irr_final_pct) : ''
   );
 
   // Opciones avanzadas (solo edición)
@@ -273,13 +315,15 @@ export const InversionFormScreen: React.FC<Props> = ({ navigation, route }) => {
     setAporteEstimado('');
     setRoiEsperadoPct('');
     setRetornoEsperado('');
+    setPlazoEsperadoMeses('');
+    setIrrEsperadaPct('');
 
-    // Resultado final oculto en inserción: igual reseteamos a vacío
     setAporteFinal('');
     setRoiFinalPct('');
     setRetornoFinal('');
+    setPlazoFinalMeses('');
+    setIrrFinalPct('');
 
-    // Advanced
     setShowAdvanced(false);
     setMoneda('EUR');
     setFase('');
@@ -289,7 +333,6 @@ export const InversionFormScreen: React.FC<Props> = ({ navigation, route }) => {
 
   useResetFormOnFocus({
     readOnly,
-    // ✅ si volvemos con auxResult, NO queremos resetear (si no, perdemos la preselección)
     isEdit: isEdit || duplicate || !!route?.params?.auxResult,
     auxResult: route?.params?.auxResult,
     onReset: resetFormToNew,
@@ -367,45 +410,39 @@ export const InversionFormScreen: React.FC<Props> = ({ navigation, route }) => {
           if (res.type === 'proveedor' && res.item) {
             const nuevoProv = res.item as Proveedor;
 
-            // 1) Preselección inmediata (no depende de fetch)
             const key = String(res.key ?? '').toLowerCase();
             const isDealer = key.includes('dealer');
 
             if (isDealer) {
-                setDealerSel(nuevoProv);
-                setQDealer('');
+              setDealerSel(nuevoProv);
+              setQDealer('');
             } else {
-                setProveedorSel(nuevoProv);
-                setQProv('');
+              setProveedorSel(nuevoProv);
+              setQProv('');
             }
 
-            // 2) Merge local inmediato para que el seleccionado “exista” en options
             setProveedores((prev) => {
-                const map = new Map<string, Proveedor>();
-                map.set(nuevoProv.id, nuevoProv);
-                for (const p of prev ?? []) map.set(p.id, p);
-                return Array.from(map.values());
+              const map = new Map<string, Proveedor>();
+              map.set(nuevoProv.id, nuevoProv);
+              for (const p of prev ?? []) map.set(p.id, p);
+              return Array.from(map.values());
             });
 
-            // 3) Refresco catálogo (si falla, no rompe la preselección)
             try {
-                const provRes = await fetchProveedores();
-                if (!alive) return;
+              const provRes = await fetchProveedores();
+              if (!alive) return;
 
-                setProveedores((prev) => {
+              setProveedores((prev) => {
                 const map = new Map<string, Proveedor>();
-                // siempre garantizamos que el nuevo está
                 map.set(nuevoProv.id, nuevoProv);
                 for (const p of provRes ?? []) map.set(p.id, p);
                 for (const p of prev ?? []) map.set(p.id, p);
                 return Array.from(map.values());
-                });
-            } catch (e) {
-                // si falla, nos quedamos con el merge local
-                console.warn('[InversionForm] fetchProveedores falló tras auxResult, se mantiene merge local');
+              });
+            } catch (_e) {
+              console.warn('[InversionForm] fetchProveedores falló tras auxResult, se mantiene merge local');
             }
-            }
-
+          }
         } finally {
           navigation.setParams({ auxResult: undefined });
         }
@@ -416,6 +453,24 @@ export const InversionFormScreen: React.FC<Props> = ({ navigation, route }) => {
       };
     }, [route?.params?.auxResult, navigation, segmentoInversionId])
   );
+
+  useEffect(() => {
+    const aporte = toNumberLoose(aporteEstimado);
+    const retorno = toNumberLoose(retornoEsperado);
+    const meses = toIntLoose(plazoEsperadoMeses);
+
+    const irr = calcIrrPct(aporte, retorno, meses);
+    setIrrEsperadaPct(irr == null ? '' : toFixedES(irr));
+  }, [aporteEstimado, retornoEsperado, plazoEsperadoMeses]);
+
+  useEffect(() => {
+    const aporte = toNumberLoose(aporteFinal);
+    const retorno = toNumberLoose(retornoFinal);
+    const meses = toIntLoose(plazoFinalMeses);
+
+    const irr = calcIrrPct(aporte, retorno, meses);
+    setIrrFinalPct(irr == null ? '' : toFixedES(irr));
+  }, [aporteFinal, retornoFinal, plazoFinalMeses]);
 
   const handleRefresh = async () => {
     setRefreshing(true);
@@ -506,6 +561,49 @@ export const InversionFormScreen: React.FC<Props> = ({ navigation, route }) => {
     setRoiEsperadoPct(toFixedES(pct));
   };
 
+  const onChangeAporteFinal = (txt: string) => {
+    setAporteFinal(txt);
+
+    const a = toNumberLoose(txt);
+    if (a <= 0) return;
+
+    const p = toNumberLoose(roiFinalPct);
+    const r = toNumberLoose(retornoFinal);
+
+    if (roiFinalPct.trim() !== '') {
+      const ret = a * (1 + p / 100);
+      setRetornoFinal(toFixedES(ret));
+      return;
+    }
+
+    if (retornoFinal.trim() !== '' && r > 0) {
+      const pct = ((r / a) - 1) * 100;
+      setRoiFinalPct(toFixedES(pct));
+    }
+  };
+
+  const onChangeRoiFinal = (txt: string) => {
+    setRoiFinalPct(txt);
+
+    const a = toNumberLoose(aporteFinal);
+    const p = toNumberLoose(txt);
+    if (a <= 0) return;
+
+    const ret = a * (1 + p / 100);
+    setRetornoFinal(toFixedES(ret));
+  };
+
+  const onChangeRetornoFinal = (txt: string) => {
+    setRetornoFinal(txt);
+
+    const a = toNumberLoose(aporteFinal);
+    const r = toNumberLoose(txt);
+    if (a <= 0 || r <= 0) return;
+
+    const pct = ((r / a) - 1) * 100;
+    setRoiFinalPct(toFixedES(pct));
+  };
+
   const openPicker = (k: 'inicio' | 'objetivo' | 'cierre') => {
     if (readOnly) return;
     setShowPicker(k);
@@ -579,9 +677,27 @@ export const InversionFormScreen: React.FC<Props> = ({ navigation, route }) => {
     const aEst = aporteEstimado.trim() ? toNumberLoose(aporteEstimado) : null;
     const roiEst = roiEsperadoPct.trim() ? toNumberLoose(roiEsperadoPct) : null;
     const retEst = retornoEsperado.trim() ? toNumberLoose(retornoEsperado) : null;
+    const plazoEst = plazoEsperadoMeses.trim() ? toIntLoose(plazoEsperadoMeses) : null;
+    const irrEst = irrEsperadaPct.trim() ? toNumberLoose(irrEsperadaPct) : null;
 
-    if ((roiEst != null || retEst != null) && (!aEst || aEst <= 0)) {
-      Alert.alert('Datos incompletos', 'Si indicas rentabilidad o retorno, debes indicar Aporte estimado.');
+    if ((roiEst != null || retEst != null || plazoEst != null) && (!aEst || aEst <= 0)) {
+      Alert.alert('Datos incompletos', 'Si indicas rentabilidad, retorno o plazo esperado, debes indicar Aporte estimado.');
+      return;
+    }
+
+    if (plazoEst != null && plazoEst <= 0) {
+      Alert.alert('Dato inválido', 'El plazo esperado debe ser mayor que 0 meses.');
+      return;
+    }
+
+    const aFin = showFinalBlock && aporteFinal.trim() ? toNumberLoose(aporteFinal) : null;
+    const roiFin = showFinalBlock && roiFinalPct.trim() ? toNumberLoose(roiFinalPct) : null;
+    const retFin = showFinalBlock && retornoFinal.trim() ? toNumberLoose(retornoFinal) : null;
+    const plazoFin = showFinalBlock && plazoFinalMeses.trim() ? toIntLoose(plazoFinalMeses) : null;
+    const irrFin = showFinalBlock && irrFinalPct.trim() ? toNumberLoose(irrFinalPct) : null;
+
+    if (showFinalBlock && plazoFin != null && plazoFin <= 0) {
+      Alert.alert('Dato inválido', 'El plazo final debe ser mayor que 0 meses.');
       return;
     }
 
@@ -602,20 +718,21 @@ export const InversionFormScreen: React.FC<Props> = ({ navigation, route }) => {
       aporte_estimado: aEst,
       roi_esperado_pct: roiEst,
       retorno_esperado_total: retEst,
+      plazo_esperado_meses: plazoEst,
+      irr_esperada_pct: irrEst,
 
-      // Resultado final: solo si estamos editando y está cerrada
-      aporte_final: showFinalBlock && aporteFinal.trim() ? toNumberLoose(aporteFinal) : null,
-      roi_final_pct: showFinalBlock && roiFinalPct.trim() ? toNumberLoose(roiFinalPct) : null,
-      retorno_final_total: showFinalBlock && retornoFinal.trim() ? toNumberLoose(retornoFinal) : null,
+      aporte_final: showFinalBlock ? aFin : null,
+      roi_final_pct: showFinalBlock ? roiFin : null,
+      retorno_final_total: showFinalBlock ? retFin : null,
+      plazo_final_meses: showFinalBlock ? plazoFin : null,
+      irr_final_pct: showFinalBlock ? irrFin : null,
 
-      // Avanzado (solo edición)
       moneda: isEdit ? (moneda || 'EUR') : undefined,
       fase: isEdit ? (fase?.trim() || null) : undefined,
     };
 
-    // Override de updated_at (solo si se informa en edición)
     if (isEdit && overrideUpdatedAt.trim()) {
-      payload.updated_at = overrideUpdatedAt; // backend puede ignorarlo si no lo permites
+      payload.updated_at = overrideUpdatedAt;
     }
 
     try {
@@ -836,8 +953,6 @@ export const InversionFormScreen: React.FC<Props> = ({ navigation, route }) => {
 
         <View style={styles.field}>
           <Text style={styles.label}>Retorno esperado</Text>
-
-          {/* Contenedor centrado */}
           <View style={{ alignItems: 'center' }}>
             <TextInput
               style={[
@@ -856,6 +971,42 @@ export const InversionFormScreen: React.FC<Props> = ({ navigation, route }) => {
             Si rellenas Aporte + % se calcula el Retorno. Si rellenas Aporte + Retorno se calcula la %.
           </Text>
         </View>
+
+        <View style={styles.fieldRowTwoCols}>
+          <View style={styles.col}>
+            <Text style={styles.label}>Plazo esperado (meses)</Text>
+            <TextInput
+              style={[
+                styles.input,
+                plazoEsperadoMeses.trim() !== '' && styles.inputFilled,
+              ]}
+              keyboardType="number-pad"
+              value={plazoEsperadoMeses}
+              onChangeText={setPlazoEsperadoMeses}
+              editable={!readOnly}
+              placeholder="Ej. 12"
+            />
+          </View>
+
+          <View style={styles.col}>
+            <Text style={styles.label}>IRR esperada (%)</Text>
+            <TextInput
+              style={[
+                styles.input,
+                styles.inputAdvanced,
+                irrEsperadaPct.trim() !== '' && styles.inputFilled,
+              ]}
+              keyboardType="decimal-pad"
+              value={irrEsperadaPct}
+              editable={false}
+              placeholder="Se calcula"
+            />
+          </View>
+        </View>
+
+        <Text style={styles.helperText}>
+          La IRR esperada se calcula automáticamente con Aporte estimado + Retorno esperado + Plazo esperado.
+        </Text>
       </FormSection>
 
       <FormSection title="Planificación">
@@ -902,7 +1053,6 @@ export const InversionFormScreen: React.FC<Props> = ({ navigation, route }) => {
         )}
       </FormSection>
 
-      {/* Resultado final: oculto en inserción; solo aparece en edición y cuando está CERRADA */}
       {showFinalBlock && (
         <FormSection title="Resultado final">
           <View style={styles.fieldRowTwoCols}>
@@ -912,7 +1062,7 @@ export const InversionFormScreen: React.FC<Props> = ({ navigation, route }) => {
                 style={[styles.input, styles.amountInputBig, aporteFinal.trim() !== '' && styles.inputFilled]}
                 keyboardType="decimal-pad"
                 value={aporteFinal}
-                onChangeText={setAporteFinal}
+                onChangeText={onChangeAporteFinal}
                 editable={!readOnly}
                 placeholder="Ej. 48.000,00"
               />
@@ -924,7 +1074,7 @@ export const InversionFormScreen: React.FC<Props> = ({ navigation, route }) => {
                 style={[styles.input, styles.amountInputBig, roiFinalPct.trim() !== '' && styles.inputFilled]}
                 keyboardType="decimal-pad"
                 value={roiFinalPct}
-                onChangeText={setRoiFinalPct}
+                onChangeText={onChangeRoiFinal}
                 editable={!readOnly}
                 placeholder="Ej. 22,50"
               />
@@ -933,8 +1083,6 @@ export const InversionFormScreen: React.FC<Props> = ({ navigation, route }) => {
 
           <View style={styles.field}>
             <Text style={styles.label}>Retorno final</Text>
-
-            {/* Contenedor centrado */}
             <View style={{ alignItems: 'center' }}>
               <TextInput
                 style={[
@@ -943,16 +1091,51 @@ export const InversionFormScreen: React.FC<Props> = ({ navigation, route }) => {
                 ]}
                 keyboardType="decimal-pad"
                 value={retornoFinal}
-                onChangeText={setRetornoFinal}
+                onChangeText={onChangeRetornoFinal}
                 editable={!readOnly}
                 placeholder="Ej. 58.800,00"
               />
             </View>
           </View>
+
+          <View style={styles.fieldRowTwoCols}>
+            <View style={styles.col}>
+              <Text style={styles.label}>Plazo final (meses)</Text>
+              <TextInput
+                style={[
+                  styles.input,
+                  plazoFinalMeses.trim() !== '' && styles.inputFilled,
+                ]}
+                keyboardType="number-pad"
+                value={plazoFinalMeses}
+                onChangeText={setPlazoFinalMeses}
+                editable={!readOnly}
+                placeholder="Ej. 14"
+              />
+            </View>
+
+            <View style={styles.col}>
+              <Text style={styles.label}>IRR final (%)</Text>
+              <TextInput
+                style={[
+                  styles.input,
+                  styles.inputAdvanced,
+                  irrFinalPct.trim() !== '' && styles.inputFilled,
+                ]}
+                keyboardType="decimal-pad"
+                value={irrFinalPct}
+                editable={false}
+                placeholder="Se calcula"
+              />
+            </View>
+          </View>
+
+          <Text style={styles.helperText}>
+            La IRR final se calcula automáticamente con Aporte final + Retorno final + Plazo final.
+          </Text>
         </FormSection>
       )}
 
-      {/* Opciones avanzadas: solo edición */}
       {isEdit && (
         <FormSection title="Opciones avanzadas">
           <TouchableOpacity

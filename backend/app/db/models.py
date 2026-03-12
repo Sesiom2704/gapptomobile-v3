@@ -20,6 +20,13 @@
 #       - tipo de ingreso -> rama
 #       - ingreso -> rama
 #
+# Ajustes NUEVOS (incidencias 4.3A):
+#   * Nueva clase ORM: AsignacionIncidencia
+#   * Nueva clase ORM: CitaIncidencia
+#   * Incidencia añade relaciones hacia asignaciones y citas
+#   * Proveedor añade relaciones hacia asignaciones y citas de incidencias
+#   * Persona añade relaciones auxiliares para auditoría operativa de incidencias
+#
 # Nota funcional:
 #   La validación de coherencia entre:
 #       ingreso.rama_id <-> ingreso.tipo_id <-> tipo_ingreso.rama_id
@@ -202,6 +209,7 @@ class Patrimonio(Base):
     gastos = relationship("Gasto", back_populates="vivienda_rel")
     rendimientos = relationship("RendimientoPatrimonio", back_populates="patrimonio", cascade="all, delete-orphan")
     contratos = relationship("Contrato", back_populates="patrimonio_rel", cascade="all, delete-orphan")
+    incidencias = relationship("Incidencia", back_populates="patrimonio")
     user = relationship("User", back_populates="patrimonios")
 
 
@@ -322,6 +330,59 @@ class Persona(Base):
         cascade="all, delete-orphan",
     )
 
+    incidencias_reportadas = relationship(
+        "Incidencia",
+        foreign_keys="Incidencia.persona_reporta_id",
+        back_populates="persona_reporta",
+    )
+
+    incidencias_como_gestor = relationship(
+        "Incidencia",
+        foreign_keys="Incidencia.gestor_actual_id",
+        back_populates="gestor_actual",
+    )
+
+    incidencias_como_supervisor = relationship(
+        "Incidencia",
+        foreign_keys="Incidencia.supervisor_actual_id",
+        back_populates="supervisor_actual",
+    )
+
+    historial_cambios_incidencia = relationship(
+        "HistorialEstadoIncidencia",
+        foreign_keys="HistorialEstadoIncidencia.persona_cambia_id",
+        back_populates="persona_cambia",
+    )
+
+    asignaciones_incidencia_como_gestor = relationship(
+        "AsignacionIncidencia",
+        foreign_keys="AsignacionIncidencia.gestor_id",
+        back_populates="gestor",
+    )
+
+    asignaciones_incidencia_como_supervisor = relationship(
+        "AsignacionIncidencia",
+        foreign_keys="AsignacionIncidencia.supervisor_id",
+        back_populates="supervisor",
+    )
+
+    asignaciones_incidencia_como_asignador = relationship(
+        "AsignacionIncidencia",
+        foreign_keys="AsignacionIncidencia.asignado_por_persona_id",
+        back_populates="asignado_por",
+    )
+
+    citas_incidencia_propuestas = relationship(
+        "CitaIncidencia",
+        foreign_keys="CitaIncidencia.propuesta_por_persona_id",
+        back_populates="propuesta_por",
+    )
+
+    citas_incidencia_confirmadas = relationship(
+        "CitaIncidencia",
+        foreign_keys="CitaIncidencia.confirmada_por_persona_id",
+        back_populates="confirmada_por",
+    )
 
 class Contrato(Base):
     """
@@ -373,6 +434,12 @@ class Contrato(Base):
         cascade="all, delete-orphan",
     )
 
+    incidencias = relationship(
+        "Incidencia",
+        back_populates="contrato",
+        cascade="all, delete-orphan",
+    )
+
 
 class ContratoParticipante(Base):
     """
@@ -382,7 +449,7 @@ class ContratoParticipante(Base):
     __tablename__ = "contratos_participantes"
     __table_args__ = (
         CheckConstraint(
-            "rol IN ('inquilino', 'avalista', 'gestor')",
+            "rol IN ('inquilino', 'avalista', 'gestor', 'propietario')",
             name="ck_contratos_participantes_rol"
         ),
         Index("ix_contrato_participante_contrato_rol", "contrato_id", "rol"),
@@ -455,14 +522,32 @@ class Proveedor(Base):
 
     id = Column(String, primary_key=True, index=True)
     nombre = Column(String, nullable=False)
-    rama_id = Column(String, ForeignKey("tipo_ramas_proveedores.id"))
+    rama_id = Column(String, ForeignKey("tipo_ramas_proveedores.id"), nullable=True)
 
-    localidad_id = Column(Integer, ForeignKey("localidades.id"), nullable=True, index=True)
-    localidad = Column(String, nullable=True, index=True)
-    pais = Column(String, nullable=True, index=True)
+    localidad = Column(Text, nullable=True, index=True)
+    pais = Column(Text, nullable=True, index=True)
     comunidad = Column(String, nullable=True, index=True)
 
-    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=True, index=True)
+    localidad_id = Column(Integer, ForeignKey("localidades.id"), nullable=True, index=True)
+
+    cif = Column(String, nullable=True)
+    telefono = Column(String, nullable=True)
+    email = Column(String, nullable=True)
+    subsegmento = Column(String, nullable=True)
+    direccion = Column(Text, nullable=True)
+    codigo_postal = Column(String, nullable=True)
+    persona_contacto = Column(String, nullable=True)
+
+    activo = Column(Boolean, nullable=False, server_default=text("true"))
+    observaciones = Column(Text, nullable=True)
+    acepta_urgencias = Column(Boolean, nullable=False, server_default=text("false"))
+    ambito_servicio = Column(String, nullable=True)
+
+    created_at = Column(DateTime, nullable=False, server_default=func.now())
+    updated_at = Column(DateTime, nullable=False, server_default=func.now(), onupdate=func.now())
+
+    subsegmento_id = Column(String, nullable=True)
 
     rama_rel = relationship("TipoRamasProveedores", back_populates="proveedores")
     gastos = relationship("Gasto", back_populates="proveedor_rel")
@@ -482,6 +567,23 @@ class Proveedor(Base):
         back_populates="dealer",
     )
 
+    incidencias_actuales = relationship(
+        "Incidencia",
+        foreign_keys="Incidencia.proveedor_actual_id",
+        back_populates="proveedor_actual",
+    )
+
+    asignaciones_incidencia = relationship(
+        "AsignacionIncidencia",
+        foreign_keys="AsignacionIncidencia.proveedor_id",
+        back_populates="proveedor",
+    )
+
+    citas_incidencia = relationship(
+        "CitaIncidencia",
+        foreign_keys="CitaIncidencia.proveedor_id",
+        back_populates="proveedor",
+    )
 
 class CuentaBancaria(Base):
     __tablename__ = "cuentas_bancarias"
@@ -749,6 +851,264 @@ class GastoCotidiano(Base):
     cuenta = relationship("CuentaBancaria", back_populates="gastos_cotidianos", lazy="joined")
     user = relationship("User", back_populates="gastos_cotidianos")
 
+# =============================================
+# 3.1 INCIDENCIAS BOT / ALQUILERES
+# =============================================
+
+def gen_incidencia_id() -> str:
+    return "INCID-" + uuid4().hex[:12].upper()
+
+
+def gen_historial_estado_incidencia_id() -> str:
+    return "IHE-" + uuid4().hex[:12].upper()
+
+
+def gen_asignacion_incidencia_id() -> str:
+    return "ASI-" + uuid4().hex[:12].upper()
+
+
+def gen_cita_incidencia_id() -> str:
+    return "CIT-" + uuid4().hex[:12].upper()
+
+
+class Incidencia(Base):
+    """
+    Incidencia reportada sobre un contrato de alquiler.
+
+    Tabla principal para la gestión operativa de incidencias desde BOT
+    y backoffice.
+    """
+
+    __tablename__ = "incidencias"
+    __table_args__ = {"extend_existing": True}
+
+    id = Column(String, primary_key=True, index=True, default=gen_incidencia_id)
+    codigo = Column(String, nullable=False, index=True)
+
+    contrato_id = Column(String, ForeignKey("contratos.id"), nullable=False, index=True)
+    patrimonio_id = Column(String, ForeignKey("patrimonio.id"), nullable=True, index=True)
+
+    persona_reporta_id = Column(String, ForeignKey("personas.id"), nullable=False, index=True)
+    rol_reporta = Column(String, nullable=False, index=True)
+
+    categoria = Column(String, nullable=False, index=True)
+    titulo = Column(String, nullable=True)
+    descripcion = Column(Text, nullable=False)
+
+    prioridad = Column(String, nullable=False, index=True)
+    estado = Column(String, nullable=False, index=True)
+
+    gestor_actual_id = Column(String, ForeignKey("personas.id"), nullable=True, index=True)
+    supervisor_actual_id = Column(String, ForeignKey("personas.id"), nullable=True, index=True)
+    proveedor_actual_id = Column(String, ForeignKey("proveedores.id"), nullable=True, index=True)
+
+    telefono_inquilino_snapshot = Column(String, nullable=True)
+    notas_acceso = Column(Text, nullable=True)
+
+    fecha_creacion = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    fecha_actualizacion = Column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
+    fecha_cierre = Column(DateTime(timezone=True), nullable=True)
+
+    contrato = relationship("Contrato", back_populates="incidencias")
+    patrimonio = relationship("Patrimonio", back_populates="incidencias")
+
+    persona_reporta = relationship(
+        "Persona",
+        foreign_keys=[persona_reporta_id],
+        back_populates="incidencias_reportadas",
+    )
+
+    gestor_actual = relationship(
+        "Persona",
+        foreign_keys=[gestor_actual_id],
+        back_populates="incidencias_como_gestor",
+    )
+
+    supervisor_actual = relationship(
+        "Persona",
+        foreign_keys=[supervisor_actual_id],
+        back_populates="incidencias_como_supervisor",
+    )
+
+    proveedor_actual = relationship(
+        "Proveedor",
+        foreign_keys=[proveedor_actual_id],
+        back_populates="incidencias_actuales",
+    )
+
+    historial_estados = relationship(
+        "HistorialEstadoIncidencia",
+        back_populates="incidencia",
+        cascade="all, delete-orphan",
+    )
+
+    asignaciones = relationship(
+        "AsignacionIncidencia",
+        back_populates="incidencia",
+        cascade="all, delete-orphan",
+    )
+
+    citas = relationship(
+        "CitaIncidencia",
+        back_populates="incidencia",
+        cascade="all, delete-orphan",
+    )
+
+class HistorialEstadoIncidencia(Base):
+    """
+    Historial de cambios de estado de una incidencia.
+    """
+
+    __tablename__ = "historial_estados_incidencias"
+    __table_args__ = {"extend_existing": True}
+
+    id = Column(String, primary_key=True, index=True, default=gen_historial_estado_incidencia_id)
+
+    incidencia_id = Column(String, ForeignKey("incidencias.id"), nullable=False, index=True)
+
+    estado_anterior = Column(String, nullable=True)
+    estado_nuevo = Column(String, nullable=False, index=True)
+
+    persona_cambia_id = Column(String, ForeignKey("personas.id"), nullable=True, index=True)
+    rol_cambia = Column(String, nullable=True)
+    nota = Column(Text, nullable=True)
+
+    fecha_creacion = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+    incidencia = relationship("Incidencia", back_populates="historial_estados")
+    persona_cambia = relationship(
+        "Persona",
+        foreign_keys=[persona_cambia_id],
+        back_populates="historial_cambios_incidencia",
+    )
+
+def gen_asignacion_incidencia_id() -> str:
+    return "ASI-" + uuid4().hex[:12].upper()
+
+
+class AsignacionIncidencia(Base):
+    """
+    Registro histórico y operativo de asignaciones sobre una incidencia.
+
+    Permite trazar:
+    - toma en gestión por gestor
+    - asignación de supervisor
+    - asignación de proveedor
+    - cierre o sustitución de asignaciones previas
+    """
+
+    __tablename__ = "asignaciones_incidencias"
+    __table_args__ = {"extend_existing": True}
+
+    id = Column(String, primary_key=True, index=True, default=gen_asignacion_incidencia_id)
+
+    incidencia_id = Column(String, ForeignKey("incidencias.id"), nullable=False, index=True)
+
+    gestor_id = Column(String, ForeignKey("personas.id"), nullable=True, index=True)
+    supervisor_id = Column(String, ForeignKey("personas.id"), nullable=True, index=True)
+    proveedor_id = Column(String, ForeignKey("proveedores.id"), nullable=True, index=True)
+
+    tipo_asignacion = Column(String, nullable=False, index=True)
+    estado = Column(String, nullable=False, index=True)
+
+    asignado_por_persona_id = Column(String, ForeignKey("personas.id"), nullable=True, index=True)
+
+    fecha_asignacion = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    fecha_desasignacion = Column(DateTime(timezone=True), nullable=True)
+
+    nota = Column(Text, nullable=True)
+
+    incidencia = relationship("Incidencia", back_populates="asignaciones")
+
+    gestor = relationship(
+        "Persona",
+        foreign_keys=[gestor_id],
+        back_populates="asignaciones_incidencia_como_gestor",
+    )
+
+    supervisor = relationship(
+        "Persona",
+        foreign_keys=[supervisor_id],
+        back_populates="asignaciones_incidencia_como_supervisor",
+    )
+
+    proveedor = relationship(
+        "Proveedor",
+        foreign_keys=[proveedor_id],
+        back_populates="asignaciones_incidencia",
+    )
+
+    asignado_por = relationship(
+        "Persona",
+        foreign_keys=[asignado_por_persona_id],
+        back_populates="asignaciones_incidencia_como_asignador",
+    )
+
+class CitaIncidencia(Base):
+    """
+    Cita programada para una incidencia.
+
+    En la Fase 4.3A la cita se utilizará para:
+    - registrar fecha y hora programadas
+    - vincular el proveedor que realizará la visita
+    - dejar trazabilidad de propuesta y posibles reprogramaciones
+
+    La confirmación explícita del inquilino queda fuera de 4.3A
+    y se abordará en 4.3B.
+    """
+
+    __tablename__ = "citas_incidencias"
+    __table_args__ = {"extend_existing": True}
+
+    id = Column(String, primary_key=True, index=True, default=gen_cita_incidencia_id)
+
+    incidencia_id = Column(String, ForeignKey("incidencias.id"), nullable=False, index=True)
+    proveedor_id = Column(String, ForeignKey("proveedores.id"), nullable=True, index=True)
+
+    fecha_inicio_programada = Column(DateTime(timezone=True), nullable=False)
+    fecha_fin_programada = Column(DateTime(timezone=True), nullable=True)
+
+    estado_inquilino = Column(String, nullable=False, index=True)
+    estado_cita = Column(String, nullable=False, index=True)
+
+    propuesta_por_persona_id = Column(String, ForeignKey("personas.id"), nullable=True, index=True)
+    confirmada_por_persona_id = Column(String, ForeignKey("personas.id"), nullable=True, index=True)
+
+    fecha_confirmacion = Column(DateTime(timezone=True), nullable=True)
+    motivo_reprogramacion = Column(Text, nullable=True)
+
+    created_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at = Column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
+
+    incidencia = relationship("Incidencia", back_populates="citas")
+
+    proveedor = relationship(
+        "Proveedor",
+        foreign_keys=[proveedor_id],
+        back_populates="citas_incidencia",
+    )
+
+    propuesta_por = relationship(
+        "Persona",
+        foreign_keys=[propuesta_por_persona_id],
+        back_populates="citas_incidencia_propuestas",
+    )
+
+    confirmada_por = relationship(
+        "Persona",
+        foreign_keys=[confirmada_por_persona_id],
+        back_populates="citas_incidencia_confirmadas",
+    )
 
 # =============================================
 # 4.1 ROLES

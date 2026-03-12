@@ -1,17 +1,15 @@
-// mobile_app/screens/home/HomeScreen.tsx
-// -----------------------------------------------------------------------------
-// Home UI (pantalla de mostrar) separada de la navegación.
-// Mantiene funcionalidad existente sin romper navegación.
-//
-// CAMBIOS (Moises):
-// - Barras presupuesto en 3 estados (Real/Pagado, Omitido, Pendiente).
-// - Mostrar "Cumplimiento de movimientos %" en el texto de cada barra.
-// - Corregir typing TS para width: "xx%" (DimensionValue).
-// - Mantener tarjetas, navegación e InfoModal sin pérdidas.
-// - ✅ Endeudamiento debajo de Patrimonio.
-// - ✅ Fix layout chip endeudamiento (no overflow).
-// - ✅ NUEVO: "Ver préstamos >" desde Endeudamiento -> PrestamosStack (activos).
-// -----------------------------------------------------------------------------
+/**
+ * Ruta: mobile_app/screens/home/HomeScreen.tsx
+ * Versión: 1.9.0
+ * Descripción:
+ * Pantalla principal Home.
+ * Mantiene toda la funcionalidad existente y añade:
+ * - Nueva tarjeta "Patrimonio"
+ * - Renombrado de la antigua tarjeta de patrimonio a "Propiedades"
+ * - Nueva tarjeta "Inversiones" entre Propiedades y Endeudamiento
+ * - Patrimonio agregado:
+ *   propiedades + inversiones + liquidez - deuda
+ */
 
 import React, { useMemo, useState } from 'react';
 import {
@@ -34,7 +32,6 @@ import { panelStyles } from '../../components/panels/panelStyles';
 import { useHomeDashboard } from '../../hooks/useHomeDashboard';
 import { EuroformatEuro } from '../../utils/format';
 
-// ✅ Sistema reusable de info “i”
 import { InfoButton, InfoModal, useInfoModal } from '../../components/ui/InfoModal';
 
 // --------------------
@@ -117,10 +114,16 @@ const HOME_INFO: Record<string, string> = {
     'Comparación entre real y presupuesto. Cada barra muestra cuánto llevas consumido/cobrado frente a lo previsto (incluyendo omitidos/pending).',
   actividad_reciente:
     'Últimos movimientos registrados. Útil para validar que lo reciente está bien categorizado y fechado.',
-  patrimonio: 'Resumen de tus propiedades: valor de mercado, NOI anual, equity y métricas derivadas.',
+  patrimonio:
+    'Patrimonio agregado: valor actual de propiedades + valor total de inversiones activas + liquidez total en cuentas - deuda pendiente. El valor de inversiones activas se estima con aporte_final y, si no existe, con aporte_estimado.',
+  propiedades:
+    'Resumen de propiedades: valor de mercado, NOI anual, equity y métricas derivadas.',
+  inversiones:
+    'Resumen de inversiones activas. El total se calcula con aporte_final y, si no existe, aporte_estimado. ROI esperado medio e IRR esperada media se calculan como media simple de las inversiones activas con dato informado.',
   liquidez_total:
     'Liquidez total: saldo actual agregado de cuentas. Pulsar te lleva a Balance para ver el detalle.',
-  total_gasto: 'Total gasto: barra agregada del gasto del mes. Pulsar te lleva a Análisis día a día.',
+  total_gasto:
+    'Total gasto: barra agregada del gasto del mes. Pulsar te lleva a Análisis día a día.',
   noi_vm:
     'NOI/VM: se calcula como (NOI anual) / (Valor de mercado). Refleja la rentabilidad anual aproximada sobre el valor actual.',
   ltv_aprox:
@@ -128,7 +131,7 @@ const HOME_INFO: Record<string, string> = {
   cotidianos_consumidos_mes:
     'Gastos cotidianos consumidos este mes: suma de los movimientos clasificados como gasto cotidiano dentro del mes actual. Pulsando la tarjeta accedes a "Día a día análisis".',
   endeudamiento:
-    'Endeudamiento: total deuda es la suma del capital pendiente de préstamos activos. El porcentaje se calcula como (Total deuda / Valor mercado total) * 100. Si no hay patrimonio (VM=0), el porcentaje se muestra como “—”.',
+    'Endeudamiento: total deuda es la suma del capital pendiente de préstamos activos. El porcentaje se calcula como (Total deuda / Valor mercado total) * 100. Si no hay valor de mercado de propiedades (VM=0), el porcentaje se muestra como “—”.',
 };
 
 // --------------------
@@ -288,7 +291,7 @@ const HomeScreen: React.FC = () => {
   };
 
   // --------------------
-  // Navegación (igual que tenías)
+  // Navegación
   // --------------------
 
   const goGastoExtra = () => {
@@ -383,12 +386,10 @@ const HomeScreen: React.FC = () => {
     });
   };
 
-  // ✅ NUEVO: ir a préstamos activos (desde Endeudamiento)
   const goPrestamosActivos = () => {
     navigation.navigate('PatrimonyTab', {
       screen: 'PrestamosStack',
       params: {
-        // Entrar al listado directamente con params útiles
         screen: 'PrestamosList',
         params: {
           initialFiltro: 'ACTIVOS',
@@ -409,7 +410,6 @@ const HomeScreen: React.FC = () => {
   const gastosGestionablesMes = data?.gestionablesReal ?? null;
   const gastosCotidianosMes = data?.cotidianosReal ?? null;
 
-  // Barras (real + plan)
   const totalGastoActual = data?.totalGastoReal ?? 0;
   const totalGastoPlanOriginal = data?.totalGastoPresupuestadoOriginal ?? data?.totalGastoPresupuestado ?? 0;
   const totalGastoOmitido = data?.totalGastoOmitidoMes ?? 0;
@@ -428,22 +428,29 @@ const HomeScreen: React.FC = () => {
     data?.cotidianosPresupuestadosOriginal ?? data?.cotidianosPresupuestado ?? data?.cotidianosPresupuestados ?? 0;
   const cotidianosOmitidos = data?.cotidianosOmitidosMes ?? 0;
 
-  // Patrimonio (Home)
+  // Propiedades
   const patPropsCount = data?.patrimonioPropiedadesCount ?? 0;
   const patValorMercadoTotal = data?.patrimonioValorMercadoTotal ?? null;
   const patNoiTotal = data?.patrimonioNoiTotal ?? null;
   const patEquityTotal = data?.patrimonioEquityTotal ?? null;
   const patBrutoMedioPct = data?.patrimonioRentabilidadBrutaMediaPct ?? null;
 
-  // Indicadores
   const patNoiSobreVmPct = data?.patrimonioNoiSobreVmPct ?? null;
   const patLtvAproxPct = data?.patrimonioLtvAproxPct ?? null;
+
+  // Patrimonio agregado
+  const patrimonioTotal = data?.patrimonioTotal ?? null;
+  const patrimonioValorInversionesTotal = data?.patrimonioValorInversionesTotal ?? null;
+
+  // Inversiones
+  const inversionesActivasCount = data?.inversionesActivasCount ?? 0;
+  const inversionesRoiEsperadoMedioPct = data?.inversionesRoiEsperadoMedioPct ?? null;
+  const inversionesIrrEsperadaMediaPct = data?.inversionesIrrEsperadaMediaPct ?? null;
 
   // Endeudamiento
   const endeudamientoTotalDeuda = data?.endeudamientoTotalDeuda ?? null;
   const endeudamientoPct = data?.endeudamientoPct ?? null;
 
-  // Colores barras
   const REAL_INCOME = colors.success;
   const REAL_EXPENSE_SOFT = 'rgba(220, 38, 38, 0.50)';
   const OMITTED = 'rgba(245, 158, 11, 0.50)';
@@ -649,7 +656,6 @@ const HomeScreen: React.FC = () => {
                 </TouchableOpacity>
               </View>
 
-              {/* TOTAL GASTO */}
               <TouchableOpacity style={styles.budgetRowPressable} onPress={goBarTotalGasto} activeOpacity={0.85}>
                 <View style={styles.budgetRow}>
                   <View style={styles.budgetRowHeader}>
@@ -680,7 +686,6 @@ const HomeScreen: React.FC = () => {
                 </View>
               </TouchableOpacity>
 
-              {/* INGRESOS */}
               <TouchableOpacity style={styles.budgetRowPressable} onPress={goBarIngresos} activeOpacity={0.85}>
                 <View style={styles.budgetRow}>
                   <View style={styles.budgetRowHeader}>
@@ -711,7 +716,6 @@ const HomeScreen: React.FC = () => {
                 </View>
               </TouchableOpacity>
 
-              {/* GESTIONABLES */}
               <TouchableOpacity style={styles.budgetRowPressable} onPress={goBarGestionables} activeOpacity={0.85}>
                 <View style={styles.budgetRow}>
                   <View style={styles.budgetRowHeader}>
@@ -742,7 +746,6 @@ const HomeScreen: React.FC = () => {
                 </View>
               </TouchableOpacity>
 
-              {/* COTIDIANOS */}
               <TouchableOpacity style={styles.budgetRowPressable} onPress={goBarCotidianos} activeOpacity={0.85}>
                 <View style={styles.budgetRow}>
                   <View style={styles.budgetRowHeader}>
@@ -773,7 +776,6 @@ const HomeScreen: React.FC = () => {
                 </View>
               </TouchableOpacity>
 
-              {/* EXTRAS */}
               <TouchableOpacity style={[styles.budgetRowPressable, { marginBottom: 0 }]} onPress={goBarExtras} activeOpacity={0.85}>
                 <View style={[styles.budgetRow, { marginBottom: 0 }]}>
                   <View style={styles.budgetRowHeader}>
@@ -867,11 +869,61 @@ const HomeScreen: React.FC = () => {
           <View style={panelStyles.section}>
             <View style={styles.sectionHeaderRow}>
               <View style={styles.sectionHeaderLeft}>
-                <Ionicons name="business-outline" size={18} color={colors.primary} />
+                <Ionicons name="analytics-outline" size={18} color={colors.primary} />
                 <Text style={panelStyles.sectionTitle}>Patrimonio</Text>
               </View>
 
               <InfoButton align="title" onPress={() => info.open('Patrimonio', HOME_INFO.patrimonio)} />
+            </View>
+
+            <View style={panelStyles.card}>
+              <View style={styles.cardHeaderRow}>
+                <View>
+                  <Text style={panelStyles.cardTitle}>Patrimonio total</Text>
+                  <Text style={panelStyles.cardSubtitle}>
+                    Propiedades + inversiones + liquidez - deuda pendiente
+                  </Text>
+                </View>
+
+                <Text style={styles.cardChipPatrimonio}>Total</Text>
+              </View>
+
+              <Text style={styles.patrimonioMainValue}>{fmtMoney(patrimonioTotal, 'normal')}</Text>
+              <Text style={styles.patrimonioMainSub}>Cálculo agregado actual</Text>
+
+              <View style={styles.patrimonioFormulaBox}>
+                <View style={styles.patrimonioFormulaRow}>
+                  <Text style={styles.patrimonioFormulaLabel}>Valor actual propiedades</Text>
+                  <Text style={styles.patrimonioFormulaValue}>{fmtMoney(patValorMercadoTotal, 'normal')}</Text>
+                </View>
+
+                <View style={styles.patrimonioFormulaRow}>
+                  <Text style={styles.patrimonioFormulaLabel}>Valor total inversiones</Text>
+                  <Text style={styles.patrimonioFormulaValue}>{fmtMoney(patrimonioValorInversionesTotal, 'normal')}</Text>
+                </View>
+
+                <View style={styles.patrimonioFormulaRow}>
+                  <Text style={styles.patrimonioFormulaLabel}>Liquidez en cuentas</Text>
+                  <Text style={styles.patrimonioFormulaValue}>{fmtMoney(liquidezTotal, 'normal')}</Text>
+                </View>
+
+                <View style={styles.patrimonioFormulaRow}>
+                  <Text style={styles.patrimonioFormulaLabel}>Deuda pendiente</Text>
+                  <Text style={styles.patrimonioFormulaValueDebt}>{fmtMoney(endeudamientoTotalDeuda, 'minus')}</Text>
+                </View>
+              </View>
+            </View>
+          </View>
+
+          {/* ===================== PROPIEDADES ===================== */}
+          <View style={panelStyles.section}>
+            <View style={styles.sectionHeaderRow}>
+              <View style={styles.sectionHeaderLeft}>
+                <Ionicons name="business-outline" size={18} color={colors.primary} />
+                <Text style={panelStyles.sectionTitle}>Propiedades</Text>
+              </View>
+
+              <InfoButton align="title" onPress={() => info.open('Propiedades', HOME_INFO.propiedades)} />
             </View>
 
             <View style={panelStyles.card}>
@@ -930,7 +982,58 @@ const HomeScreen: React.FC = () => {
             </View>
           </View>
 
-          {/* ===================== ENDEUDAMIENTO (DEBAJO DE PATRIMONIO) ===================== */}
+          {/* ===================== INVERSIONES ===================== */}
+          <View style={panelStyles.section}>
+            <View style={styles.sectionHeaderRow}>
+              <View style={styles.sectionHeaderLeft}>
+                <Ionicons name="trending-up-outline" size={18} color={colors.primary} />
+                <Text style={panelStyles.sectionTitle}>Inversiones</Text>
+              </View>
+
+              <InfoButton align="title" onPress={() => info.open('Inversiones', HOME_INFO.inversiones)} />
+            </View>
+
+            <View style={panelStyles.card}>
+              <View style={styles.cardHeaderRow}>
+                <View>
+                  <Text style={panelStyles.cardTitle}>Resumen de inversiones</Text>
+                  <Text style={panelStyles.cardSubtitle}>
+                    {inversionesActivasCount > 0
+                      ? `${inversionesActivasCount} activa${inversionesActivasCount === 1 ? '' : 's'}`
+                      : 'Sin inversiones activas'}
+                  </Text>
+                </View>
+
+                <Text style={styles.cardChipInvest}>Activas {inversionesActivasCount}</Text>
+              </View>
+
+              <View style={styles.inversionesTopRow}>
+                <View style={styles.inversionesColLeft}>
+                  <Text style={panelStyles.cardValue}>{fmtMoney(patrimonioValorInversionesTotal, 'normal')}</Text>
+                  <Text style={panelStyles.cardSubtitleSmall}>Total inversiones</Text>
+                </View>
+
+                <View style={styles.inversionesColRight}>
+                  <Text style={styles.inversionesMetricLabel}>ROI esperado medio</Text>
+                  <Text style={styles.inversionesMetricValue}>{fmtPct(inversionesRoiEsperadoMedioPct)}</Text>
+                </View>
+              </View>
+
+              <View style={styles.inversionesMetaRow}>
+                <View style={styles.inversionesMetaItem}>
+                  <Text style={styles.inversionesMetaLabel}>IRR esperada media</Text>
+                  <Text style={styles.inversionesMetaValue}>{fmtPct(inversionesIrrEsperadaMediaPct)}</Text>
+                </View>
+
+                <View style={styles.inversionesMetaItemRight}>
+                  <Text style={styles.inversionesMetaLabel}>Base cálculo total</Text>
+                  <Text style={styles.inversionesMetaValue}>aporte_final / aporte_estimado</Text>
+                </View>
+              </View>
+            </View>
+          </View>
+
+          {/* ===================== ENDEUDAMIENTO ===================== */}
           <View style={[panelStyles.section, { marginBottom: 24 }]}>
             <View style={styles.sectionHeaderRow}>
               <View style={styles.sectionHeaderLeft}>
@@ -944,7 +1047,7 @@ const HomeScreen: React.FC = () => {
             <View style={panelStyles.card}>
               <View style={styles.cardHeaderRowCentered}>
                 <View style={{ flex: 1, paddingRight: 10 }}>
-                  <Text style={panelStyles.cardTitle}>Deuda vs Patrimonio</Text>
+                  <Text style={panelStyles.cardTitle}>Deuda vs Propiedades</Text>
                   <Text style={panelStyles.cardSubtitle}>
                     Total deuda (préstamos activos) y % sobre valor mercado total
                   </Text>
@@ -969,11 +1072,10 @@ const HomeScreen: React.FC = () => {
 
               <View style={styles.debtMetaRow}>
                 <Text style={styles.debtMetaText}>
-                  Base: Patrimonio bruto (VM total) {fmtMoney(patValorMercadoTotal, 'normal')}
+                  Base: Valor mercado propiedades {fmtMoney(patValorMercadoTotal, 'normal')}
                 </Text>
               </View>
 
-              {/* ✅ NUEVO: CTA dentro de la tarjeta */}
               <TouchableOpacity
                 style={panelStyles.cardButton}
                 onPress={goPrestamosActivos}
@@ -1180,6 +1282,26 @@ const styles = StyleSheet.create({
     borderRadius: 999,
   },
 
+  cardChipPatrimonio: {
+    fontSize: 11,
+    fontWeight: '700',
+    color: colors.success,
+    backgroundColor: 'rgba(34, 197, 94, 0.10)',
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: 999,
+  },
+
+  cardChipInvest: {
+    fontSize: 11,
+    fontWeight: '700',
+    color: colors.primary,
+    backgroundColor: colors.primarySoft,
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: 999,
+  },
+
   cardChipDebt: {
     fontSize: 11,
     fontWeight: '700',
@@ -1191,6 +1313,46 @@ const styles = StyleSheet.create({
     maxWidth: 120,
     flexShrink: 1,
     textAlign: 'right',
+  },
+
+  patrimonioMainValue: {
+    fontSize: 28,
+    fontWeight: '800',
+    color: colors.textPrimary,
+    marginTop: 6,
+  },
+  patrimonioMainSub: {
+    marginTop: 4,
+    fontSize: 11,
+    color: colors.textSecondary,
+  },
+  patrimonioFormulaBox: {
+    marginTop: 12,
+    borderTopWidth: StyleSheet.hairlineWidth,
+    borderTopColor: colors.border,
+    paddingTop: 10,
+    gap: 8,
+  },
+  patrimonioFormulaRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    gap: 10,
+  },
+  patrimonioFormulaLabel: {
+    flex: 1,
+    fontSize: 11,
+    color: colors.textSecondary,
+  },
+  patrimonioFormulaValue: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: colors.textPrimary,
+  },
+  patrimonioFormulaValueDebt: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: colors.danger,
   },
 
   debtGrid: { flexDirection: 'row', justifyContent: 'space-between', marginTop: 8, gap: 12 },
@@ -1220,6 +1382,41 @@ const styles = StyleSheet.create({
   patrimonioMetaItemRight: { flex: 1, alignItems: 'flex-end' },
   patrimonioMetaLabel: { fontSize: 11, color: colors.textSecondary },
   patrimonioMetaValue: { marginTop: 2, fontSize: 14, fontWeight: '700', color: colors.textPrimary },
+
+  inversionesTopRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'flex-start',
+    marginBottom: 10,
+  },
+  inversionesColLeft: { flex: 1, paddingRight: 8 },
+  inversionesColRight: { flex: 1, alignItems: 'flex-end', paddingLeft: 8 },
+  inversionesMetricLabel: {
+    fontSize: 11,
+    color: colors.textSecondary,
+  },
+  inversionesMetricValue: {
+    fontSize: 20,
+    fontWeight: '700',
+    color: colors.primary,
+    marginTop: 2,
+  },
+  inversionesMetaRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'flex-start',
+    marginTop: 2,
+    gap: 12,
+  },
+  inversionesMetaItem: { flex: 1 },
+  inversionesMetaItemRight: { flex: 1, alignItems: 'flex-end' },
+  inversionesMetaLabel: { fontSize: 11, color: colors.textSecondary },
+  inversionesMetaValue: {
+    marginTop: 2,
+    fontSize: 14,
+    fontWeight: '700',
+    color: colors.textPrimary,
+  },
 
   indicatorLine: { marginTop: 4, flexDirection: 'row', alignItems: 'center', justifyContent: 'flex-end', gap: 6 },
   indicatorValue: { fontSize: 11, color: colors.textSecondary, fontWeight: '600' },

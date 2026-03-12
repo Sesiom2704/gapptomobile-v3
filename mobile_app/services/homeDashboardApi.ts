@@ -1,21 +1,20 @@
-// mobile_app/services/homeDashboardApi.ts
-//
-// Objetivo:
-// - Mantener HomeDashboard tal cual.
-// - Añadir soporte robusto para barras 3 estados (Real/Pagado, Omitido, Pendiente) en Home.
-// - Mantener aliases legacy para no romper navegación ni pantallas previas.
-// - Mantener bloque Patrimonio.
-// - ✅ Añadir bloque Endeudamiento (Total deuda + % sobre Patrimonio Bruto/VM)
-//
-// FIX (Moises - Enero 2026):
-// - En Home, la barra de "Ingresos" (cobrados/consumidos vs pendientes) NO debe incluir extraordinarios.
-// - Extraordinario = periodicidad = PAGO UNICO y ultimo_ingreso_on = mes actual.
-// - En el summary, esos extraordinarios llegan como `detalle_ingresos.extraordinarios`.
-// - Antes: ingresosMes = recurrentes + extraordinarios  -> INCORRECTO para la barra.
-// - Ahora: ingresosMes = SOLO recurrentes.
-// - Se conserva `extrasIngresosMes` para el bloque Extras.
-// - Se añade (opcional) `ingresosMesTotalIncluyendoExtras` por si alguna pantalla necesita el total real del mes
-//   sin contaminar la barra principal.
+/**
+ * Ruta: mobile_app/services/homeDashboardApi.ts
+ * Versión: 1.9.0
+ * Descripción:
+ * Servicio de construcción del dashboard Home.
+ * Mantiene compatibilidad con el panel actual y añade soporte para:
+ * - Patrimonio total agregado
+ * - Valor total de inversiones activas
+ * - Tarjeta de inversiones con recuento y métricas medias
+ * - Renombrado lógico de bloques en Home sin romper consumers previos
+ *
+ * Nota funcional importante:
+ * - "valor total inversiones" se calcula con inversiones ACTIVAS
+ * - Se usa aporte_final si existe; si no, aporte_estimado
+ * - ROI esperado medio e IRR esperada media se calculan como media simple
+ *   de inversiones activas con dato informado
+ */
 
 import { getMonthlySummary } from './analyticsApi';
 import { fetchBalanceMes } from './balanceApi';
@@ -38,26 +37,26 @@ export type HomeDashboardResponse = {
   gastosMes: number;
   ahorroMes: number;
 
-  // ✅ Opcional: total de ingresos del mes incluyendo extraordinarios (si lo necesitas en alguna pantalla)
+  // Opcional: total de ingresos del mes incluyendo extraordinarios
   ingresosMesTotalIncluyendoExtras?: number;
 
-  // Presupuesto “ajustado” (puede excluir omitidos según backend)
+  // Presupuesto “ajustado”
   ingresosPresupuestados: number;
   gestionablesPresupuestados: number;
   cotidianosPresupuestados: number;
   totalGastoPresupuestado: number;
 
   // Consumidos
-  gestionablesConsumidos: number; // ✅ recurrentes (excluye PAGO UNICO)
+  gestionablesConsumidos: number; // recurrentes (excluye PAGO UNICO)
   cotidianosConsumidos: number;
-  totalGastoConsumido: number; // ✅ incluye extras gastos
+  totalGastoConsumido: number; // incluye extras gastos
 
   // Extras (PAGO UNICO)
   extrasIngresosMes: number;
   extrasGastosMes: number;
   extrasNetoMes: number;
 
-  // ✅ NUEVO: Original + Omitidos (para Home 3 estados)
+  // Original + Omitidos (para Home 3 estados)
   ingresosPresupuestadosOriginal: number;
   gestionablesPresupuestadosOriginal: number;
   cotidianosPresupuestadosOriginal: number;
@@ -68,7 +67,7 @@ export type HomeDashboardResponse = {
   cotidianosOmitidosMes: number;
   totalGastoOmitidoMes: number;
 
-  // --- ALIAS LEGACY (para que MainTabs no rompa) ---
+  // Alias legacy
   gestionablesReal: number;
   cotidianosReal: number;
   totalGastoReal: number;
@@ -92,18 +91,26 @@ export type HomeDashboardResponse = {
     importe: number;
   }>;
 
-  // Patrimonio
+  // Propiedades
   patrimonioPropiedadesCount: number;
   patrimonioValorMercadoTotal: number;
   patrimonioNoiTotal: number;
   patrimonioEquityTotal: number;
   patrimonioRentabilidadBrutaMediaPct: number | null;
-
   patrimonioNoiSobreVmPct: number | null;
   patrimonioLtvAproxPct: number | null;
   patrimonioNoiMensual: number;
 
-  // ✅ Endeudamiento
+  // Inversiones
+  patrimonioValorInversionesTotal: number;
+  inversionesActivasCount: number;
+  inversionesRoiEsperadoMedioPct: number | null;
+  inversionesIrrEsperadaMediaPct: number | null;
+
+  // Patrimonio total agregado
+  patrimonioTotal: number;
+
+  // Endeudamiento
   endeudamientoTotalDeuda: number;
   endeudamientoPct: number | null;
 };
@@ -121,6 +128,11 @@ function pickNumber(obj: any, keys: string[], fallback = 0): number {
   return fallback;
 }
 
+function numOrNull(x: any): number | null {
+  const v = typeof x === 'number' ? x : x == null ? null : Number(x);
+  return v == null || Number.isNaN(v) ? null : v;
+}
+
 /**
  * Suma de cotidianos pagados (paginado).
  */
@@ -133,7 +145,7 @@ async function sumGastosCotidianosMes(year: number, month: number): Promise<numb
     const page = await fetchGastosCotidianos({ year, month, limit, offset });
     if (!page.length) break;
 
-    total += page.reduce((acc, g) => acc + (g.pagado ? (g.importe ?? 0) : 0), 0);
+    total += page.reduce((acc, g) => acc + (g.pagado ? g.importe ?? 0 : 0), 0);
 
     if (page.length < limit) break;
     offset += limit;
@@ -143,7 +155,7 @@ async function sumGastosCotidianosMes(year: number, month: number): Promise<numb
 }
 
 // -----------------------
-// Tipos mínimos para patrimonio
+// Tipos mínimos para propiedades
 // -----------------------
 type PatrimonioRow = { id: string; activo?: boolean | null };
 
@@ -159,11 +171,6 @@ type PatrimonioKpisOut = {
   noi?: number | null;
   rendimiento_bruto_pct?: number | null;
 };
-
-function numOrNull(x: any): number | null {
-  const v = typeof x === 'number' ? x : x == null ? null : Number(x);
-  return v == null || Number.isNaN(v) ? null : v;
-}
 
 function isActive(p: PatrimonioRow): boolean {
   return p.activo !== false;
@@ -267,15 +274,78 @@ async function fetchPatrimonioSummaryForHome(year: number): Promise<{
 }
 
 // -----------------------
-// ✅ Endeudamiento (robusto)
+// Tipos mínimos para inversiones
 // -----------------------
-// Backend esperado:
-// GET /api/v1/analytics/endeudamiento/summary
-// Respuestas toleradas:
-// - { total_deuda: 116440.64 }
-// - { totalDeuda: 116440.64 }
-// - valores como string: "116440.64"
-type EndeudamientoSummaryOut = { total_deuda?: number | string | null; totalDeuda?: number | string | null };
+type InversionHomeRow = {
+  id: string;
+  estado?: string | null;
+  aporte_estimado?: number | null;
+  aporte_final?: number | null;
+  roi_esperado_pct?: number | null;
+  irr_esperada_pct?: number | null;
+};
+
+async function fetchInversionesSummaryForHome(): Promise<{
+  valorInversionesTotal: number;
+  inversionesActivasCount: number;
+  roiEsperadoMedioPct: number | null;
+  irrEsperadaMediaPct: number | null;
+}> {
+  const r = await api.get<InversionHomeRow[]>(`/api/v1/inversiones`, {
+    params: { estado: 'ACTIVA' },
+  });
+
+  const rows = Array.isArray(r.data) ? r.data : [];
+
+  let valorInversionesTotal = 0;
+
+  let roiSum = 0;
+  let roiCount = 0;
+
+  let irrSum = 0;
+  let irrCount = 0;
+
+  for (const inv of rows) {
+    const aporteFinal = numOrNull(inv?.aporte_final);
+    const aporteEstimado = numOrNull(inv?.aporte_estimado);
+
+    const base =
+      aporteFinal != null && aporteFinal > 0
+        ? aporteFinal
+        : aporteEstimado != null && aporteEstimado > 0
+          ? aporteEstimado
+          : 0;
+
+    valorInversionesTotal += base;
+
+    const roi = numOrNull(inv?.roi_esperado_pct);
+    if (roi != null) {
+      roiSum += roi;
+      roiCount += 1;
+    }
+
+    const irr = numOrNull(inv?.irr_esperada_pct);
+    if (irr != null) {
+      irrSum += irr;
+      irrCount += 1;
+    }
+  }
+
+  return {
+    valorInversionesTotal: Number(valorInversionesTotal.toFixed(2)),
+    inversionesActivasCount: rows.length,
+    roiEsperadoMedioPct: roiCount > 0 ? Number((roiSum / roiCount).toFixed(2)) : null,
+    irrEsperadaMediaPct: irrCount > 0 ? Number((irrSum / irrCount).toFixed(2)) : null,
+  };
+}
+
+// -----------------------
+// Endeudamiento
+// -----------------------
+type EndeudamientoSummaryOut = {
+  total_deuda?: number | string | null;
+  totalDeuda?: number | string | null;
+};
 
 async function fetchEndeudamientoSummaryForHome(): Promise<{ totalDeuda: number }> {
   const r = await api.get<EndeudamientoSummaryOut>(`/api/v1/analytics/endeudamiento/summary`);
@@ -286,7 +356,15 @@ async function fetchEndeudamientoSummaryForHome(): Promise<{ totalDeuda: number 
 export async function fetchHomeDashboard(params: { year: number; month: number }): Promise<HomeDashboardResponse> {
   const { year, month } = params;
 
-  const [summary, balance, totalCotidianos, movimientosMes, patrimonioSummary, endeudamientoSummary] = await Promise.all([
+  const [
+    summary,
+    balance,
+    totalCotidianos,
+    movimientosMes,
+    patrimonioSummary,
+    inversionesSummary,
+    endeudamientoSummary,
+  ] = await Promise.all([
     getMonthlySummary({ year, month }),
     fetchBalanceMes({ year, month }),
     sumGastosCotidianosMes(year, month),
@@ -301,6 +379,12 @@ export async function fetchHomeDashboard(params: { year: number; month: number }
       ltvAproxPct: null,
       noiMensual: 0,
     })),
+    fetchInversionesSummaryForHome().catch(() => ({
+      valorInversionesTotal: 0,
+      inversionesActivasCount: 0,
+      roiEsperadoMedioPct: null,
+      irrEsperadaMediaPct: null,
+    })),
     fetchEndeudamientoSummaryForHome().catch(() => ({ totalDeuda: 0 })),
   ]);
 
@@ -310,8 +394,6 @@ export async function fetchHomeDashboard(params: { year: number; month: number }
   const ingresosRecurrentesMes = n((summary as any)?.detalle_ingresos?.recurrentes);
   const extrasIngresosMes = n((summary as any)?.detalle_ingresos?.extraordinarios);
 
-  // ✅ FIX: En Home, "ingresosMes" NO debe sumar extraordinarios.
-  // Se mantiene el total completo en un campo opcional por si se necesita en algún punto.
   const ingresosMes = ingresosRecurrentesMes;
   const ingresosMesTotalIncluyendoExtras = ingresosRecurrentesMes + extrasIngresosMes;
 
@@ -326,17 +408,15 @@ export async function fetchHomeDashboard(params: { year: number; month: number }
   const extrasNetoMes = extrasIngresosMes - extrasGastosMes;
 
   // -----------------------
-  // PRESUPUESTOS / OMITIDOS (ROBUSTO)
+  // PRESUPUESTOS / OMITIDOS
   // -----------------------
   const pres = (summary as any)?.presupuestos ?? {};
 
-  // Ajustados
   const ingresosPresupuestados = pickNumber(pres, ['ingresos_presupuesto'], 0);
   const gestionablesPresupuestados = pickNumber(pres, ['gestionables_presupuesto'], 0);
   const cotidianosPresupuestados = pickNumber(pres, ['cotidianos_presupuesto'], 0);
   const totalGastoPresupuestado = pickNumber(pres, ['gasto_total_presupuesto'], 0);
 
-  // Originales (fallback a ajustados si no vienen)
   const ingresosPresupuestadosOriginal = pickNumber(
     pres,
     ['ingresos_presupuesto_original', 'ingresos_presupuesto_base', 'ingresos_presupuesto'],
@@ -358,15 +438,26 @@ export async function fetchHomeDashboard(params: { year: number; month: number }
     totalGastoPresupuestado
   );
 
-  // Omitidos (aceptamos varias keys; si no vienen, derivamos original - ajustado)
-  const ingresosOmitidosRaw = pickNumber(pres, ['ingresos_omitidos_mes', 'ingresos_omitidos', 'ingresos_omitidos_total'], NaN);
+  const ingresosOmitidosRaw = pickNumber(
+    pres,
+    ['ingresos_omitidos_mes', 'ingresos_omitidos', 'ingresos_omitidos_total'],
+    NaN
+  );
   const gestionablesOmitidosRaw = pickNumber(
     pres,
     ['gestionables_omitidos_mes', 'gestionables_omitidos', 'gestionables_omitidos_total'],
     NaN
   );
-  const cotidianosOmitidosRaw = pickNumber(pres, ['cotidianos_omitidos_mes', 'cotidianos_omitidos', 'cotidianos_omitidos_total'], NaN);
-  const totalGastoOmitidosRaw = pickNumber(pres, ['gasto_total_omitido_mes', 'gasto_total_omitido', 'gasto_total_omitido_total'], NaN);
+  const cotidianosOmitidosRaw = pickNumber(
+    pres,
+    ['cotidianos_omitidos_mes', 'cotidianos_omitidos', 'cotidianos_omitidos_total'],
+    NaN
+  );
+  const totalGastoOmitidosRaw = pickNumber(
+    pres,
+    ['gasto_total_omitido_mes', 'gasto_total_omitido', 'gasto_total_omitido_total'],
+    NaN
+  );
 
   const ingresosOmitidosMes = Number.isFinite(ingresosOmitidosRaw)
     ? Math.max(0, ingresosOmitidosRaw)
@@ -389,8 +480,14 @@ export async function fetchHomeDashboard(params: { year: number; month: number }
   // -----------------------
   const cuentas = (balance as any)?.saldos_cuentas ?? [];
 
-  const gastosGestionablesPendientesTotal = cuentas.reduce((acc: number, c: any) => acc + n(c.gastos_gestionables_pendientes), 0);
-  const gastosCotidianosPendientesTotal = cuentas.reduce((acc: number, c: any) => acc + n(c.gastos_cotidianos_pendientes), 0);
+  const gastosGestionablesPendientesTotal = cuentas.reduce(
+    (acc: number, c: any) => acc + n(c.gastos_gestionables_pendientes),
+    0
+  );
+  const gastosCotidianosPendientesTotal = cuentas.reduce(
+    (acc: number, c: any) => acc + n(c.gastos_cotidianos_pendientes),
+    0
+  );
 
   const ingresosPendientesTotal = n((balance as any)?.ingresos_pendientes_total);
   const gastosPendientesTotal = n((balance as any)?.gastos_pendientes_total);
@@ -407,7 +504,7 @@ export async function fetchHomeDashboard(params: { year: number; month: number }
     }));
 
   // -----------------------
-  // ALIAS legacy
+  // Alias legacy
   // -----------------------
   const gestionablesReal = gestionablesConsumidos;
   const cotidianosReal = cotidianosConsumidos;
@@ -417,28 +514,39 @@ export async function fetchHomeDashboard(params: { year: number; month: number }
   const cotidianosPresupuestado = cotidianosPresupuestados;
 
   // -----------------------
-  // ✅ Endeudamiento
+  // Patrimonio + Endeudamiento
   // -----------------------
+  const liquidezTotal = n((balance as any)?.liquidez_actual_total);
   const endeudamientoTotalDeuda = n(endeudamientoSummary?.totalDeuda);
 
-  // Patrimonio bruto = Valor Mercado Total (Home)
   const patrimonioBruto = n(patrimonioSummary?.valorMercadoTotal);
+  const patrimonioValorInversionesTotal = n(inversionesSummary?.valorInversionesTotal);
 
-  // Si no hay patrimonio, devolvemos null para UI "—"
-  const endeudamientoPct = patrimonioBruto > 0 ? Number(((endeudamientoTotalDeuda / patrimonioBruto) * 100).toFixed(2)) : null;
+  // Patrimonio = propiedades + inversiones + liquidez - deuda
+  const patrimonioTotal = Number(
+    (
+      patrimonioBruto +
+      patrimonioValorInversionesTotal +
+      liquidezTotal -
+      endeudamientoTotalDeuda
+    ).toFixed(2)
+  );
+
+  // El % de endeudamiento se mantiene sobre base propiedades (VM total)
+  const endeudamientoPct = patrimonioBruto > 0
+    ? Number(((endeudamientoTotalDeuda / patrimonioBruto) * 100).toFixed(2))
+    : null;
 
   return {
     year,
     month,
 
-    liquidezTotal: n((balance as any)?.liquidez_actual_total),
+    liquidezTotal,
     saldoPrevistoFinMes: n((balance as any)?.liquidez_prevista_total),
 
     ingresosMes,
     gastosMes,
     ahorroMes,
-
-    // ✅ campo opcional, no debería romper consumidores actuales
     ingresosMesTotalIncluyendoExtras,
 
     ingresosPresupuestados,
@@ -482,10 +590,16 @@ export async function fetchHomeDashboard(params: { year: number; month: number }
     patrimonioNoiTotal: patrimonioSummary.noiTotal,
     patrimonioEquityTotal: patrimonioSummary.equityTotal,
     patrimonioRentabilidadBrutaMediaPct: patrimonioSummary.rentabilidadBrutaMediaPct,
-
     patrimonioNoiSobreVmPct: patrimonioSummary.noiSobreVmPct,
     patrimonioLtvAproxPct: patrimonioSummary.ltvAproxPct,
     patrimonioNoiMensual: patrimonioSummary.noiMensual,
+
+    patrimonioValorInversionesTotal,
+    inversionesActivasCount: inversionesSummary.inversionesActivasCount,
+    inversionesRoiEsperadoMedioPct: inversionesSummary.roiEsperadoMedioPct,
+    inversionesIrrEsperadaMediaPct: inversionesSummary.irrEsperadaMediaPct,
+
+    patrimonioTotal,
 
     endeudamientoTotalDeuda,
     endeudamientoPct,

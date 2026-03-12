@@ -1,28 +1,31 @@
 """
+Archivo: backend/app/main.py
+Versión: 1.1.0
+
+Descripción:
 Punto de entrada principal del backend de GapptoMobile v3.
 
-Aquí definimos:
-- La instancia de FastAPI.
-- CORS.
-- Endpoints base: /, /health, /api/health, /ready.
-- Endpoint debug: /__routes.
-- Middleware debug de Authorization en gastos-cotidianos.
-- Routers de negocio (api/v1), incluyendo:
-    * patrimonio
-    * préstamos
-    * inversiones
-    * gestión de alquileres
-- Router técnico de gestión de BD (api/db): sync Neon/Supabase/Sheets.
+Funcionalidades incluidas:
+- Creación de la instancia FastAPI
+- Configuración CORS
+- Endpoints base: /, /health, /api/health, /ready
+- Endpoint debug: /__routes
+- Middleware debug de Authorization en gastos-cotidianos
+- Registro de routers de negocio api/v1
+- Registro del nuevo router principal del dominio BOT
+- Registro del router técnico de gestión de BD
 
-IMPORTANTE:
-- Cargamos backend/.env antes de inicializar engine / adapters.
-- Preparación de credenciales Google (Sheets) NO debe bloquear el arranque.
+Notas de diseño:
+- Se sustituye el antiguo import de bot_router.py por el nuevo
+  router principal ubicado en app/api/v1/bot/router.py.
+- La base estable para BOT_SERVICE queda en /api/v1/bot.
+- Este archivo no debe contener lógica de negocio; solo bootstrap,
+  healthchecks, middleware e inclusión de routers.
 """
 
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Callable
 
 # ---------------------------------------------------------------------------
 # 0) Carga de variables de entorno (backend/.env) ANTES de importar engine
@@ -235,15 +238,17 @@ from backend.app.api.v1 import (
     inversiones_router,
     endeudamiento_router,
     gestion_alquiler_router,
-    bot_router,  # ✅ NUEVO
 )
+
+# Router principal BOT en nueva ubicación
+from backend.app.api.v1.bot.router import router as bot_router
 
 API_V1 = "/api/v1"
 
 app.include_router(auth_router.router, prefix=API_V1)
 
-app.include_router(gastos_router.router,            prefix=f"{API_V1}/gastos")
-app.include_router(ingresos_router.router,          prefix=f"{API_V1}/ingresos")
+app.include_router(gastos_router.router, prefix=f"{API_V1}/gastos")
+app.include_router(ingresos_router.router, prefix=f"{API_V1}/ingresos")
 app.include_router(gastos_cotidianos_router.router, prefix=f"{API_V1}/gastos-cotidianos")
 
 app.include_router(cuentas_router.router, prefix=API_V1)
@@ -265,13 +270,11 @@ app.include_router(analytics_router.router, prefix=API_V1)
 app.include_router(cierre_mensual_router.router, prefix=API_V1)
 app.include_router(reinicio_router.router, prefix=API_V1)
 app.include_router(inversiones_router.router, prefix=API_V1)
-app.include_router(bot_router.router, prefix=API_V1)
-
-# ✅ NUEVO: endeudamiento
 app.include_router(endeudamiento_router.router, prefix=API_V1)
-
-# ✅ NUEVO: gestión de alquileres
 app.include_router(gestion_alquiler_router.router, prefix=API_V1)
+
+# BOT: base estable /api/v1/bot/*
+app.include_router(bot_router, prefix=API_V1)
 
 # Router técnico BD: /api/db/*
 # OJO: db_router.router ya tiene prefix="/db"

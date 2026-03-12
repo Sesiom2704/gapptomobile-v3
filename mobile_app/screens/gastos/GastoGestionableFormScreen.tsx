@@ -1,40 +1,18 @@
 /**
- * Archivo: screens/gastos/GastoGestionableFormScreen.tsx
- *
- * Objetivo del ajuste actual (SOLUCIÓN AL “REINICIO” TRAS CREAR PROVEEDOR/TIPO):
- * - Al volver desde AuxEntityForm con auxResult (proveedor/tipo_gasto), el formulario NO debe resetearse.
- * - Debe mantener todos los campos tal y como estaban y, además, dejar preseleccionado el auxiliar creado.
- *
- * Causa típica:
- * - useResetFormOnFocus resetea en “Alta/Nuevo” al recuperar foco, y la vuelta desde AuxEntityForm
- *   también recupera foco. Si no lo bloqueamos explícitamente, se pierde el estado.
- *
- * Implementación:
- * - Se introduce skipResetOnNextFocusRef:
- *    - Se activa (true) justo antes de navegar a AuxEntityForm.
- *    - Al volver (primer foco), evita que el reset se ejecute.
- * - Se envuelve el onReset con un guard:
- *    - Si hay auxResult pendiente, NO se resetea.
- *    - Si skipResetOnNextFocusRef está activo, NO se resetea y se consume el flag.
- *
- * Importante:
- * - No se elimina ninguna funcionalidad existente.
- * - Se mantiene la lógica de periodicidad preset extra (solo PAGO UNICO).
- *
- * AJUSTE NUEVO (comentarios):
- * - Se introduce `comentariosDirty` para que el API sepa cuándo debe enviar `comentarios`.
- *   Si no está dirty, el update NO debe pisar comentarios existentes en BD.
- *
- * AJUSTE NUEVO (importe vs importe_cuota):
- * - Para "gestionables" en general, se mantiene la relación:
- *    - Editar Importe total recalcula Importe cuota (y viceversa), con locks para evitar bucles.
- * - EXCEPCIÓN: segmento_id === 'COT-12345' (COTIDIANOS)
- *    - Debe permitir editar importe e importe_cuota por separado.
- *    - En cotidianos NO se recalcula automáticamente el otro campo y NO se aplican locks.
+ * Ruta: screens/gastos/GastoGestionableFormScreen.tsx
+ * Versión: 1.7.1
+ * Descripción:
+ * Formulario de gasto gestionable para alta, edición, duplicado y consulta.
+ * Mantiene toda la lógica existente y añade:
+ * - visualización correcta de "Último pago" en Opciones avanzadas,
+ * - formato de auditoría alineado con IngresoFormScreen,
+ * - filtro previo de proveedores por rama mediante pills,
+ *   mostrando el nombre de la rama y filtrando por rama_id,
+ * - pills compactas exclusivas para el filtro de proveedores.
  */
 
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { View, Text, TextInput, Alert, TouchableOpacity } from 'react-native';
+import { View, Text, TextInput, Alert, TouchableOpacity, StyleSheet } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import DateTimePicker, { DateTimePickerEvent } from '@react-native-community/datetimepicker';
 import { useFocusEffect } from '@react-navigation/native';
@@ -43,7 +21,7 @@ import { FormSection } from '../../components/forms/FormSection';
 import { commonFormStyles } from '../../components/forms/formStyles';
 import { PillButton } from '../../components/ui/PillButton';
 import { AccountPill } from '../../components/ui/AccountPill';
-import { colors } from '../../theme';
+import { colors, spacing } from '../../theme';
 
 import FormScreen from '../../components/forms/FormScreen';
 import { FormActionButton } from '../../components/ui/FormActionButton';
@@ -68,29 +46,39 @@ import {
   Gasto,
 } from '../../services/gastosApi';
 
-import { SEGMENTOS, RANGOS_PAGO, VIVIENDAS_SEGMENTO_ID, MAX_PROVEEDORES_SUGERENCIAS } from '../../constants/general';
+import {
+  SEGMENTOS,
+  RANGOS_PAGO,
+  VIVIENDAS_SEGMENTO_ID,
+  MAX_PROVEEDORES_SUGERENCIAS,
+} from '../../constants/general';
 
 import { PERIODICIDADES } from '../../constants/finance';
-import { parseEuroToNumber, formatFechaCorta, appendMonthYearSuffix } from '../../utils/format';
+import {
+  parseEuroToNumber,
+  formatFechaCorta,
+  formatDateTimeShort,
+  appendMonthYearSuffix,
+} from '../../utils/format';
 
 type Props = {
   navigation: any;
   route: any;
 };
 
-/**
- * Normaliza el valor de periodicidad para el caso particular "PAGO UNICO"
- * (algunas entradas podían venir con variaciones).
- */
+const ALL_PROVIDER_RAMAS_KEY = '__ALL_PROVIDER_RAMAS__';
+
+type ProviderRamaOption = {
+  id: string;
+  nombre: string;
+};
+
 function normalizePagoUnico(value: string): string {
   const v = (value || '').trim().toUpperCase();
   if (v === 'PAGO UNICO') return 'PAGO UNICO';
   return value;
 }
 
-/**
- * Calcula el rango de pago sugerido a partir de una fecha ISO (YYYY-MM-DD).
- */
 function getRangoFromDateString(dateStr: string): string {
   const d = new Date(dateStr);
   if (Number.isNaN(d.getTime())) return '1-3';
@@ -106,20 +94,18 @@ function getRangoFromDateString(dateStr: string): string {
   return '28-31';
 }
 
+function getProveedorRamaNombre(proveedor: Proveedor): string {
+  const relName = proveedor?.rama_rel?.nombre?.trim();
+  if (relName) return relName;
+  const ramaId = proveedor?.rama_id?.trim();
+  return ramaId || 'SIN RAMA';
+}
+
 export const GastoGestionableFormScreen: React.FC<Props> = ({ navigation, route }) => {
   const styles = commonFormStyles;
 
-  // =========================================================
-  // ✅ FIX: evitar reset al volver de AuxEntityForm
-  // ---------------------------------------------------------
-  // Se activa justo antes de navegar a AuxEntityForm.
-  // En el primer foco de vuelta, bloquea el reset y se consume.
-  // =========================================================
   const skipResetOnNextFocusRef = useRef<boolean>(false);
 
-  // ========================
-  // Modo de pantalla
-  // ========================
   const preset: 'standard' | 'extra' = route?.params?.preset ?? 'standard';
   const duplicate: boolean = route?.params?.duplicate === true;
 
@@ -136,9 +122,6 @@ export const GastoGestionableFormScreen: React.FC<Props> = ({ navigation, route 
   const returnToScreen: string | undefined = route?.params?.returnToScreen;
   const returnToParams: any | undefined = route?.params?.returnToParams;
 
-  /**
-   * Back coherente con navegación contextual.
-   */
   const handleBack = () => {
     if (returnToTab) {
       if (returnToScreen) {
@@ -161,115 +144,66 @@ export const GastoGestionableFormScreen: React.FC<Props> = ({ navigation, route 
     navigation.goBack();
   };
 
-  // ========================
-  // Estado del formulario (campos)
-  // ========================
   const [nombre, setNombre] = useState<string>(gastoSource?.nombre ?? '');
-
-  /**
-   * Campo "Comentarios"
-   */
   const [comentarios, setComentarios] = useState<string>((gastoAny?.comentarios ?? '') as string);
-
-  /**
-   * ✅ NUEVO: bandera dirty para comentarios.
-   * - En edición: false (no pisar si el usuario no toca el campo)
-   * - Se pone true cuando el usuario escribe/borra.
-   */
   const [comentariosDirty, setComentariosDirty] = useState<boolean>(false);
 
   const [segmentoId, setSegmentoId] = useState<string | null>(gastoSource?.segmento_id ?? null);
   const [tipoId, setTipoId] = useState<string | null>(gastoSource?.tipo_id ?? null);
 
-  /**
-   * ✅ NUEVO: flag de "cotidiano".
-   * - En COTIDIANOS (segmento_id === 'COT-12345') se permite editar
-   *   importe e importe_cuota por separado (sin recalcular ni bloquear).
-   */
   const isCotidiano = useMemo(() => segmentoId === 'COT-12345', [segmentoId]);
 
-  // ========================
-  // Catálogos
-  // ========================
   const [tipos, setTipos] = useState<TipoGasto[]>([]);
   const [proveedores, setProveedores] = useState<Proveedor[]>([]);
   const [cuentas, setCuentas] = useState<Cuenta[]>([]);
   const [viviendas, setViviendas] = useState<Vivienda[]>([]);
 
-  // ========================
-  // Proveedor (selector con búsqueda)
-  // ========================
   const [proveedorSeleccionado, setProveedorSeleccionado] = useState<Proveedor | null>(null);
   const [busquedaProveedor, setBusquedaProveedor] = useState('');
+  const [ramaProveedorFiltroId, setRamaProveedorFiltroId] = useState<string>(ALL_PROVIDER_RAMAS_KEY);
 
-  // Campo adicional
   const [tienda, setTienda] = useState<string>(gastoSource?.tienda ?? '');
-
-  // Vinculaciones
   const [cuentaId, setCuentaId] = useState<string | null>(gastoSource?.cuenta_id ?? null);
   const [viviendaId, setViviendaId] = useState<string | null>(
     (gastoSource?.referencia_vivienda_id as string | null | undefined) ?? null
   );
 
-  // Cuotas / importes
   const [numCuotas, setNumCuotas] = useState<number>(gastoSource?.cuotas ?? 1);
   const [importeCuota, setImporteCuota] = useState<string>(
     gastoSource?.importe_cuota != null ? String(gastoSource.importe_cuota) : ''
   );
-  const [importeTotal, setImporteTotal] = useState<string>(gastoSource?.importe != null ? String(gastoSource.importe) : '');
+  const [importeTotal, setImporteTotal] = useState<string>(
+    gastoSource?.importe != null ? String(gastoSource.importe) : ''
+  );
 
-  // ========================
-  // Periodicidad
-  // ========================
   const [periodicidad, setPeriodicidad] = useState<string>(() => {
-    // 1) Si viene de backend en edición, respetar.
     if (gastoSource?.periodicidad) return normalizePagoUnico(gastoSource.periodicidad);
-
-    // 2) Si es alta nueva (no edit) y preset extra: PAGO UNICO por defecto.
     if (!isEdit && preset === 'extra') return 'PAGO UNICO';
-
-    // 3) Default estándar
     return 'MENSUAL';
   });
 
-  /**
-   * ✅ Helper: lista de periodicidades visibles según preset.
-   * - preset 'extra' => SOLO 'PAGO UNICO' (igual que IngresoForm).
-   * - preset 'standard' => todas las periodicidades.
-   */
   const periodicidadesForPreset = useMemo<string[]>(() => {
     if (preset === 'extra') return ['PAGO UNICO'];
     return [...PERIODICIDADES];
   }, [preset]);
 
-  /**
-   * ✅ Hardening:
-   * Si estamos en preset extra, no permitimos que periodicidad quede en otro valor.
-   */
   useEffect(() => {
     if (preset !== 'extra') return;
-
     const per = normalizePagoUnico(periodicidad);
     if (per !== 'PAGO UNICO') {
       setPeriodicidad('PAGO UNICO');
     }
   }, [preset, periodicidad]);
 
-  // Locks para evitar bucles de cálculo cuota/total
   const [lockImporteCuota, setLockImporteCuota] = useState(false);
   const [lockImporteTotal, setLockImporteTotal] = useState(false);
 
-  /**
-   * ✅ NUEVO: si cambiamos a COTIDIANO, no queremos locks activos.
-   * Esto evita que un lock residual deje un campo "bloqueado" al cambiar el segmento.
-   */
   useEffect(() => {
     if (!isCotidiano) return;
     setLockImporteCuota(false);
     setLockImporteTotal(false);
   }, [isCotidiano]);
 
-  // Campos “solo edición”
   const [cuotasPagadas, setCuotasPagadas] = useState<number>(gastoAny?.cuotas_pagadas ?? 0);
   const [cuotasRestantes, setCuotasRestantes] = useState<number>(
     gastoAny?.cuotas_restantes ?? Math.max((gastoSource?.cuotas ?? 0) - (gastoAny?.cuotas_pagadas ?? 0), 0)
@@ -278,50 +212,60 @@ export const GastoGestionableFormScreen: React.FC<Props> = ({ navigation, route 
   const [prestamoId, setPrestamoId] = useState<string>(gastoAny?.prestamo_id ?? gastoAny?.prestamoId ?? '');
   const [numCuota, setNumCuota] = useState<number>(gastoAny?.num_cuota ?? 1);
 
-  // Fecha / planificación
   const hoyIso = new Date().toISOString().slice(0, 10);
   const [fecha, setFecha] = useState<string>(gastoSource?.fecha ?? hoyIso);
   const [showDatePicker, setShowDatePicker] = useState(false);
   const [rangoPago, setRangoPago] = useState<string>(gastoSource?.rango_pago ?? '1-3');
 
-  // Avanzado
   const [showAdvanced, setShowAdvanced] = useState(false);
   const [referenciaGasto, setReferenciaGasto] = useState<string>(
     (gastoSource?.referencia_gasto as string | null | undefined) ?? ''
   );
 
-  // Estado (solo edición, pero se conserva)
   const [activo, setActivo] = useState<boolean>(gastoAny?.activo ?? true);
   const [pagado, setPagado] = useState<boolean>(gastoAny?.pagado ?? false);
   const [kpi, setKpi] = useState<boolean>(gastoAny?.kpi ?? false);
 
-  // Auditoría
   const createOn: string | null = gastoAny?.createon ?? null;
   const modifiedOn: string | null = gastoAny?.modifiedon ?? null;
   const inactivatedOn: string | null = gastoAny?.inactivatedon ?? null;
   const ultimoPagoOn: string | null = gastoAny?.ultimo_pago_on ?? null;
   const userName: string | null = gastoAny?.user_nombre ?? gastoAny?.userName ?? gastoAny?.user_id ?? null;
 
-  // Refresh UI
   const [refreshing, setRefreshing] = useState(false);
 
-  // ========================
-  // Reset centralizado al foco (solo Alta/Nuevo; NO duplicado)
-  // ========================
+  const proveedorRamaOptions = useMemo<ProviderRamaOption[]>(() => {
+    const map = new Map<string, ProviderRamaOption>();
+
+    for (const proveedor of proveedores ?? []) {
+      const ramaId = proveedor?.rama_id?.trim();
+      if (!ramaId) continue;
+
+      if (!map.has(ramaId)) {
+        map.set(ramaId, {
+          id: ramaId,
+          nombre: getProveedorRamaNombre(proveedor),
+        });
+      }
+    }
+
+    return Array.from(map.values()).sort((a, b) => a.nombre.localeCompare(b.nombre, 'es'));
+  }, [proveedores]);
+
   const resetFormToNew = React.useCallback(() => {
     const now = new Date();
     const hoy = now.toISOString().slice(0, 10);
 
     setNombre('');
-
     setComentarios('');
-    setComentariosDirty(false); // ✅ reset dirty
+    setComentariosDirty(false);
 
     setSegmentoId(null);
     setTipoId(null);
 
     setProveedorSeleccionado(null);
     setBusquedaProveedor('');
+    setRamaProveedorFiltroId(ALL_PROVIDER_RAMAS_KEY);
 
     setTienda('');
 
@@ -332,13 +276,11 @@ export const GastoGestionableFormScreen: React.FC<Props> = ({ navigation, route 
     setImporteCuota('');
     setImporteTotal('');
 
-    // ✅ mantiene la regla: preset extra => PAGO UNICO
     setPeriodicidad(preset === 'extra' ? 'PAGO UNICO' : 'MENSUAL');
 
     setLockImporteCuota(false);
     setLockImporteTotal(false);
 
-    // Campos “solo edit”
     setCuotasPagadas(0);
     setCuotasRestantes(0);
     setImportePendiente(0);
@@ -352,7 +294,6 @@ export const GastoGestionableFormScreen: React.FC<Props> = ({ navigation, route 
     setShowAdvanced(false);
     setReferenciaGasto('');
 
-    // Estado (en alta)
     setActivo(true);
     setPagado(false);
     setKpi(false);
@@ -360,18 +301,11 @@ export const GastoGestionableFormScreen: React.FC<Props> = ({ navigation, route 
     console.log('[GastoGestionableForm][RESET] Form reseteado (Alta/Nuevo).');
   }, [preset]);
 
-  /**
-   * ✅ Guard para que el reset se comporte como en IngresoForm:
-   * - NO resetear si venimos de AuxEntityForm con auxResult.
-   * - NO resetear en el primer foco inmediatamente posterior a navegar a AuxEntityForm.
-   */
   const guardedResetOnFocus = React.useCallback(() => {
     const hasAuxResult = !!route?.params?.auxResult;
 
     if (hasAuxResult) {
-      // Consumimos también el flag por seguridad (aunque el auxResult es el guard principal).
       if (skipResetOnNextFocusRef.current) skipResetOnNextFocusRef.current = false;
-
       console.log('[GastoGestionableForm][RESET] Skip reset: auxResult pendiente (retorno AuxEntityForm).');
       return;
     }
@@ -392,9 +326,6 @@ export const GastoGestionableFormScreen: React.FC<Props> = ({ navigation, route 
     onReset: guardedResetOnFocus,
   });
 
-  // ========================
-  // Duplicado
-  // ========================
   useEffect(() => {
     if (!duplicate || !gastoSource) return;
 
@@ -416,9 +347,6 @@ export const GastoGestionableFormScreen: React.FC<Props> = ({ navigation, route 
     }
   }, [duplicate, gastoSource]);
 
-  // ========================
-  // Retorno desde AuxEntityForm
-  // ========================
   useFocusEffect(
     React.useCallback(() => {
       let alive = true;
@@ -428,9 +356,6 @@ export const GastoGestionableFormScreen: React.FC<Props> = ({ navigation, route 
         if (!res) return;
 
         try {
-          // ------------------------
-          // Tipo de gasto creado
-          // ------------------------
           if (res.type === 'tipo_gasto' && res.item) {
             const nuevoTipo = res.item as TipoGasto;
 
@@ -455,9 +380,6 @@ export const GastoGestionableFormScreen: React.FC<Props> = ({ navigation, route 
             console.log('[GastoGestionableForm][AUX] Tipo gasto seleccionado:', nuevoTipo.id);
           }
 
-          // ------------------------
-          // Proveedor creado
-          // ------------------------
           if (res.type === 'proveedor' && res.item) {
             const nuevoProv = res.item as Proveedor;
 
@@ -474,11 +396,11 @@ export const GastoGestionableFormScreen: React.FC<Props> = ({ navigation, route 
             setProveedores(mergedProv);
             setProveedorSeleccionado(nuevoProv);
             setBusquedaProveedor('');
+            setRamaProveedorFiltroId(nuevoProv?.rama_id ?? ALL_PROVIDER_RAMAS_KEY);
 
             console.log('[GastoGestionableForm][AUX] Proveedor seleccionado:', nuevoProv.id);
           }
         } finally {
-          // Limpieza del auxResult para no reprocesarlo
           navigation.setParams({ auxResult: undefined });
         }
       })();
@@ -489,13 +411,14 @@ export const GastoGestionableFormScreen: React.FC<Props> = ({ navigation, route 
     }, [route?.params?.auxResult, navigation, segmentoId])
   );
 
-  // ========================
-  // Carga catálogos base
-  // ========================
   useEffect(() => {
     const loadStatic = async () => {
       try {
-        const [provRes, ctasRes, vivsRes] = await Promise.all([fetchProveedores(), fetchCuentas(), fetchViviendas()]);
+        const [provRes, ctasRes, vivsRes] = await Promise.all([
+          fetchProveedores(),
+          fetchCuentas(),
+          fetchViviendas(),
+        ]);
         setProveedores(provRes);
         setCuentas(ctasRes);
         setViviendas(vivsRes);
@@ -507,7 +430,6 @@ export const GastoGestionableFormScreen: React.FC<Props> = ({ navigation, route 
     void loadStatic();
   }, []);
 
-  // Preselección proveedor en edición
   useEffect(() => {
     if (!gastoSource || !gastoSource.proveedor_id) return;
     if (!proveedores.length) return;
@@ -516,7 +438,6 @@ export const GastoGestionableFormScreen: React.FC<Props> = ({ navigation, route 
     if (found) setProveedorSeleccionado(found);
   }, [gastoSource, proveedores]);
 
-  // Re-sincronización proveedorSeleccionado con catálogo
   useEffect(() => {
     if (!proveedorSeleccionado) return;
     if (!proveedores.length) return;
@@ -525,7 +446,6 @@ export const GastoGestionableFormScreen: React.FC<Props> = ({ navigation, route 
     if (found && found !== proveedorSeleccionado) setProveedorSeleccionado(found);
   }, [proveedores, proveedorSeleccionado]);
 
-  // Tipos por segmento
   useEffect(() => {
     const loadTipos = async () => {
       try {
@@ -544,7 +464,6 @@ export const GastoGestionableFormScreen: React.FC<Props> = ({ navigation, route 
     void loadTipos();
   }, [segmentoId, gastoSource]);
 
-  // Refresh manual
   const handleRefresh = async () => {
     setRefreshing(true);
     try {
@@ -566,7 +485,6 @@ export const GastoGestionableFormScreen: React.FC<Props> = ({ navigation, route 
     }
   };
 
-  // Derived
   const tiposFiltrados = useMemo(() => {
     if (!segmentoId) return tipos;
     return tipos.filter((t) => t.segmento_id === segmentoId);
@@ -576,25 +494,26 @@ export const GastoGestionableFormScreen: React.FC<Props> = ({ navigation, route 
 
   const proveedoresFiltrados = useMemo(() => {
     const term = busquedaProveedor.trim().toLowerCase();
-    let base = proveedores ?? [];
-    if (term) base = base.filter((p) => p.nombre.toLowerCase().includes(term));
-    return base.slice(0, MAX_PROVEEDORES_SUGERENCIAS);
-  }, [busquedaProveedor, proveedores]);
 
-  // ========================
-  // Handlers: cuotas/importes
-  // ========================
+    let base = proveedores ?? [];
+
+    if (ramaProveedorFiltroId !== ALL_PROVIDER_RAMAS_KEY) {
+      base = base.filter((p) => (p.rama_id ?? null) === ramaProveedorFiltroId);
+    }
+
+    if (term) {
+      base = base.filter((p) => p.nombre.toLowerCase().includes(term));
+    }
+
+    return base.slice(0, MAX_PROVEEDORES_SUGERENCIAS);
+  }, [busquedaProveedor, proveedores, ramaProveedorFiltroId]);
+
   const handleChangeNumCuotas = (text: string) => {
     const n = Number(text.replace(/\D/g, ''));
     const cuotas = !n || n <= 0 ? 1 : n;
     setNumCuotas(cuotas);
 
-    /**
-     * ✅ COTIDIANOS:
-     * - No recalculamos automáticamente (permitimos valores independientes).
-     */
     if (isCotidiano) {
-      // Aseguramos que no haya locks residuales.
       if (lockImporteCuota) setLockImporteCuota(false);
       if (lockImporteTotal) setLockImporteTotal(false);
       return;
@@ -613,11 +532,6 @@ export const GastoGestionableFormScreen: React.FC<Props> = ({ navigation, route 
   const handleChangeImporteCuota = (text: string) => {
     setImporteCuota(text);
 
-    /**
-     * ✅ COTIDIANOS:
-     * - No sincronizamos total.
-     * - No bloqueamos ningún campo.
-     */
     if (isCotidiano) {
       if (lockImporteCuota) setLockImporteCuota(false);
       if (lockImporteTotal) setLockImporteTotal(false);
@@ -639,11 +553,6 @@ export const GastoGestionableFormScreen: React.FC<Props> = ({ navigation, route 
   const handleChangeImporteTotal = (text: string) => {
     setImporteTotal(text);
 
-    /**
-     * ✅ COTIDIANOS:
-     * - No sincronizamos cuota.
-     * - No bloqueamos ningún campo.
-     */
     if (isCotidiano) {
       if (lockImporteCuota) setLockImporteCuota(false);
       if (lockImporteTotal) setLockImporteTotal(false);
@@ -662,7 +571,6 @@ export const GastoGestionableFormScreen: React.FC<Props> = ({ navigation, route 
     setLockImporteTotal(false);
   };
 
-  // Recalcular pendientes
   useEffect(() => {
     const restantes = Math.max(numCuotas - cuotasPagadas, 0);
     setCuotasRestantes(restantes);
@@ -671,9 +579,6 @@ export const GastoGestionableFormScreen: React.FC<Props> = ({ navigation, route 
     setImportePendiente(restantes * cuotaNum);
   }, [numCuotas, cuotasPagadas, importeCuota]);
 
-  // ========================
-  // Fecha
-  // ========================
   const handleOpenDatePicker = () => {
     if (readOnly) return;
     setShowDatePicker(true);
@@ -688,20 +593,16 @@ export const GastoGestionableFormScreen: React.FC<Props> = ({ navigation, route 
     setRangoPago(getRangoFromDateString(iso));
   };
 
-  // ========================
-  // Proveedor
-  // ========================
   const handleAddProveedor = () => {
     if (readOnly) return;
 
-    // ✅ IMPORTANTE: marcamos que el siguiente foco es “retorno de hijo”, no “nuevo formulario”
     skipResetOnNextFocusRef.current = true;
     console.log('[GastoGestionableForm][NAV] Ir a AuxEntityForm(proveedor) -> skip reset on return.');
 
     navigation.navigate('AuxEntityForm', {
       auxType: 'proveedor',
       origin: 'gestionables',
-      defaultRamaId: null,
+      defaultRamaId: ramaProveedorFiltroId !== ALL_PROVIDER_RAMAS_KEY ? ramaProveedorFiltroId : null,
       returnKey: 'gestionables-proveedor',
       returnRouteKey: route.key,
       defaultSegmentoId: segmentoId,
@@ -714,9 +615,6 @@ export const GastoGestionableFormScreen: React.FC<Props> = ({ navigation, route 
     setBusquedaProveedor('');
   };
 
-  // ========================
-  // Guardado
-  // ========================
   const handleSave = async () => {
     if (readOnly) return;
 
@@ -729,7 +627,10 @@ export const GastoGestionableFormScreen: React.FC<Props> = ({ navigation, route 
     const cuotaNum = parseEuroToNumber(importeCuota) ?? 0;
     const totalNum = parseEuroToNumber(importeTotal) ?? 0;
     if (cuotaNum <= 0 && totalNum <= 0) {
-      return Alert.alert('Importe inválido', 'Debes indicar un importe de cuota o un importe total mayor que cero.');
+      return Alert.alert(
+        'Importe inválido',
+        'Debes indicar un importe de cuota o un importe total mayor que cero.'
+      );
     }
 
     const basePayload: any = {
@@ -747,9 +648,6 @@ export const GastoGestionableFormScreen: React.FC<Props> = ({ navigation, route 
       fecha,
       rangoPago,
       referenciaGasto: referenciaGasto.trim() || undefined,
-
-      // ✅ Enviamos comentarios y dirty flag.
-      // El service decidirá si incluirlo en el body final.
       comentarios,
       comentariosDirty,
     };
@@ -796,15 +694,15 @@ export const GastoGestionableFormScreen: React.FC<Props> = ({ navigation, route 
     }
   };
 
-  // ========================
-  // Título / subtítulo
-  // ========================
   const title = 'Gasto gestionable';
-  const subtitle = readOnly ? 'Consulta' : isEdit ? 'Edición de gasto' : duplicate ? 'Duplicado' : 'Nuevo gasto gestionable';
+  const subtitle = readOnly
+    ? 'Consulta'
+    : isEdit
+      ? 'Edición de gasto'
+      : duplicate
+        ? 'Duplicado'
+        : 'Nuevo gasto gestionable';
 
-  // ========================
-  // Render
-  // ========================
   return (
     <FormScreen
       title={title}
@@ -845,7 +743,7 @@ export const GastoGestionableFormScreen: React.FC<Props> = ({ navigation, route 
             value={comentarios}
             onChangeText={(t) => {
               setComentarios(t);
-              if (!comentariosDirty) setComentariosDirty(true); // ✅ marca dirty
+              if (!comentariosDirty) setComentariosDirty(true);
             }}
             editable={!readOnly}
             multiline
@@ -885,7 +783,6 @@ export const GastoGestionableFormScreen: React.FC<Props> = ({ navigation, route 
                   return;
                 }
 
-                // ✅ IMPORTANTE: marcamos retorno de hijo para NO resetear al volver
                 skipResetOnNextFocusRef.current = true;
                 console.log('[GastoGestionableForm][NAV] Ir a AuxEntityForm(tipo_gasto) -> skip reset on return.');
 
@@ -902,9 +799,13 @@ export const GastoGestionableFormScreen: React.FC<Props> = ({ navigation, route 
             />
           </View>
 
-          {!segmentoId && <Text style={styles.helperText}>Selecciona primero un segmento para ver los tipos de gasto.</Text>}
+          {!segmentoId && (
+            <Text style={styles.helperText}>Selecciona primero un segmento para ver los tipos de gasto.</Text>
+          )}
 
-          {segmentoId && tiposFiltrados.length === 0 && <Text style={styles.helperText}>No hay tipos de gasto para este segmento.</Text>}
+          {segmentoId && tiposFiltrados.length === 0 && (
+            <Text style={styles.helperText}>No hay tipos de gasto para este segmento.</Text>
+          )}
 
           {segmentoId && tiposFiltrados.length > 0 && (
             <View style={styles.segmentosRow}>
@@ -922,6 +823,45 @@ export const GastoGestionableFormScreen: React.FC<Props> = ({ navigation, route 
               ))}
             </View>
           )}
+        </View>
+
+        <View style={styles.field}>
+          <Text style={styles.label}>Filtrar proveedores por rama</Text>
+          <View style={styles.segmentosRow}>
+            <View style={styles.segmentoWrapper}>
+              <PillButton
+                label="TODOS"
+                size="sm"
+                style={stylesLocal.providerFilterPill}
+                textStyle={stylesLocal.providerFilterPillText}
+                selected={ramaProveedorFiltroId === ALL_PROVIDER_RAMAS_KEY}
+                onPress={() => {
+                  if (readOnly) return;
+                  setRamaProveedorFiltroId(ALL_PROVIDER_RAMAS_KEY);
+                }}
+              />
+            </View>
+
+            {proveedorRamaOptions.map((rama) => (
+              <View key={rama.id} style={styles.segmentoWrapper}>
+                <PillButton
+                  label={rama.nombre}
+                  size="sm"
+                  style={stylesLocal.providerFilterPill}
+                  textStyle={stylesLocal.providerFilterPillText}
+                  selected={ramaProveedorFiltroId === rama.id}
+                  onPress={() => {
+                    if (readOnly) return;
+                    setRamaProveedorFiltroId(rama.id);
+                  }}
+                />
+              </View>
+            ))}
+          </View>
+
+          <Text style={styles.helperText}>
+            Primero puedes acotar por rama y después buscar proveedor por nombre.
+          </Text>
         </View>
 
         <View style={styles.field}>
@@ -1040,7 +980,11 @@ export const GastoGestionableFormScreen: React.FC<Props> = ({ navigation, route 
               </View>
               <View style={styles.col}>
                 <Text style={styles.label}>Cuotas restantes</Text>
-                <TextInput style={[styles.input, styles.inputAdvanced, styles.inputDisabled]} editable={false} value={String(cuotasRestantes)} />
+                <TextInput
+                  style={[styles.input, styles.inputAdvanced, styles.inputDisabled]}
+                  editable={false}
+                  value={String(cuotasRestantes)}
+                />
               </View>
             </View>
 
@@ -1052,7 +996,10 @@ export const GastoGestionableFormScreen: React.FC<Props> = ({ navigation, route 
                   editable={false}
                   value={
                     importePendiente
-                      ? importePendiente.toLocaleString('es-ES', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+                      ? importePendiente.toLocaleString('es-ES', {
+                          minimumFractionDigits: 2,
+                          maximumFractionDigits: 2,
+                        })
                       : '0,00'
                   }
                 />
@@ -1123,7 +1070,10 @@ export const GastoGestionableFormScreen: React.FC<Props> = ({ navigation, route 
               <View key={cta.id} style={styles.accountPillWrapper}>
                 <AccountPill
                   label={cta.anagrama}
-                  subLabel={`${cta.liquidez.toLocaleString('es-ES', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} €`}
+                  subLabel={`${cta.liquidez.toLocaleString('es-ES', {
+                    minimumFractionDigits: 2,
+                    maximumFractionDigits: 2,
+                  })} €`}
                   selected={cuentaId === cta.id}
                   onPress={() => {
                     if (readOnly) return;
@@ -1141,7 +1091,9 @@ export const GastoGestionableFormScreen: React.FC<Props> = ({ navigation, route 
           <Text style={styles.label}>Fecha</Text>
           <FormDateButton valueText={formatFechaCorta(fecha)} onPress={handleOpenDatePicker} disabled={readOnly} />
 
-          {showDatePicker && <DateTimePicker value={new Date(fecha)} mode="date" display="default" onChange={handleDateChange} />}
+          {showDatePicker && (
+            <DateTimePicker value={new Date(fecha)} mode="date" display="default" onChange={handleDateChange} />
+          )}
         </View>
 
         <View style={styles.field}>
@@ -1165,8 +1117,14 @@ export const GastoGestionableFormScreen: React.FC<Props> = ({ navigation, route 
 
       <FormSection title="Opciones avanzadas">
         <TouchableOpacity style={styles.advancedToggle} onPress={() => setShowAdvanced((prev) => !prev)}>
-          <Ionicons name={showAdvanced ? 'chevron-up' : 'chevron-down'} size={16} color={colors.textSecondary} />
-          <Text style={styles.advancedToggleText}>{showAdvanced ? 'Ocultar opciones avanzadas' : 'Mostrar opciones avanzadas'}</Text>
+          <Ionicons
+            name={showAdvanced ? 'chevron-up' : 'chevron-down'}
+            size={16}
+            color={colors.textSecondary}
+          />
+          <Text style={styles.advancedToggleText}>
+            {showAdvanced ? 'Ocultar opciones avanzadas' : 'Mostrar opciones avanzadas'}
+          </Text>
         </TouchableOpacity>
 
         {showAdvanced && (
@@ -1223,14 +1181,18 @@ export const GastoGestionableFormScreen: React.FC<Props> = ({ navigation, route 
                 <View style={styles.fieldRowTwoCols}>
                   <View style={styles.col}>
                     <Text style={styles.label}>Creado el</Text>
-                    <TextInput style={[styles.input, styles.inputAdvanced]} editable={false} value={createOn ? formatFechaCorta(createOn) : ''} />
+                    <TextInput
+                      style={[styles.input, styles.inputAdvanced]}
+                      editable={false}
+                      value={createOn ? formatDateTimeShort(createOn) : ''}
+                    />
                   </View>
                   <View style={styles.col}>
                     <Text style={styles.label}>Inactivado el</Text>
                     <TextInput
                       style={[styles.input, styles.inputAdvanced]}
                       editable={false}
-                      value={inactivatedOn ? formatFechaCorta(inactivatedOn) : ''}
+                      value={inactivatedOn ? formatDateTimeShort(inactivatedOn) : ''}
                     />
                   </View>
                 </View>
@@ -1238,17 +1200,29 @@ export const GastoGestionableFormScreen: React.FC<Props> = ({ navigation, route 
                 <View style={styles.fieldRowTwoCols}>
                   <View style={styles.col}>
                     <Text style={styles.label}>Último pago</Text>
-                    <TextInput style={[styles.input, styles.inputAdvanced]} editable={false} value={ultimoPagoOn ? formatFechaCorta(ultimoPagoOn) : ''} />
+                    <TextInput
+                      style={[styles.input, styles.inputAdvanced]}
+                      editable={false}
+                      value={ultimoPagoOn ? formatDateTimeShort(ultimoPagoOn) : ''}
+                    />
                   </View>
                   <View style={styles.col}>
                     <Text style={styles.label}>Modificado el</Text>
-                    <TextInput style={[styles.input, styles.inputAdvanced]} editable={false} value={modifiedOn ? formatFechaCorta(modifiedOn) : ''} />
+                    <TextInput
+                      style={[styles.input, styles.inputAdvanced]}
+                      editable={false}
+                      value={modifiedOn ? formatDateTimeShort(modifiedOn) : ''}
+                    />
                   </View>
                 </View>
 
                 <View style={styles.field}>
                   <Text style={styles.label}>Usuario</Text>
-                  <TextInput style={[styles.input, styles.inputAdvanced]} editable={false} value={userName ?? ''} />
+                  <TextInput
+                    style={[styles.input, styles.inputAdvanced]}
+                    editable={false}
+                    value={userName ?? ''}
+                  />
                 </View>
               </>
             )}
@@ -1260,3 +1234,15 @@ export const GastoGestionableFormScreen: React.FC<Props> = ({ navigation, route 
 };
 
 export default GastoGestionableFormScreen;
+
+const stylesLocal = StyleSheet.create({
+  providerFilterPill: {
+    minHeight: 28,
+    paddingHorizontal: spacing.sm,
+    paddingVertical: 4,
+  },
+  providerFilterPillText: {
+    fontSize: 11,
+    lineHeight: 13,
+  },
+});

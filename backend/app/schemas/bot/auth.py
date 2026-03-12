@@ -1,5 +1,5 @@
 """
-Archivo: backend/app/schemas/bot_auth.py
+Archivo: backend/app/schemas/bot/auth.py
 Versión: 1.0.0
 
 Descripción:
@@ -75,11 +75,10 @@ class BotAuthContratoOut(BaseModel):
     contrato_id: str
     rol: str
     es_principal: bool = False
-
     estado: str
     fecha_inicio: Optional[date] = None
     fecha_fin: Optional[date] = None
-
+    objeto_alquiler: Optional[str] = None
     vivienda: BotAuthViviendaOut
 
 
