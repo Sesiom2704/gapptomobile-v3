@@ -1,12 +1,14 @@
 /**
  * Ruta: screens/gastos/GastoGestionableFormScreen.tsx
- * Versión: 1.8.0
+ * Versión: 1.8.1
  * Descripción:
  * Formulario de gasto gestionable para alta, edición, duplicado y consulta.
  *
  * Ajustes incluidos:
  * - Carga de detalle real del gasto mediante obtenerGasto(id) para no depender
  *   de objetos parciales recibidos por navegación.
+ * - Corrección de hidratación del formulario para que, cuando llegue el detalle,
+ *   se apliquen sus valores aunque tenga el mismo id que el objeto inicial.
  * - Visualización correcta de "Último pago" y del resto de metadatos avanzados.
  * - Filtro de proveedores por rama dentro de un desplegable.
  * - Mantiene toda la lógica previa: edición, duplicado, readonly, retorno desde
@@ -116,7 +118,7 @@ export const GastoGestionableFormScreen: React.FC<Props> = ({ navigation, route 
   const styles = commonFormStyles;
 
   const skipResetOnNextFocusRef = useRef<boolean>(false);
-  const hydratedFromGastoIdRef = useRef<string | null>(null);
+  const hydratedFromGastoRef = useRef<string | null>(null);
 
   const preset: 'standard' | 'extra' = route?.params?.preset ?? 'standard';
   const duplicate: boolean = route?.params?.duplicate === true;
@@ -124,7 +126,7 @@ export const GastoGestionableFormScreen: React.FC<Props> = ({ navigation, route 
   const gastoSource: Gasto | null = route?.params?.gasto ?? null;
   const routeGastoId: string | null = gastoSource?.id ?? null;
 
-  const [gastoDetalle, setGastoDetalle] = useState<Gasto | null>(gastoSource);
+  const [gastoDetalle, setGastoDetalle] = useState<Gasto | null>(null);
   const gastoActual: Gasto | null = gastoDetalle ?? gastoSource ?? null;
   const gastoAny = gastoActual as any;
 
@@ -358,13 +360,28 @@ export const GastoGestionableFormScreen: React.FC<Props> = ({ navigation, route 
     void loadDetalleGasto();
   }, [loadDetalleGasto]);
 
+  // Importante:
+  // 1) primero puede hidratar con el objeto parcial recibido por navegación,
+  // 2) después debe volver a hidratar cuando llegue el detalle real,
+  // aunque tenga el mismo id.
   useEffect(() => {
-    if (!gastoActual?.id) return;
-    if (hydratedFromGastoIdRef.current === gastoActual.id) return;
+    if (gastoDetalle?.id) {
+      const detailKey = `detail:${gastoDetalle.id}:${gastoDetalle.modifiedon ?? ''}:${gastoDetalle.ultimo_pago_on ?? ''}`;
+      if (hydratedFromGastoRef.current !== detailKey) {
+        hydrateFormFromGasto(gastoDetalle);
+        hydratedFromGastoRef.current = detailKey;
+      }
+      return;
+    }
 
-    hydrateFormFromGasto(gastoActual);
-    hydratedFromGastoIdRef.current = gastoActual.id;
-  }, [gastoActual, hydrateFormFromGasto]);
+    if (gastoSource?.id) {
+      const sourceKey = `source:${gastoSource.id}`;
+      if (hydratedFromGastoRef.current !== sourceKey) {
+        hydrateFormFromGasto(gastoSource);
+        hydratedFromGastoRef.current = sourceKey;
+      }
+    }
+  }, [gastoDetalle, gastoSource, hydrateFormFromGasto]);
 
   // ========================
   // Reset centralizado
@@ -373,7 +390,7 @@ export const GastoGestionableFormScreen: React.FC<Props> = ({ navigation, route 
     const now = new Date();
     const hoy = now.toISOString().slice(0, 10);
 
-    hydratedFromGastoIdRef.current = null;
+    hydratedFromGastoRef.current = null;
 
     setNombre('');
     setComentarios('');
@@ -599,14 +616,12 @@ export const GastoGestionableFormScreen: React.FC<Props> = ({ navigation, route 
   const handleRefresh = async () => {
     setRefreshing(true);
     try {
-      const catalogPromises = [
+      const [provRes, ctasRes, vivsRes, tiposRes] = await Promise.all([
         fetchProveedores(),
         fetchCuentas(),
         fetchViviendas(),
         fetchTiposGasto(segmentoId ?? undefined),
-      ] as const;
-
-      const [provRes, ctasRes, vivsRes, tiposRes] = await Promise.all(catalogPromises);
+      ]);
 
       setProveedores(provRes);
       setCuentas(ctasRes);
@@ -616,7 +631,6 @@ export const GastoGestionableFormScreen: React.FC<Props> = ({ navigation, route 
       if (routeGastoId) {
         const detalle = await obtenerGasto(routeGastoId);
         setGastoDetalle(detalle);
-        hydratedFromGastoIdRef.current = null;
       }
     } catch (err) {
       console.error('[GastoGestionableForm] Error al refrescar catálogos/detalle', err);

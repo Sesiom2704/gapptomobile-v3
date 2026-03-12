@@ -1,22 +1,59 @@
 // mobile_app/services/proveedoresApi.ts
+
+/**
+ * Ruta: mobile_app/services/proveedoresApi.ts
+ * Versión: 1.4.0
+ * Descripción:
+ * Servicio centralizado de proveedores para GapptoMobile.
+ *
+ * Responsabilidades:
+ * - Listar, crear, actualizar y eliminar proveedores.
+ * - Tipar correctamente todos los campos expuestos por backend.
+ * - Dar soporte al formulario auxiliar de proveedores.
+ *
+ * Cambios de esta versión:
+ * - Se añaden todos los campos editables del ORM de Proveedor:
+ *   cif, telefono, email, subsegmento, direccion, codigo_postal,
+ *   persona_contacto, activo, observaciones, acepta_urgencias,
+ *   ambito_servicio, subsegmento_id, created_at, updated_at.
+ * - Se tipa la relación opcional subsegmento_rel.
+ * - Se amplía createProveedorFromAuxForm para soportar todos los campos.
+ * - Se mantienen compatibilidades previas.
+ */
+
 import axios from 'axios';
 import { api } from './api';
 
-/**
- * Servicio centralizado para proveedores.
- *
- * Backend (según tu router):
- * - GET    /api/v1/proveedores
- * - POST   /api/v1/proveedores
- * - PUT    /api/v1/proveedores/{prov_id}
- *
- * IMPORTANTE:
- * - El backend NO recibe localidad_id / region_id / pais_id en ProveedorCreate/Update.
- * - Solo recibe campos de texto: localidad, comunidad, pais (y rama_id).
- */
+// =======================
+// Relaciones ligeras
+// =======================
+
+export type RamaProveedorRel = {
+  id: string;
+  nombre: string;
+};
+
+export type SubsegmentoProveedorRel = {
+  id: string;
+  nombre: string;
+  rama_id?: string | null;
+};
+
+export type LocalidadRel = {
+  id: number;
+  nombre: string;
+  region?: {
+    id: number;
+    nombre: string;
+    pais?: {
+      id: number;
+      nombre: string;
+    } | null;
+  } | null;
+};
 
 // =======================
-// Tipos (DTOs) coherentes con lo que usa la UI
+// Tipos principales
 // =======================
 
 export type ProveedorRead = {
@@ -27,48 +64,92 @@ export type ProveedorRead = {
   localidad?: string | null;
   pais?: string | null;
   comunidad?: string | null;
+  localidad_id?: number | null;
+
+  cif?: string | null;
+  telefono?: string | null;
+  email?: string | null;
 
   /**
-   * Estos “rel” los usas en AuxEntityFormScreen en modo edición:
-   * - editingProveedor.rama_rel?.nombre
-   * - editingProveedor.localidad_rel?.region?.pais?.nombre
-   *
-   * Si tu backend realmente los devuelve en ProveedorRead, perfecto.
-   * Si no, quedan opcionales y no rompen la app.
+   * Compatibilidad:
+   * - `subsegmento` texto legacy
+   * - `subsegmento_id` FK al nuevo auxiliar
    */
-  rama_rel?: { id: string; nombre: string } | null;
+  subsegmento?: string | null;
+  subsegmento_id?: string | null;
 
-  // Si en tu backend ProveedorRead incluye una relación a localidad por FK, será algo así:
-  // (en tu router actual NO se ve, pero tu UI lo usa, por eso lo tipamos opcional)
-  localidad_id?: number | null;
-  localidad_rel?: {
-    id: number;
-    nombre: string;
-    region?: {
-      id: number;
-      nombre: string;
-      pais?: { id: number; nombre: string } | null;
-    } | null;
-  } | null;
+  direccion?: string | null;
+  codigo_postal?: string | null;
+  persona_contacto?: string | null;
+
+  activo?: boolean | null;
+  observaciones?: string | null;
+  acepta_urgencias?: boolean | null;
+  ambito_servicio?: string | null;
+
+  created_at?: string | null;
+  updated_at?: string | null;
+
+  user_id?: number | null;
+
+  rama_rel?: RamaProveedorRel | null;
+  subsegmento_rel?: SubsegmentoProveedorRel | null;
+  localidad_rel?: LocalidadRel | null;
 };
 
 export type ProveedorCreate = {
   nombre: string;
   rama_id: string;
+
+  localidad_id?: number | null;
   localidad?: string | null;
   pais?: string | null;
   comunidad?: string | null;
+
+  cif?: string | null;
+  telefono?: string | null;
+  email?: string | null;
+
+  subsegmento?: string | null;
+  subsegmento_id?: string | null;
+
+  direccion?: string | null;
+  codigo_postal?: string | null;
+  persona_contacto?: string | null;
+
+  activo?: boolean | null;
+  observaciones?: string | null;
+  acepta_urgencias?: boolean | null;
+  ambito_servicio?: string | null;
 };
 
 export type ProveedorUpdate = {
   nombre?: string | null;
   rama_id?: string | null;
+
+  localidad_id?: number | null;
   localidad?: string | null;
   pais?: string | null;
   comunidad?: string | null;
+
+  cif?: string | null;
+  telefono?: string | null;
+  email?: string | null;
+
+  subsegmento?: string | null;
+  subsegmento_id?: string | null;
+
+  direccion?: string | null;
+  codigo_postal?: string | null;
+  persona_contacto?: string | null;
+
+  activo?: boolean | null;
+  observaciones?: string | null;
+  acepta_urgencias?: boolean | null;
+  ambito_servicio?: string | null;
 };
 
-// Alias de compatibilidad (para imports existentes)
+// Alias de compatibilidad
 export type Proveedor = ProveedorRead;
 
 // =======================
@@ -78,8 +159,31 @@ export type Proveedor = ProveedorRead;
 const BASE = '/api/v1/proveedores';
 
 // =======================
-// Helpers de logging
+// Helpers internos
 // =======================
+
+function normalizeOptionalText(value?: string | null): string | null {
+  const s = (value ?? '').trim();
+  return s.length > 0 ? s : null;
+}
+
+function normalizeOptionalBool(value?: boolean | null): boolean | null | undefined {
+  if (typeof value === 'boolean') return value;
+  if (value === null) return null;
+  return undefined;
+}
+
+function compactPayload<T extends Record<string, any>>(payload: T): T {
+  const out: Record<string, any> = {};
+
+  Object.entries(payload).forEach(([key, value]) => {
+    if (value !== undefined) {
+      out[key] = value;
+    }
+  });
+
+  return out as T;
+}
 
 function logAxiosError(prefix: string, err: unknown, ctx?: any) {
   if (axios.isAxiosError(err)) {
@@ -99,10 +203,13 @@ function logAxiosError(prefix: string, err: unknown, ctx?: any) {
 }
 
 // =======================
-// API
+// API pública
 // =======================
 
-export async function listProveedores(params?: { rama_id?: string }): Promise<ProveedorRead[]> {
+export async function listProveedores(params?: {
+  rama_id?: string;
+  subsegmento_id?: string;
+}): Promise<ProveedorRead[]> {
   try {
     const res = await api.get<ProveedorRead[]>(BASE, { params });
     return Array.isArray(res.data) ? res.data : [];
@@ -114,7 +221,33 @@ export async function listProveedores(params?: { rama_id?: string }): Promise<Pr
 
 export async function createProveedor(payload: ProveedorCreate): Promise<ProveedorRead> {
   try {
-    const res = await api.post<ProveedorRead>(BASE, payload);
+    const safePayload = compactPayload<ProveedorCreate>({
+      nombre: payload.nombre,
+      rama_id: payload.rama_id,
+
+      localidad_id: payload.localidad_id ?? undefined,
+      localidad: normalizeOptionalText(payload.localidad),
+      comunidad: normalizeOptionalText(payload.comunidad),
+      pais: normalizeOptionalText(payload.pais),
+
+      cif: normalizeOptionalText(payload.cif),
+      telefono: normalizeOptionalText(payload.telefono),
+      email: normalizeOptionalText(payload.email),
+
+      subsegmento: normalizeOptionalText(payload.subsegmento),
+      subsegmento_id: normalizeOptionalText(payload.subsegmento_id),
+
+      direccion: normalizeOptionalText(payload.direccion),
+      codigo_postal: normalizeOptionalText(payload.codigo_postal),
+      persona_contacto: normalizeOptionalText(payload.persona_contacto),
+
+      activo: normalizeOptionalBool(payload.activo),
+      observaciones: normalizeOptionalText(payload.observaciones),
+      acepta_urgencias: normalizeOptionalBool(payload.acepta_urgencias),
+      ambito_servicio: normalizeOptionalText(payload.ambito_servicio),
+    });
+
+    const res = await api.post<ProveedorRead>(BASE, safePayload);
     return res.data;
   } catch (err) {
     logAxiosError('[proveedoresApi] Error createProveedor', err, { payload });
@@ -122,9 +255,60 @@ export async function createProveedor(payload: ProveedorCreate): Promise<Proveed
   }
 }
 
-export async function updateProveedor(provId: string, payload: ProveedorUpdate): Promise<ProveedorRead> {
+export async function updateProveedor(
+  provId: string,
+  payload: ProveedorUpdate
+): Promise<ProveedorRead> {
   try {
-    const res = await api.put<ProveedorRead>(`${BASE}/${encodeURIComponent(provId)}`, payload);
+    const safePayload = compactPayload<ProveedorUpdate>({
+      nombre: payload.nombre != null ? payload.nombre : undefined,
+      rama_id: payload.rama_id != null ? payload.rama_id : undefined,
+
+      localidad_id: payload.localidad_id ?? undefined,
+      localidad: payload.localidad !== undefined ? normalizeOptionalText(payload.localidad) : undefined,
+      comunidad: payload.comunidad !== undefined ? normalizeOptionalText(payload.comunidad) : undefined,
+      pais: payload.pais !== undefined ? normalizeOptionalText(payload.pais) : undefined,
+
+      cif: payload.cif !== undefined ? normalizeOptionalText(payload.cif) : undefined,
+      telefono: payload.telefono !== undefined ? normalizeOptionalText(payload.telefono) : undefined,
+      email: payload.email !== undefined ? normalizeOptionalText(payload.email) : undefined,
+
+      subsegmento: payload.subsegmento !== undefined ? normalizeOptionalText(payload.subsegmento) : undefined,
+      subsegmento_id:
+        payload.subsegmento_id !== undefined
+          ? normalizeOptionalText(payload.subsegmento_id)
+          : undefined,
+
+      direccion: payload.direccion !== undefined ? normalizeOptionalText(payload.direccion) : undefined,
+      codigo_postal:
+        payload.codigo_postal !== undefined
+          ? normalizeOptionalText(payload.codigo_postal)
+          : undefined,
+      persona_contacto:
+        payload.persona_contacto !== undefined
+          ? normalizeOptionalText(payload.persona_contacto)
+          : undefined,
+
+      activo:
+        payload.activo !== undefined ? normalizeOptionalBool(payload.activo) : undefined,
+      observaciones:
+        payload.observaciones !== undefined
+          ? normalizeOptionalText(payload.observaciones)
+          : undefined,
+      acepta_urgencias:
+        payload.acepta_urgencias !== undefined
+          ? normalizeOptionalBool(payload.acepta_urgencias)
+          : undefined,
+      ambito_servicio:
+        payload.ambito_servicio !== undefined
+          ? normalizeOptionalText(payload.ambito_servicio)
+          : undefined,
+    });
+
+    const res = await api.put<ProveedorRead>(
+      `${BASE}/${encodeURIComponent(provId)}`,
+      safePayload
+    );
     return res.data;
   } catch (err) {
     logAxiosError('[proveedoresApi] Error updateProveedor', err, { provId, payload });
@@ -132,9 +316,6 @@ export async function updateProveedor(provId: string, payload: ProveedorUpdate):
   }
 }
 
-/**
- * Solo funcionará cuando implementes DELETE en backend.
- */
 export async function deleteProveedor(provId: string): Promise<void> {
   try {
     await api.delete(`${BASE}/${encodeURIComponent(provId)}`);
@@ -145,37 +326,67 @@ export async function deleteProveedor(provId: string): Promise<void> {
 }
 
 // =======================
-// Helper específico para el formulario AuxEntityFormScreen
+// Helper específico para AuxEntityFormScreen
 // =======================
 
-/**
- * Este helper existía en tu pantalla, pero no estaba en el fichero que me pegaste antes.
- * Lo implementamos aquí de forma consistente con el backend:
- *
- * - No enviamos localidad_id (el backend no lo acepta).
- * - Priorizamos textos: localidadTexto/comunidadTexto/paisTexto.
- */
 export async function createProveedorFromAuxForm(args: {
   nombre: string;
   ramaId: string;
-  localidadId?: number | null; // se conserva por compatibilidad, pero NO se envía al backend
+
+  localidadId?: number | null;
   localidadTexto?: string | null;
   comunidadTexto?: string | null;
   paisTexto?: string | null;
+
+  cif?: string | null;
+  telefono?: string | null;
+  email?: string | null;
+
+  subsegmento?: string | null;
+  subsegmentoId?: string | null;
+
+  direccion?: string | null;
+  codigoPostal?: string | null;
+  personaContacto?: string | null;
+
+  activo?: boolean | null;
+  observaciones?: string | null;
+  aceptaUrgencias?: boolean | null;
+  ambitoServicio?: string | null;
 }): Promise<ProveedorRead> {
   const payload: ProveedorCreate = {
     nombre: args.nombre,
     rama_id: args.ramaId,
-    localidad: (args.localidadTexto ?? null) as string | null,
-    comunidad: (args.comunidadTexto ?? null) as string | null,
-    pais: (args.paisTexto ?? null) as string | null,
+
+    localidad_id: args.localidadId ?? undefined,
+    localidad: args.localidadTexto ?? null,
+    comunidad: args.comunidadTexto ?? null,
+    pais: args.paisTexto ?? null,
+
+    cif: args.cif ?? null,
+    telefono: args.telefono ?? null,
+    email: args.email ?? null,
+
+    subsegmento: args.subsegmento ?? null,
+    subsegmento_id: args.subsegmentoId ?? null,
+
+    direccion: args.direccion ?? null,
+    codigo_postal: args.codigoPostal ?? null,
+    persona_contacto: args.personaContacto ?? null,
+
+    activo: args.activo ?? undefined,
+    observaciones: args.observaciones ?? null,
+    acepta_urgencias: args.aceptaUrgencias ?? undefined,
+    ambito_servicio: args.ambitoServicio ?? null,
   };
 
-  // Nota: args.localidadId existe para la UI (selección), pero backend actual no lo usa.
   return createProveedor(payload);
 }
 
-// Export default por compatibilidad con imports antiguos
+// =======================
+// Export default
+// =======================
+
 const proveedoresApi = {
   listProveedores,
   createProveedor,

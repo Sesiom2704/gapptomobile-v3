@@ -1,38 +1,30 @@
-# ============================================================
-# GapptoMobile - Modelos SQLAlchemy (unificados V1 + V2 + V3)
-# ------------------------------------------------------------
-# - Mantiene relaciones y campos de V1
-# - Añade extend_existing=True para convivencia con Neon
-# - Conserva constraints y claves foráneas
-#
-# Ajustes previos:
-#   * Proveedor: nuevas columnas localidad, pais
-#   * GastoCotidiano: se eliminan CHECKS restrictivos de tipo/observaciones
-#   * Índices útiles para filtros (fecha/tipo/proveedor; localidad/pais)
-#
-# Ajustes NUEVOS (ramas de ingreso):
-#   * Nueva tabla: tipo_ramas_ingreso
-#   * tipo_ingreso añade rama_id
-#   * ingresos añade rama_id
-#   * Relaciones ORM completas para poder navegar:
-#       - rama -> tipos de ingreso
-#       - rama -> ingresos
-#       - tipo de ingreso -> rama
-#       - ingreso -> rama
-#
-# Ajustes NUEVOS (incidencias 4.3A):
-#   * Nueva clase ORM: AsignacionIncidencia
-#   * Nueva clase ORM: CitaIncidencia
-#   * Incidencia añade relaciones hacia asignaciones y citas
-#   * Proveedor añade relaciones hacia asignaciones y citas de incidencias
-#   * Persona añade relaciones auxiliares para auditoría operativa de incidencias
-#
-# Nota funcional:
-#   La validación de coherencia entre:
-#       ingreso.rama_id <-> ingreso.tipo_id <-> tipo_ingreso.rama_id
-#   debe hacerse en schemas / services / router,
-#   no sólo en el modelo ORM.
-# ============================================================
+# backend/app/db/models.py
+
+"""
+Ruta: backend/app/db/models.py
+Versión: 1.4.0
+Descripción:
+Modelos SQLAlchemy unificados de GapptoMobile.
+
+Incluye:
+- Modelos históricos V1/V2/V3
+- Ajustes para Neon con extend_existing=True
+- Relaciones ORM completas entre dominios principales
+- Nuevo auxiliar de subsegmentos de proveedores
+- Relación Proveedor <-> TipoSubsegmentoProveedor
+
+Cambios de esta versión:
+- NUEVO: tabla auxiliar `tipo_subsegmentos_proveedores`
+- NUEVO: FK `proveedores.subsegmento_id` enlazada ORM con la nueva tabla
+- NUEVO: relación `subsegmento_rel` en Proveedor
+- NUEVO: relación inversa `proveedores` en TipoSubsegmentoProveedor
+
+Notas:
+- Se mantiene el campo legado `subsegmento` en Proveedor como texto libre
+  por compatibilidad hacia atrás.
+- La lógica funcional para usar `subsegmento_id` como fuente principal
+  debe gestionarse en schemas/routers/services.
+"""
 
 from datetime import datetime
 from uuid import uuid4
@@ -140,6 +132,32 @@ class TipoRamasProveedores(Base):
     nombre = Column(String, nullable=False)
 
     proveedores = relationship("Proveedor", back_populates="rama_rel")
+    subsegmentos = relationship("TipoSubsegmentoProveedor", back_populates="rama_rel")
+
+
+class TipoSubsegmentoProveedor(Base):
+    """
+    Catálogo auxiliar de subsegmentos de proveedores.
+
+    Objetivo:
+    - Permitir clasificar proveedores dentro de una rama con un segundo nivel.
+    - Mantener un catálogo reusable desde formularios auxiliares y de proveedores.
+
+    Ejemplos:
+    - ELECTRODOMÉSTICOS
+    - CERRAJERÍA
+    - FONTANERÍA
+    - LIMPIEZA
+    """
+    __tablename__ = "tipo_subsegmentos_proveedores"
+    __table_args__ = {"extend_existing": True}
+
+    id = Column(String, primary_key=True, index=True)
+    nombre = Column(String, nullable=False, index=True)
+    rama_id = Column(String, ForeignKey("tipo_ramas_proveedores.id"), nullable=True, index=True)
+
+    rama_rel = relationship("TipoRamasProveedores", back_populates="subsegmentos")
+    proveedores = relationship("Proveedor", back_populates="subsegmento_rel")
 
 
 class TipoGasto(Base):
@@ -384,6 +402,7 @@ class Persona(Base):
         back_populates="confirmada_por",
     )
 
+
 class Contrato(Base):
     """
     Contrato asociado a una vivienda/patrimonio.
@@ -547,9 +566,15 @@ class Proveedor(Base):
     created_at = Column(DateTime, nullable=False, server_default=func.now())
     updated_at = Column(DateTime, nullable=False, server_default=func.now(), onupdate=func.now())
 
-    subsegmento_id = Column(String, nullable=True)
+    subsegmento_id = Column(
+        String,
+        ForeignKey("tipo_subsegmentos_proveedores.id"),
+        nullable=True,
+        index=True,
+    )
 
     rama_rel = relationship("TipoRamasProveedores", back_populates="proveedores")
+    subsegmento_rel = relationship("TipoSubsegmentoProveedor", back_populates="proveedores")
     gastos = relationship("Gasto", back_populates="proveedor_rel")
     gastos_cotidianos = relationship("GastoCotidiano", back_populates="proveedor_rel")
     cuentas_bancarias = relationship("CuentaBancaria", back_populates="banco_rel")
@@ -584,6 +609,7 @@ class Proveedor(Base):
         foreign_keys="CitaIncidencia.proveedor_id",
         back_populates="proveedor",
     )
+
 
 class CuentaBancaria(Base):
     __tablename__ = "cuentas_bancarias"
@@ -851,6 +877,7 @@ class GastoCotidiano(Base):
     cuenta = relationship("CuentaBancaria", back_populates="gastos_cotidianos", lazy="joined")
     user = relationship("User", back_populates="gastos_cotidianos")
 
+
 # =============================================
 # 3.1 INCIDENCIAS BOT / ALQUILERES
 # =============================================
@@ -959,6 +986,7 @@ class Incidencia(Base):
         cascade="all, delete-orphan",
     )
 
+
 class HistorialEstadoIncidencia(Base):
     """
     Historial de cambios de estado de una incidencia.
@@ -986,6 +1014,7 @@ class HistorialEstadoIncidencia(Base):
         foreign_keys=[persona_cambia_id],
         back_populates="historial_cambios_incidencia",
     )
+
 
 def gen_asignacion_incidencia_id() -> str:
     return "ASI-" + uuid4().hex[:12].upper()
@@ -1049,6 +1078,7 @@ class AsignacionIncidencia(Base):
         back_populates="asignaciones_incidencia_como_asignador",
     )
 
+
 class CitaIncidencia(Base):
     """
     Cita programada para una incidencia.
@@ -1109,6 +1139,7 @@ class CitaIncidencia(Base):
         foreign_keys=[confirmada_por_persona_id],
         back_populates="citas_incidencia_confirmadas",
     )
+
 
 # =============================================
 # 4.1 ROLES

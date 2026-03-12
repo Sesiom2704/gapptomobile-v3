@@ -1,29 +1,40 @@
 # backend/app/api/v1/proveedores_router.py
+
 """
-Router: Proveedores
+Ruta: backend/app/api/v1/proveedores_router.py
+Versión: 1.4.0
+Descripción:
+Router de proveedores para GapptoMobile v3.
 
-Mejoras incluidas (sin perder funcionalidades existentes):
-1) DELETE /proveedores/{prov_id}
-   - Antes devolvía 405 (Method Not Allowed) porque no existía el endpoint.
-   - Implementado con protección: si el proveedor está referenciado por gastos/inversiones,
-     se devuelve 409 Conflict (para no romper histórico ni constraints de FK).
+Responsabilidades:
+- Listar, crear, actualizar y eliminar proveedores.
+- Mantener soporte multiusuario.
+- Mantener compatibilidad con ubicación legacy por texto y con flujo normalizado
+  por localidad_id.
+- Exponer y persistir todos los nuevos campos del ORM Proveedor.
+- Mantener validaciones de negocio existentes.
+- Soportar filtro por rama_id y por subsegmento_id.
 
-2) Soporte correcto de localidad_id en CREATE/UPDATE
-   - Tu modelo y schemas ya contemplan localidad_id y localidad_rel.
-   - Antes el POST ignoraba localidad_id (se perdía), y el PUT no derivaba textos.
-   - Ahora:
-     - Si viene localidad_id: el backend deriva localidad/comunidad/pais desde la BBDD,
-       y además guarda los textos (compatibilidad v2) + la FK (v3 normalizado).
-     - Si no viene localidad_id: mantiene el comportamiento legacy (textos).
-
-3) Unicidad de nombre en UPDATE (multiusuario)
-   - Antes podías renombrar un proveedor al nombre de otro y quedarte duplicados.
-   - Ahora se valida igual que en CREATE, pero excluyendo el propio id.
-
-4) Comentarios y comportamiento conservador:
-   - No se elimina ninguna validación existente (validate_proveedor_ubicacion_condicional).
-   - Se mantiene normalización a MAYÚSCULAS en campos de texto.
+Cambios de esta versión:
+- Se incorporan todos los campos ampliados del ORM:
+    * cif
+    * telefono
+    * email
+    * subsegmento
+    * subsegmento_id
+    * direccion
+    * codigo_postal
+    * persona_contacto
+    * activo
+    * observaciones
+    * acepta_urgencias
+    * ambito_servicio
+- Si llega subsegmento_id, se intenta resolver automáticamente el nombre del
+  subsegmento para guardarlo también en `subsegmento`.
+- Se mantiene DELETE protegido por referencias.
 """
+
+from __future__ import annotations
 
 from typing import List, Optional
 
@@ -34,19 +45,14 @@ from sqlalchemy import or_
 from backend.app.api.v1.auth_router import require_user
 from backend.app.db.session import get_db
 from backend.app.db import models
-
-# Nota: mantengo los imports tal como los tienes para no romper tu proyecto.
-# Si en tu repo real están en schemas/proveedor.py, entonces este import debe apuntar allí.
 from backend.app.schemas.proveedores import (
     ProveedorCreate,
     ProveedorUpdate,
     ProveedorRead,
 )
-
 from backend.app.utils.text_utils import normalize_upper
 from backend.app.utils.proveedor_utils import validate_proveedor_ubicacion_condicional
 from backend.app.utils.id_utils import generate_proveedor_id
-
 
 router = APIRouter(
     prefix="/proveedores",
@@ -59,16 +65,7 @@ router = APIRouter(
 # =============================================================================
 def _resolve_ubicacion_from_localidad_id(db: Session, localidad_id: int) -> dict:
     """
-    Dado un localidad_id, carga Localidad y deriva:
-      - localidad (nombre localidad)
-      - comunidad (nombre región)
-      - pais (nombre país)
-    Devuelve un dict con:
-      { localidad_id, localidad, comunidad, pais }
-
-    Importante:
-    - Usamos accesos "robustos" a relaciones por si tu modelo usa nombres distintos
-      (region vs region_rel, pais vs pais_rel).
+    Deriva localidad/comunidad/pais desde localidad_id.
     """
     loc = db.get(models.Localidad, localidad_id)
     if not loc:
@@ -77,7 +74,6 @@ def _resolve_ubicacion_from_localidad_id(db: Session, localidad_id: int) -> dict
             detail="localidad_id inválido (no existe).",
         )
 
-    # Intentamos obtener región y país de forma tolerante
     region = getattr(loc, "region", None) or getattr(loc, "region_rel", None)
     pais_obj = None
     if region is not None:
@@ -95,6 +91,70 @@ def _resolve_ubicacion_from_localidad_id(db: Session, localidad_id: int) -> dict
     }
 
 
+def _resolve_subsegmento_from_id(db: Session, subsegmento_id: Optional[str]) -> dict:
+    """
+    Intenta resolver el nombre del subsegmento a partir de subsegmento_id.
+    Si no existe, devuelve el id y subsegmento=None.
+    """
+    if not subsegmento_id:
+        return {
+            "subsegmento_id": None,
+            "subsegmento": None,
+        }
+
+    model_cls = getattr(models, "TipoSubsegmentoProveedor", None)
+    if model_cls is None:
+        return {
+            "subsegmento_id": subsegmento_id,
+            "subsegmento": None,
+        }
+
+    obj = db.get(model_cls, subsegmento_id)
+    if not obj:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="subsegmento_id inválido (no existe).",
+        )
+
+    return {
+        "subsegmento_id": obj.id,
+        "subsegmento": normalize_upper(getattr(obj, "nombre", None)),
+    }
+
+
+def _normalize_text_fields(data: dict) -> dict:
+    """
+    Normaliza a MAYÚSCULAS los campos de texto donde aplica.
+    """
+    text_fields_upper = [
+        "nombre",
+        "localidad",
+        "comunidad",
+        "pais",
+        "cif",
+        "subsegmento",
+        "direccion",
+        "codigo_postal",
+        "persona_contacto",
+        "ambito_servicio",
+    ]
+
+    for field in text_fields_upper:
+        if field in data:
+            data[field] = normalize_upper(data[field])
+
+    if "email" in data and data["email"] is not None:
+        data["email"] = str(data["email"]).strip().lower() or None
+
+    if "telefono" in data and data["telefono"] is not None:
+        data["telefono"] = str(data["telefono"]).strip() or None
+
+    if "observaciones" in data and data["observaciones"] is not None:
+        data["observaciones"] = str(data["observaciones"]).strip() or None
+
+    return data
+
+
 # =============================================================================
 # GET /proveedores
 # =============================================================================
@@ -105,20 +165,20 @@ def _resolve_ubicacion_from_localidad_id(db: Session, localidad_id: int) -> dict
 )
 def list_proveedores(
     rama_id: Optional[str] = Query(None, description="Filtrar por rama_id"),
+    subsegmento_id: Optional[str] = Query(None, description="Filtrar por subsegmento_id"),
     db: Session = Depends(get_db),
     current_user: models.User = Depends(require_user),
 ):
     """
     Lista proveedores del usuario autenticado.
-
-    - Multiusuario: solo devuelve proveedores con user_id == current_user.id
-    - Filtro opcional por rama_id
-    - Orden estable por nombre e id
     """
     qry = db.query(models.Proveedor).filter(models.Proveedor.user_id == current_user.id)
 
     if rama_id:
         qry = qry.filter(models.Proveedor.rama_id == rama_id)
+
+    if subsegmento_id:
+        qry = qry.filter(models.Proveedor.subsegmento_id == subsegmento_id)
 
     qry = qry.order_by(models.Proveedor.nombre.asc(), models.Proveedor.id.asc())
     return qry.all()
@@ -139,41 +199,34 @@ def create_proveedor(
     current_user: models.User = Depends(require_user),
 ):
     """
-    Crea un nuevo proveedor.
-
-    Reglas (se mantienen):
-    - Convierte NOMBRE/LOCALIDAD/PAÍS/COMUNIDAD a MAYÚSCULAS (normalización).
-    - Valida unicidad por nombre, PERO dentro del usuario (multiusuario).
-    - Valida obligatoriedad condicional según rama (validate_proveedor_ubicacion_condicional).
-    - Genera el ID en el backend con formato PROV-XXXXXX.
-
-    Mejora:
-    - Si llega localidad_id, el backend deriva localidad/comunidad/pais desde BBDD
-      y guarda:
-        - localidad_id (FK normalizada)
-        - localidad/comunidad/pais (texto legacy, útil para filtros v2/v3)
+    Crea un proveedor nuevo.
     """
-    # -------------------------
-    # Normalización a MAYÚSCULAS
-    # -------------------------
-    nombre_up = normalize_upper(prov_in.nombre) or ""
+    payload = prov_in.model_dump()
 
-    # Si viene localidad_id, damos prioridad a BBDD (normalizado)
-    if prov_in.localidad_id:
-        ub = _resolve_ubicacion_from_localidad_id(db, prov_in.localidad_id)
-        localidad_up = ub["localidad"]
-        comunidad_up = ub["comunidad"]
-        pais_up = ub["pais"]
-        localidad_id_final = ub["localidad_id"]
+    payload = _normalize_text_fields(payload)
+
+    nombre_up = payload.get("nombre") or ""
+
+    # Ubicación
+    if payload.get("localidad_id"):
+        ub = _resolve_ubicacion_from_localidad_id(db, payload["localidad_id"])
+        payload["localidad"] = ub["localidad"]
+        payload["comunidad"] = ub["comunidad"]
+        payload["pais"] = ub["pais"]
+        payload["localidad_id"] = ub["localidad_id"]
     else:
-        localidad_up = normalize_upper(prov_in.localidad)
-        pais_up = normalize_upper(prov_in.pais)
-        comunidad_up = normalize_upper(prov_in.comunidad)
-        localidad_id_final = None
+        payload["localidad_id"] = None
 
-    # -------------------------
-    # Unicidad por nombre (multiusuario)
-    # -------------------------
+    # Subsegmento
+    if payload.get("subsegmento_id"):
+        sub = _resolve_subsegmento_from_id(db, payload["subsegmento_id"])
+        payload["subsegmento_id"] = sub["subsegmento_id"]
+        payload["subsegmento"] = sub["subsegmento"]
+    else:
+        # Si no viene subsegmento_id, mantenemos el texto libre si llega
+        payload["subsegmento"] = normalize_upper(payload.get("subsegmento"))
+
+    # Unicidad nombre por usuario
     exists = (
         db.query(models.Proveedor)
         .filter(
@@ -188,36 +241,38 @@ def create_proveedor(
             detail="Ya existe un proveedor con este nombre.",
         )
 
-    # -------------------------
-    # Validación condicional por rama
-    # (se mantiene; trabaja sobre los textos finales)
-    # -------------------------
+    # Validación condicional existente
     validate_proveedor_ubicacion_condicional(
         db,
-        prov_in.rama_id,
-        localidad_up,
-        pais_up,
-        comunidad_up,
+        payload["rama_id"],
+        payload.get("localidad"),
+        payload.get("pais"),
+        payload.get("comunidad"),
     )
 
-    # -------------------------
-    # ID generado en servidor
-    # -------------------------
     new_id = generate_proveedor_id(db)
 
     obj = models.Proveedor(
         id=new_id,
         user_id=current_user.id,
-        nombre=nombre_up,
-        rama_id=prov_in.rama_id,
-
-        # Normalizado v3
-        localidad_id=localidad_id_final,
-
-        # Legacy v2/v3 (texto)
-        localidad=localidad_up,
-        pais=pais_up,
-        comunidad=comunidad_up,
+        nombre=payload["nombre"],
+        rama_id=payload["rama_id"],
+        localidad_id=payload.get("localidad_id"),
+        localidad=payload.get("localidad"),
+        pais=payload.get("pais"),
+        comunidad=payload.get("comunidad"),
+        cif=payload.get("cif"),
+        telefono=payload.get("telefono"),
+        email=payload.get("email"),
+        subsegmento=payload.get("subsegmento"),
+        subsegmento_id=payload.get("subsegmento_id"),
+        direccion=payload.get("direccion"),
+        codigo_postal=payload.get("codigo_postal"),
+        persona_contacto=payload.get("persona_contacto"),
+        activo=payload.get("activo", True),
+        observaciones=payload.get("observaciones"),
+        acepta_urgencias=payload.get("acepta_urgencias", False),
+        ambito_servicio=payload.get("ambito_servicio"),
     )
 
     db.add(obj)
@@ -241,18 +296,7 @@ def update_proveedor(
     current_user: models.User = Depends(require_user),
 ):
     """
-    Actualiza los datos de un proveedor existente.
-
-    Funcionalidad existente (se mantiene):
-    - 404 si no existe o no pertenece al usuario.
-    - Normalización a MAYÚSCULAS en textos.
-    - validate_proveedor_ubicacion_condicional antes de guardar.
-
-    Mejoras:
-    - Si se actualiza nombre: valida unicidad dentro del usuario (excluyendo el propio proveedor).
-    - Si llega localidad_id:
-        - se deriva localidad/comunidad/pais desde BBDD y se actualizan también los textos.
-        - esto mantiene consistencia entre FK y textos legacy.
+    Actualiza un proveedor existente.
     """
     obj = db.get(models.Proveedor, prov_id)
     if not obj or obj.user_id != current_user.id:
@@ -262,13 +306,11 @@ def update_proveedor(
         )
 
     data = prov_in.model_dump(exclude_unset=True)
+    data = _normalize_text_fields(data)
 
-    # -------------------------
-    # Normalización + unicidad nombre (si cambia)
-    # -------------------------
+    # Unicidad nombre si cambia
     if "nombre" in data and data["nombre"] is not None:
-        nombre_up = normalize_upper(data["nombre"]) or ""
-        # Unicidad dentro del usuario, excluyendo el propio id
+        nombre_up = data["nombre"] or ""
         exists = (
             db.query(models.Proveedor)
             .filter(
@@ -283,29 +325,31 @@ def update_proveedor(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Ya existe un proveedor con este nombre.",
             )
-        data["nombre"] = nombre_up
 
-    # -------------------------
-    # Si llega localidad_id, derivamos textos desde BBDD (consistencia)
-    # -------------------------
+    # Ubicación por localidad_id
     if "localidad_id" in data and data["localidad_id"]:
         ub = _resolve_ubicacion_from_localidad_id(db, data["localidad_id"])
-        # Sobrescribimos textos con los derivados (fuente de verdad BBDD)
         data["localidad"] = ub["localidad"]
         data["comunidad"] = ub["comunidad"]
         data["pais"] = ub["pais"]
+        data["localidad_id"] = ub["localidad_id"]
 
-    # Normalización de textos si vienen explícitamente (modo legacy)
-    if "localidad" in data:
-        data["localidad"] = normalize_upper(data["localidad"])
-    if "pais" in data:
-        data["pais"] = normalize_upper(data["pais"])
-    if "comunidad" in data:
-        data["comunidad"] = normalize_upper(data["comunidad"])
+    # Permitir vaciar localidad_id explícitamente
+    if "localidad_id" in data and data["localidad_id"] is None:
+        pass
 
-    # -------------------------
-    # Validación condicional por rama con el estado final
-    # -------------------------
+    # Subsegmento por id
+    if "subsegmento_id" in data:
+        if data["subsegmento_id"]:
+            sub = _resolve_subsegmento_from_id(db, data["subsegmento_id"])
+            data["subsegmento_id"] = sub["subsegmento_id"]
+            data["subsegmento"] = sub["subsegmento"]
+        else:
+            data["subsegmento_id"] = None
+            # si el cliente lo vacía, también vaciamos el texto
+            data["subsegmento"] = None
+
+    # Validación condicional por rama
     rama_objetivo = data.get("rama_id", obj.rama_id)
     loc_objetivo = data.get("localidad", obj.localidad)
     pais_objetivo = data.get("pais", obj.pais)
@@ -319,9 +363,6 @@ def update_proveedor(
         com_objetivo,
     )
 
-    # -------------------------
-    # Persistencia
-    # -------------------------
     for k, v in data.items():
         setattr(obj, k, v)
 
@@ -344,28 +385,15 @@ def delete_proveedor(
     current_user: models.User = Depends(require_user),
 ):
     """
-    Elimina un proveedor.
-
-    Motivo de la implementación:
-    - Tu app móvil ya llama a DELETE, pero antes devolvía 405 porque no existía endpoint.
-
-    Protección (importante):
-    - Si el proveedor está referenciado por gastos / gastos_cotidianos / inversiones,
-      NO eliminamos y devolvemos 409 Conflict, evitando:
-        - violaciones de FK
-        - pérdida de histórico
-        - inconsistencias
-
-    Si en el futuro quieres "borrado lógico", lo ideal es:
-    - añadir campo is_active / inactivatedon en modelos.Proveedor
-    - filtrar en listados
-    - mantener histórico sin conflictos
+    Elimina un proveedor si no tiene referencias.
     """
     obj = db.get(models.Proveedor, prov_id)
     if not obj or obj.user_id != current_user.id:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Proveedor no encontrado")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Proveedor no encontrado",
+        )
 
-    # Referencias (evitar romper integridad)
     has_gastos = (
         db.query(models.Gasto.id)
         .filter(models.Gasto.proveedor_id == prov_id)
@@ -392,12 +420,40 @@ def delete_proveedor(
         is not None
     )
 
-    if has_gastos or has_cotidianos or has_inversiones:
+    has_incidencias = (
+        db.query(models.Incidencia.id)
+        .filter(models.Incidencia.proveedor_actual_id == prov_id)
+        .first()
+        is not None
+    )
+
+    has_asignaciones = (
+        db.query(models.AsignacionIncidencia.id)
+        .filter(models.AsignacionIncidencia.proveedor_id == prov_id)
+        .first()
+        is not None
+    )
+
+    has_citas = (
+        db.query(models.CitaIncidencia.id)
+        .filter(models.CitaIncidencia.proveedor_id == prov_id)
+        .first()
+        is not None
+    )
+
+    if (
+        has_gastos
+        or has_cotidianos
+        or has_inversiones
+        or has_incidencias
+        or has_asignaciones
+        or has_citas
+    ):
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
-            detail="No se puede eliminar: el proveedor está referenciado por movimientos.",
+            detail="No se puede eliminar: el proveedor está referenciado por movimientos o incidencias.",
         )
 
     db.delete(obj)
     db.commit()
-    return
+    return None

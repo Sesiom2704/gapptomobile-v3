@@ -1,27 +1,38 @@
 # backend/app/schemas/proveedores.py
+
 """
-Schemas Pydantic para PROVEEDORES (GapptoMobile v3)
+Ruta: backend/app/schemas/proveedores.py
+Versión: 1.3.0
+Descripción:
+Schemas Pydantic para PROVEEDORES en GapptoMobile v3.
 
-Objetivo de unificación:
-- Evitar duplicidad de esquemas (proveedor.py vs proveedores.py).
-- Garantizar que ProveedorCreate/Update tengan SIEMPRE:
-    - localidad_id (opcional) para flujo normalizado
-    - localidad/comunidad/pais (opcionales) para compatibilidad legacy
-- Mantener compatibilidad hacia atrás:
-    - Permitir que el cliente envíe "id" (opcional) en Create si existía antes.
-      El backend puede ignorarlo y generar ID propio (como ya haces).
-- Definir un ProveedorRead estable para la app móvil:
-    - Incluye campos legacy y normalizados (localidad_rel) si el backend los expone.
-    - Incluye rama_rel opcional, porque tu UI la usa en edición.
-
-Nota:
-- La validación "obligatorio según rama" (localidad/pais/comunidad) se mantiene en el router,
-  porque es una regla de negocio (no un simple constraint de esquema).
+Objetivos:
+- Unificar lectura/escritura de proveedores en backend.
+- Exponer todos los campos relevantes del ORM Proveedor.
+- Mantener compatibilidad con el flujo legacy de ubicación:
+    * localidad/comunidad/pais (texto)
+- Mantener compatibilidad con el flujo normalizado:
+    * localidad_id
+- Añadir soporte para:
+    * cif
+    * telefono
+    * email
+    * subsegmento
+    * subsegmento_id
+    * direccion
+    * codigo_postal
+    * persona_contacto
+    * activo
+    * observaciones
+    * acepta_urgencias
+    * ambito_servicio
+    * created_at / updated_at
 """
 
 from __future__ import annotations
 
 from typing import Optional
+from datetime import datetime
 
 from pydantic import BaseModel, Field, ConfigDict
 
@@ -29,13 +40,11 @@ from .localidad import LocalidadWithContext
 
 
 # -----------------------------------------------------------------------------
-# Subschemas de relaciones (opcionales)
+# Relaciones ligeras
 # -----------------------------------------------------------------------------
 class RamaProveedorRel(BaseModel):
     """
     Relación ligera a la rama del proveedor.
-    Tu UI (AuxEntityFormScreen) usa:
-      editingProveedor.rama_rel?.nombre
     """
     id: str
     nombre: str
@@ -43,102 +52,165 @@ class RamaProveedorRel(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
 
+class SubsegmentoProveedorRel(BaseModel):
+    """
+    Relación ligera al subsegmento del proveedor.
+    """
+    id: str
+    nombre: str
+    rama_id: Optional[str] = None
+
+    model_config = ConfigDict(from_attributes=True)
+
+
 # -----------------------------------------------------------------------------
-# Base: campos comunes de negocio (sin obligar a localidad_id)
+# Base
 # -----------------------------------------------------------------------------
 class ProveedorBase(BaseModel):
     """
     Campos base de proveedor.
 
-    - nombre: nombre comercial (normalizado en router a MAYÚSCULAS).
-    - rama_id: FK a tipo_ramas_proveedores.id (obligatorio en creación).
-    - localidad_id: referencia normalizada (opcional).
-    - localidad/comunidad/pais: textos legacy (compatibilidad v2).
+    Reglas:
+    - nombre y rama_id siguen siendo obligatorios en creación.
+    - localidad_id es opcional y, si se informa, el backend puede derivar
+      localidad/comunidad/pais.
+    - El resto de campos ampliados son opcionales.
     """
     nombre: str = Field(..., description="Nombre comercial del proveedor.")
-    rama_id: str = Field(..., description="ID de la rama del proveedor (FK).")
+    rama_id: str = Field(..., description="ID de la rama del proveedor.")
 
-    # Normalizado por FK (opcional)
+    # Ubicación normalizada
     localidad_id: Optional[int] = Field(
         None,
-        description="FK a localidades.id (opcional). Si se informa, el backend puede derivar textos.",
+        description="FK a localidades.id.",
     )
 
-    # Legacy por texto (opcionales según rama, se valida en router)
-    localidad: Optional[str] = Field(None, description="Localidad (texto legacy).")
-    comunidad: Optional[str] = Field(None, description="Comunidad/Región (texto legacy).")
-    pais: Optional[str] = Field(None, description="País (texto legacy).")
+    # Ubicación legacy texto
+    localidad: Optional[str] = Field(None, description="Localidad texto.")
+    comunidad: Optional[str] = Field(None, description="Comunidad/Región texto.")
+    pais: Optional[str] = Field(None, description="País texto.")
+
+    # Nuevos campos de proveedor
+    cif: Optional[str] = Field(None, description="CIF del proveedor.")
+    telefono: Optional[str] = Field(None, description="Teléfono del proveedor.")
+    email: Optional[str] = Field(None, description="Email del proveedor.")
+
+    subsegmento: Optional[str] = Field(
+        None,
+        description="Nombre libre de subsegmento (legacy/compat).",
+    )
+    subsegmento_id: Optional[str] = Field(
+        None,
+        description="ID del subsegmento del proveedor.",
+    )
+
+    direccion: Optional[str] = Field(None, description="Dirección postal.")
+    codigo_postal: Optional[str] = Field(None, description="Código postal.")
+    persona_contacto: Optional[str] = Field(None, description="Persona de contacto.")
+
+    activo: Optional[bool] = Field(True, description="Indica si el proveedor está activo.")
+    observaciones: Optional[str] = Field(None, description="Observaciones del proveedor.")
+    acepta_urgencias: Optional[bool] = Field(
+        False,
+        description="Indica si el proveedor acepta servicios urgentes.",
+    )
+    ambito_servicio: Optional[str] = Field(
+        None,
+        description="Ámbito de servicio: local, provincial, nacional, etc.",
+    )
 
 
 # -----------------------------------------------------------------------------
-# Create: permite 'id' opcional por compatibilidad, y mantiene localidad_id
+# Create
 # -----------------------------------------------------------------------------
 class ProveedorCreate(ProveedorBase):
     """
     Payload para crear proveedor.
 
     Compatibilidad:
-    - Algunos clientes antiguos podían enviar `id`. Lo aceptamos como opcional.
-      Tu backend actual genera el ID; puedes ignorar este campo en el router.
+    - Se acepta `id` opcional, aunque el backend puede ignorarlo y generar uno propio.
     """
     id: Optional[str] = Field(
         None,
-        description="ID opcional. El backend puede ignorarlo y generar PROV-XXXXXX.",
+        description="ID opcional. El backend puede ignorarlo.",
     )
 
 
 # -----------------------------------------------------------------------------
-# Update: todos opcionales (PUT/PATCH parcial)
+# Update
 # -----------------------------------------------------------------------------
 class ProveedorUpdate(BaseModel):
     """
-    Payload de actualización (parcial): sólo se aplican campos presentes.
-    La normalización a MAYÚSCULAS y la validación por rama se hacen en router.
+    Payload de actualización parcial de proveedor.
     """
-    nombre: Optional[str] = Field(None, description="Nuevo nombre (si se cambia).")
-    rama_id: Optional[str] = Field(None, description="Nueva rama_id (si se cambia).")
+    nombre: Optional[str] = Field(None, description="Nuevo nombre.")
+    rama_id: Optional[str] = Field(None, description="Nueva rama.")
 
-    localidad_id: Optional[int] = Field(
-        None,
-        description="Nueva FK a localidades.id (si se cambia).",
-    )
+    localidad_id: Optional[int] = Field(None, description="Nueva localidad_id.")
+    localidad: Optional[str] = Field(None, description="Nueva localidad texto.")
+    comunidad: Optional[str] = Field(None, description="Nueva comunidad texto.")
+    pais: Optional[str] = Field(None, description="Nuevo país texto.")
 
-    localidad: Optional[str] = Field(None, description="Nueva localidad texto (legacy).")
-    comunidad: Optional[str] = Field(None, description="Nueva comunidad texto (legacy).")
-    pais: Optional[str] = Field(None, description="Nuevo país texto (legacy).")
+    cif: Optional[str] = Field(None, description="Nuevo CIF.")
+    telefono: Optional[str] = Field(None, description="Nuevo teléfono.")
+    email: Optional[str] = Field(None, description="Nuevo email.")
+
+    subsegmento: Optional[str] = Field(None, description="Nuevo subsegmento texto.")
+    subsegmento_id: Optional[str] = Field(None, description="Nuevo subsegmento_id.")
+
+    direccion: Optional[str] = Field(None, description="Nueva dirección.")
+    codigo_postal: Optional[str] = Field(None, description="Nuevo código postal.")
+    persona_contacto: Optional[str] = Field(None, description="Nueva persona de contacto.")
+
+    activo: Optional[bool] = Field(None, description="Nuevo estado activo.")
+    observaciones: Optional[str] = Field(None, description="Nuevas observaciones.")
+    acepta_urgencias: Optional[bool] = Field(None, description="Nuevo valor acepta_urgencias.")
+    ambito_servicio: Optional[str] = Field(None, description="Nuevo ámbito de servicio.")
 
 
 # -----------------------------------------------------------------------------
-# Read: forma estable de respuesta
+# Read
 # -----------------------------------------------------------------------------
 class ProveedorRead(BaseModel):
     """
-    Representación de salida del proveedor.
-
-    Incluye:
-    - id (string PROV-XXXXXX)
-    - campos principales
-    - user_id (multiusuario) si lo quieres exponer (tu UI no lo necesita, pero no rompe)
-    - relaciones opcionales:
-        - rama_rel
-        - localidad_rel (con region+pais dentro) si el backend la devuelve
+    Representación de salida estable del proveedor.
     """
     id: str
     nombre: str
-    rama_id: str
+    rama_id: Optional[str] = None
 
     localidad_id: Optional[int] = None
     localidad: Optional[str] = None
     comunidad: Optional[str] = None
     pais: Optional[str] = None
 
+    cif: Optional[str] = None
+    telefono: Optional[str] = None
+    email: Optional[str] = None
+
+    subsegmento: Optional[str] = None
+    subsegmento_id: Optional[str] = None
+
+    direccion: Optional[str] = None
+    codigo_postal: Optional[str] = None
+    persona_contacto: Optional[str] = None
+
+    activo: Optional[bool] = None
+    observaciones: Optional[str] = None
+    acepta_urgencias: Optional[bool] = None
+    ambito_servicio: Optional[str] = None
+
     user_id: Optional[int] = None
 
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
+
     rama_rel: Optional[RamaProveedorRel] = None
+    subsegmento_rel: Optional[SubsegmentoProveedorRel] = None
     localidad_rel: Optional[LocalidadWithContext] = None
 
     model_config = ConfigDict(from_attributes=True)
 
 
-# Alias de compatibilidad para imports antiguos (si alguien importaba "Proveedor")
+# Alias de compatibilidad
 Proveedor = ProveedorRead
