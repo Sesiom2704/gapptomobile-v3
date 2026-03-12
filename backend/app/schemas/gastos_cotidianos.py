@@ -57,7 +57,7 @@ from backend.app.db.custom_types import Money
 # ============================================================
 
 RESTAURANTES_TIPO_ID = "RES-TIPOGASTO-26ROES"
-ALLOWED_EVENTOS = {"FAMILIA", "AMIGOS", "FAMILIA DE", "AMIGOS DE", "ROMANTICO"}
+ALLOWED_EVENTOS = {"FAMILIA", "AMIGOS", "FAMILIA DE", "AMIGOS DE", "ROMANTICO", "LABORAL" }
 
 
 def _normalize_evento(val: Optional[str]) -> Optional[str]:

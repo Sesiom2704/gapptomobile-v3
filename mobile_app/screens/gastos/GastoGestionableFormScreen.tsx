@@ -1,18 +1,28 @@
 /**
  * Ruta: screens/gastos/GastoGestionableFormScreen.tsx
- * Versión: 1.7.1
+ * Versión: 1.8.0
  * Descripción:
  * Formulario de gasto gestionable para alta, edición, duplicado y consulta.
- * Mantiene toda la lógica existente y añade:
- * - visualización correcta de "Último pago" en Opciones avanzadas,
- * - formato de auditoría alineado con IngresoFormScreen,
- * - filtro previo de proveedores por rama mediante pills,
- *   mostrando el nombre de la rama y filtrando por rama_id,
- * - pills compactas exclusivas para el filtro de proveedores.
+ *
+ * Ajustes incluidos:
+ * - Carga de detalle real del gasto mediante obtenerGasto(id) para no depender
+ *   de objetos parciales recibidos por navegación.
+ * - Visualización correcta de "Último pago" y del resto de metadatos avanzados.
+ * - Filtro de proveedores por rama dentro de un desplegable.
+ * - Mantiene toda la lógica previa: edición, duplicado, readonly, retorno desde
+ *   AuxEntityForm, cálculo de importes/cuotas y guardado.
  */
 
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { View, Text, TextInput, Alert, TouchableOpacity, StyleSheet } from 'react-native';
+import {
+  View,
+  Text,
+  TextInput,
+  Alert,
+  TouchableOpacity,
+  StyleSheet,
+  ActivityIndicator,
+} from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import DateTimePicker, { DateTimePickerEvent } from '@react-native-community/datetimepicker';
 import { useFocusEffect } from '@react-navigation/native';
@@ -39,6 +49,7 @@ import {
   fetchViviendas,
   crearGastoGestionable,
   actualizarGasto,
+  obtenerGasto,
   TipoGasto,
   Proveedor,
   Cuenta,
@@ -105,12 +116,17 @@ export const GastoGestionableFormScreen: React.FC<Props> = ({ navigation, route 
   const styles = commonFormStyles;
 
   const skipResetOnNextFocusRef = useRef<boolean>(false);
+  const hydratedFromGastoIdRef = useRef<string | null>(null);
 
   const preset: 'standard' | 'extra' = route?.params?.preset ?? 'standard';
   const duplicate: boolean = route?.params?.duplicate === true;
 
   const gastoSource: Gasto | null = route?.params?.gasto ?? null;
-  const gastoAny = gastoSource as any;
+  const routeGastoId: string | null = gastoSource?.id ?? null;
+
+  const [gastoDetalle, setGastoDetalle] = useState<Gasto | null>(gastoSource);
+  const gastoActual: Gasto | null = gastoDetalle ?? gastoSource ?? null;
+  const gastoAny = gastoActual as any;
 
   const isEdit = !!gastoSource && !duplicate;
   const readOnly: boolean = route?.params?.readOnly ?? false;
@@ -121,6 +137,10 @@ export const GastoGestionableFormScreen: React.FC<Props> = ({ navigation, route 
   const returnToTab: string | undefined = route?.params?.returnToTab;
   const returnToScreen: string | undefined = route?.params?.returnToScreen;
   const returnToParams: any | undefined = route?.params?.returnToParams;
+
+  const [loadingDetail, setLoadingDetail] = useState<boolean>(false);
+  const [loadingCatalogs, setLoadingCatalogs] = useState<boolean>(true);
+  const [refreshing, setRefreshing] = useState(false);
 
   const handleBack = () => {
     if (returnToTab) {
@@ -144,14 +164,15 @@ export const GastoGestionableFormScreen: React.FC<Props> = ({ navigation, route 
     navigation.goBack();
   };
 
-  const [nombre, setNombre] = useState<string>(gastoSource?.nombre ?? '');
+  // ========================
+  // Estado del formulario
+  // ========================
+  const [nombre, setNombre] = useState<string>(gastoActual?.nombre ?? '');
   const [comentarios, setComentarios] = useState<string>((gastoAny?.comentarios ?? '') as string);
   const [comentariosDirty, setComentariosDirty] = useState<boolean>(false);
 
-  const [segmentoId, setSegmentoId] = useState<string | null>(gastoSource?.segmento_id ?? null);
-  const [tipoId, setTipoId] = useState<string | null>(gastoSource?.tipo_id ?? null);
-
-  const isCotidiano = useMemo(() => segmentoId === 'COT-12345', [segmentoId]);
+  const [segmentoId, setSegmentoId] = useState<string | null>(gastoActual?.segmento_id ?? null);
+  const [tipoId, setTipoId] = useState<string | null>(gastoActual?.tipo_id ?? null);
 
   const [tipos, setTipos] = useState<TipoGasto[]>([]);
   const [proveedores, setProveedores] = useState<Proveedor[]>([]);
@@ -161,78 +182,65 @@ export const GastoGestionableFormScreen: React.FC<Props> = ({ navigation, route 
   const [proveedorSeleccionado, setProveedorSeleccionado] = useState<Proveedor | null>(null);
   const [busquedaProveedor, setBusquedaProveedor] = useState('');
   const [ramaProveedorFiltroId, setRamaProveedorFiltroId] = useState<string>(ALL_PROVIDER_RAMAS_KEY);
+  const [showProviderFilter, setShowProviderFilter] = useState<boolean>(false);
 
-  const [tienda, setTienda] = useState<string>(gastoSource?.tienda ?? '');
-  const [cuentaId, setCuentaId] = useState<string | null>(gastoSource?.cuenta_id ?? null);
+  const [tienda, setTienda] = useState<string>(gastoActual?.tienda ?? '');
+  const [cuentaId, setCuentaId] = useState<string | null>(gastoActual?.cuenta_id ?? null);
   const [viviendaId, setViviendaId] = useState<string | null>(
-    (gastoSource?.referencia_vivienda_id as string | null | undefined) ?? null
+    (gastoActual?.referencia_vivienda_id as string | null | undefined) ?? null
   );
 
-  const [numCuotas, setNumCuotas] = useState<number>(gastoSource?.cuotas ?? 1);
+  const [numCuotas, setNumCuotas] = useState<number>(gastoActual?.cuotas ?? 1);
   const [importeCuota, setImporteCuota] = useState<string>(
-    gastoSource?.importe_cuota != null ? String(gastoSource.importe_cuota) : ''
+    gastoActual?.importe_cuota != null ? String(gastoActual.importe_cuota) : ''
   );
   const [importeTotal, setImporteTotal] = useState<string>(
-    gastoSource?.importe != null ? String(gastoSource.importe) : ''
+    gastoActual?.importe != null ? String(gastoActual.importe) : ''
   );
 
   const [periodicidad, setPeriodicidad] = useState<string>(() => {
-    if (gastoSource?.periodicidad) return normalizePagoUnico(gastoSource.periodicidad);
+    if (gastoActual?.periodicidad) return normalizePagoUnico(gastoActual.periodicidad);
     if (!isEdit && preset === 'extra') return 'PAGO UNICO';
     return 'MENSUAL';
   });
 
-  const periodicidadesForPreset = useMemo<string[]>(() => {
-    if (preset === 'extra') return ['PAGO UNICO'];
-    return [...PERIODICIDADES];
-  }, [preset]);
-
-  useEffect(() => {
-    if (preset !== 'extra') return;
-    const per = normalizePagoUnico(periodicidad);
-    if (per !== 'PAGO UNICO') {
-      setPeriodicidad('PAGO UNICO');
-    }
-  }, [preset, periodicidad]);
-
   const [lockImporteCuota, setLockImporteCuota] = useState(false);
   const [lockImporteTotal, setLockImporteTotal] = useState(false);
 
-  useEffect(() => {
-    if (!isCotidiano) return;
-    setLockImporteCuota(false);
-    setLockImporteTotal(false);
-  }, [isCotidiano]);
-
   const [cuotasPagadas, setCuotasPagadas] = useState<number>(gastoAny?.cuotas_pagadas ?? 0);
   const [cuotasRestantes, setCuotasRestantes] = useState<number>(
-    gastoAny?.cuotas_restantes ?? Math.max((gastoSource?.cuotas ?? 0) - (gastoAny?.cuotas_pagadas ?? 0), 0)
+    gastoAny?.cuotas_restantes ?? Math.max((gastoActual?.cuotas ?? 0) - (gastoAny?.cuotas_pagadas ?? 0), 0)
   );
   const [importePendiente, setImportePendiente] = useState<number>(gastoAny?.importe_pendiente ?? 0);
   const [prestamoId, setPrestamoId] = useState<string>(gastoAny?.prestamo_id ?? gastoAny?.prestamoId ?? '');
   const [numCuota, setNumCuota] = useState<number>(gastoAny?.num_cuota ?? 1);
 
   const hoyIso = new Date().toISOString().slice(0, 10);
-  const [fecha, setFecha] = useState<string>(gastoSource?.fecha ?? hoyIso);
+  const [fecha, setFecha] = useState<string>(gastoActual?.fecha ?? hoyIso);
   const [showDatePicker, setShowDatePicker] = useState(false);
-  const [rangoPago, setRangoPago] = useState<string>(gastoSource?.rango_pago ?? '1-3');
+  const [rangoPago, setRangoPago] = useState<string>(gastoActual?.rango_pago ?? '1-3');
 
   const [showAdvanced, setShowAdvanced] = useState(false);
   const [referenciaGasto, setReferenciaGasto] = useState<string>(
-    (gastoSource?.referencia_gasto as string | null | undefined) ?? ''
+    (gastoActual?.referencia_gasto as string | null | undefined) ?? ''
   );
 
   const [activo, setActivo] = useState<boolean>(gastoAny?.activo ?? true);
   const [pagado, setPagado] = useState<boolean>(gastoAny?.pagado ?? false);
   const [kpi, setKpi] = useState<boolean>(gastoAny?.kpi ?? false);
 
+  const isCotidiano = useMemo(() => segmentoId === 'COT-12345', [segmentoId]);
+
+  const periodicidadesForPreset = useMemo<string[]>(() => {
+    if (preset === 'extra') return ['PAGO UNICO'];
+    return [...PERIODICIDADES];
+  }, [preset]);
+
   const createOn: string | null = gastoAny?.createon ?? null;
   const modifiedOn: string | null = gastoAny?.modifiedon ?? null;
   const inactivatedOn: string | null = gastoAny?.inactivatedon ?? null;
   const ultimoPagoOn: string | null = gastoAny?.ultimo_pago_on ?? null;
   const userName: string | null = gastoAny?.user_nombre ?? gastoAny?.userName ?? gastoAny?.user_id ?? null;
-
-  const [refreshing, setRefreshing] = useState(false);
 
   const proveedorRamaOptions = useMemo<ProviderRamaOption[]>(() => {
     const map = new Map<string, ProviderRamaOption>();
@@ -252,9 +260,120 @@ export const GastoGestionableFormScreen: React.FC<Props> = ({ navigation, route 
     return Array.from(map.values()).sort((a, b) => a.nombre.localeCompare(b.nombre, 'es'));
   }, [proveedores]);
 
+  const currentProviderFilterLabel = useMemo(() => {
+    if (ramaProveedorFiltroId === ALL_PROVIDER_RAMAS_KEY) return 'TODOS';
+    const found = proveedorRamaOptions.find((r) => r.id === ramaProveedorFiltroId);
+    return found?.nombre ?? 'TODOS';
+  }, [ramaProveedorFiltroId, proveedorRamaOptions]);
+
+  // ========================
+  // Helpers de hidratación
+  // ========================
+  const hydrateFormFromGasto = React.useCallback(
+    (g: Gasto) => {
+      const now = new Date();
+      const hoy = now.toISOString().slice(0, 10);
+      const per = normalizePagoUnico(g.periodicidad ?? '');
+
+      setNombre(
+        duplicate
+          ? appendMonthYearSuffix(g.nombre ?? '', now)
+          : (g.nombre ?? '')
+      );
+
+      setComentarios((g as any)?.comentarios ?? '');
+      setComentariosDirty(false);
+
+      setSegmentoId(g.segmento_id ?? null);
+      setTipoId(g.tipo_id ?? null);
+
+      setTienda(g.tienda ?? '');
+      setCuentaId(g.cuenta_id ?? null);
+      setViviendaId((g.referencia_vivienda_id as string | null | undefined) ?? null);
+
+      setNumCuotas(g.cuotas ?? 1);
+      setImporteCuota(g.importe_cuota != null ? String(g.importe_cuota) : '');
+      setImporteTotal(g.importe != null ? String(g.importe) : '');
+
+      setPeriodicidad(per || (preset === 'extra' ? 'PAGO UNICO' : 'MENSUAL'));
+
+      setCuotasPagadas((g as any)?.cuotas_pagadas ?? 0);
+      setCuotasRestantes(
+        (g as any)?.cuotas_restantes ??
+          Math.max((g?.cuotas ?? 0) - ((g as any)?.cuotas_pagadas ?? 0), 0)
+      );
+      setImportePendiente((g as any)?.importe_pendiente ?? 0);
+      setPrestamoId((g as any)?.prestamo_id ?? (g as any)?.prestamoId ?? '');
+      setNumCuota((g as any)?.num_cuota ?? 1);
+
+      if (duplicate) {
+        setFecha(hoy);
+        setRangoPago(getRangoFromDateString(hoy));
+
+        if (per === 'PAGO UNICO') {
+          setPagado(true);
+          setActivo(false);
+          setKpi(false);
+          setNumCuotas(1);
+          setCuotasPagadas(1);
+          setNumCuota(1);
+        } else {
+          setPagado((g as any)?.pagado ?? false);
+          setActivo((g as any)?.activo ?? true);
+          setKpi((g as any)?.kpi ?? false);
+        }
+      } else {
+        setFecha(g.fecha ?? hoy);
+        setRangoPago(g.rango_pago ?? '1-3');
+        setPagado((g as any)?.pagado ?? false);
+        setActivo((g as any)?.activo ?? true);
+        setKpi((g as any)?.kpi ?? false);
+      }
+
+      setReferenciaGasto((g.referencia_gasto as string | null | undefined) ?? '');
+      setLockImporteCuota(false);
+      setLockImporteTotal(false);
+    },
+    [duplicate, preset]
+  );
+
+  // ========================
+  // Carga de detalle real
+  // ========================
+  const loadDetalleGasto = React.useCallback(async () => {
+    if (!routeGastoId) return;
+
+    try {
+      setLoadingDetail(true);
+      const detalle = await obtenerGasto(routeGastoId);
+      setGastoDetalle(detalle);
+    } catch (err) {
+      console.error('[GastoGestionableForm] Error cargando detalle del gasto', err);
+    } finally {
+      setLoadingDetail(false);
+    }
+  }, [routeGastoId]);
+
+  useEffect(() => {
+    void loadDetalleGasto();
+  }, [loadDetalleGasto]);
+
+  useEffect(() => {
+    if (!gastoActual?.id) return;
+    if (hydratedFromGastoIdRef.current === gastoActual.id) return;
+
+    hydrateFormFromGasto(gastoActual);
+    hydratedFromGastoIdRef.current = gastoActual.id;
+  }, [gastoActual, hydrateFormFromGasto]);
+
+  // ========================
+  // Reset centralizado
+  // ========================
   const resetFormToNew = React.useCallback(() => {
     const now = new Date();
     const hoy = now.toISOString().slice(0, 10);
+
+    hydratedFromGastoIdRef.current = null;
 
     setNombre('');
     setComentarios('');
@@ -266,6 +385,7 @@ export const GastoGestionableFormScreen: React.FC<Props> = ({ navigation, route 
     setProveedorSeleccionado(null);
     setBusquedaProveedor('');
     setRamaProveedorFiltroId(ALL_PROVIDER_RAMAS_KEY);
+    setShowProviderFilter(false);
 
     setTienda('');
 
@@ -326,27 +446,9 @@ export const GastoGestionableFormScreen: React.FC<Props> = ({ navigation, route 
     onReset: guardedResetOnFocus,
   });
 
-  useEffect(() => {
-    if (!duplicate || !gastoSource) return;
-
-    const now = new Date();
-    const hoy = now.toISOString().slice(0, 10);
-
-    setNombre(appendMonthYearSuffix(gastoSource.nombre ?? '', now));
-    setFecha(hoy);
-    setRangoPago(getRangoFromDateString(hoy));
-
-    const per = normalizePagoUnico(gastoSource.periodicidad ?? '');
-    if (per === 'PAGO UNICO') {
-      setPagado(true);
-      setActivo(false);
-      setKpi(false);
-      setNumCuotas(1);
-      setCuotasPagadas(1);
-      setNumCuota(1);
-    }
-  }, [duplicate, gastoSource]);
-
+  // ========================
+  // Retorno desde AuxEntityForm
+  // ========================
   useFocusEffect(
     React.useCallback(() => {
       let alive = true;
@@ -411,19 +513,27 @@ export const GastoGestionableFormScreen: React.FC<Props> = ({ navigation, route 
     }, [route?.params?.auxResult, navigation, segmentoId])
   );
 
+  // ========================
+  // Catálogos
+  // ========================
   useEffect(() => {
     const loadStatic = async () => {
       try {
+        setLoadingCatalogs(true);
+
         const [provRes, ctasRes, vivsRes] = await Promise.all([
           fetchProveedores(),
           fetchCuentas(),
           fetchViviendas(),
         ]);
+
         setProveedores(provRes);
         setCuentas(ctasRes);
         setViviendas(vivsRes);
       } catch (err) {
         console.error('[GastoGestionableForm] Error cargando proveedores/cuentas/viviendas', err);
+      } finally {
+        setLoadingCatalogs(false);
       }
     };
 
@@ -431,12 +541,30 @@ export const GastoGestionableFormScreen: React.FC<Props> = ({ navigation, route 
   }, []);
 
   useEffect(() => {
-    if (!gastoSource || !gastoSource.proveedor_id) return;
+    const loadTipos = async () => {
+      try {
+        const data = await fetchTiposGasto(segmentoId ?? undefined);
+        setTipos(data);
+
+        if (segmentoId && gastoActual && gastoActual.segmento_id === segmentoId) {
+          setTipoId(gastoActual.tipo_id ?? null);
+        } else {
+          setTipoId((prev) => (data.some((t) => t.id === prev) ? prev : null));
+        }
+      } catch (err) {
+        console.error('[GastoGestionableForm] Error cargando tipos de gasto', err);
+      }
+    };
+    void loadTipos();
+  }, [segmentoId, gastoActual]);
+
+  useEffect(() => {
+    if (!gastoActual || !gastoActual.proveedor_id) return;
     if (!proveedores.length) return;
 
-    const found = proveedores.find((p) => p.id === gastoSource.proveedor_id);
+    const found = proveedores.find((p) => p.id === gastoActual.proveedor_id);
     if (found) setProveedorSeleccionado(found);
-  }, [gastoSource, proveedores]);
+  }, [gastoActual, proveedores]);
 
   useEffect(() => {
     if (!proveedorSeleccionado) return;
@@ -447,39 +575,51 @@ export const GastoGestionableFormScreen: React.FC<Props> = ({ navigation, route 
   }, [proveedores, proveedorSeleccionado]);
 
   useEffect(() => {
-    const loadTipos = async () => {
-      try {
-        const data = await fetchTiposGasto(segmentoId ?? undefined);
-        setTipos(data);
+    if (preset !== 'extra') return;
+    const per = normalizePagoUnico(periodicidad);
+    if (per !== 'PAGO UNICO') {
+      setPeriodicidad('PAGO UNICO');
+    }
+  }, [preset, periodicidad]);
 
-        if (segmentoId && gastoSource && gastoSource.segmento_id === segmentoId) {
-          setTipoId(gastoSource.tipo_id ?? null);
-        } else {
-          setTipoId((prev) => (data.some((t) => t.id === prev) ? prev : null));
-        }
-      } catch (err) {
-        console.error('[GastoGestionableForm] Error cargando tipos de gasto', err);
-      }
-    };
-    void loadTipos();
-  }, [segmentoId, gastoSource]);
+  useEffect(() => {
+    if (!isCotidiano) return;
+    setLockImporteCuota(false);
+    setLockImporteTotal(false);
+  }, [isCotidiano]);
+
+  useEffect(() => {
+    const restantes = Math.max(numCuotas - cuotasPagadas, 0);
+    setCuotasRestantes(restantes);
+
+    const cuotaNum = parseEuroToNumber(importeCuota) ?? 0;
+    setImportePendiente(restantes * cuotaNum);
+  }, [numCuotas, cuotasPagadas, importeCuota]);
 
   const handleRefresh = async () => {
     setRefreshing(true);
     try {
-      const [provRes, ctasRes, vivsRes, tiposRes] = await Promise.all([
+      const catalogPromises = [
         fetchProveedores(),
         fetchCuentas(),
         fetchViviendas(),
         fetchTiposGasto(segmentoId ?? undefined),
-      ]);
+      ] as const;
+
+      const [provRes, ctasRes, vivsRes, tiposRes] = await Promise.all(catalogPromises);
 
       setProveedores(provRes);
       setCuentas(ctasRes);
       setViviendas(vivsRes);
       setTipos(tiposRes);
+
+      if (routeGastoId) {
+        const detalle = await obtenerGasto(routeGastoId);
+        setGastoDetalle(detalle);
+        hydratedFromGastoIdRef.current = null;
+      }
     } catch (err) {
-      console.error('[GastoGestionableForm] Error al refrescar catálogos', err);
+      console.error('[GastoGestionableForm] Error al refrescar catálogos/detalle', err);
     } finally {
       setRefreshing(false);
     }
@@ -571,14 +711,6 @@ export const GastoGestionableFormScreen: React.FC<Props> = ({ navigation, route 
     setLockImporteTotal(false);
   };
 
-  useEffect(() => {
-    const restantes = Math.max(numCuotas - cuotasPagadas, 0);
-    setCuotasRestantes(restantes);
-
-    const cuotaNum = parseEuroToNumber(importeCuota) ?? 0;
-    setImportePendiente(restantes * cuotaNum);
-  }, [numCuotas, cuotasPagadas, importeCuota]);
-
   const handleOpenDatePicker = () => {
     if (readOnly) return;
     setShowDatePicker(true);
@@ -653,8 +785,8 @@ export const GastoGestionableFormScreen: React.FC<Props> = ({ navigation, route 
     };
 
     try {
-      if (isEdit && gastoSource?.id) {
-        await actualizarGasto(gastoSource.id, {
+      if (isEdit && gastoActual?.id) {
+        await actualizarGasto(gastoActual.id, {
           ...basePayload,
           cuotasPagadas,
           prestamoId: prestamoId || undefined,
@@ -703,6 +835,8 @@ export const GastoGestionableFormScreen: React.FC<Props> = ({ navigation, route 
         ? 'Duplicado'
         : 'Nuevo gasto gestionable';
 
+  const isScreenLoading = loadingCatalogs || loadingDetail;
+
   return (
     <FormScreen
       title={title}
@@ -723,512 +857,542 @@ export const GastoGestionableFormScreen: React.FC<Props> = ({ navigation, route 
         ) : null
       }
     >
-      <FormSection title="Datos básicos">
-        <View style={styles.field}>
-          <Text style={styles.label}>Nombre del gasto</Text>
-          <TextInput
-            style={[styles.input, nombre.trim() !== '' && styles.inputFilled]}
-            placeholder="Ej. LUZ PISO CENTRO"
-            value={nombre}
-            onChangeText={setNombre}
-            editable={!readOnly}
-          />
+      {isScreenLoading ? (
+        <View style={stylesLocal.loader}>
+          <ActivityIndicator size="small" color={colors.primary} />
+          <Text style={stylesLocal.loaderText}>Cargando datos del gasto…</Text>
         </View>
-
-        <View style={styles.field}>
-          <Text style={styles.label}>Comentarios</Text>
-          <TextInput
-            style={[styles.input, comentarios.trim() !== '' && styles.inputFilled]}
-            placeholder="Añade notas o comentarios..."
-            value={comentarios}
-            onChangeText={(t) => {
-              setComentarios(t);
-              if (!comentariosDirty) setComentariosDirty(true);
-            }}
-            editable={!readOnly}
-            multiline
-            numberOfLines={3}
-            textAlignVertical="top"
-          />
-        </View>
-
-        <View style={styles.field}>
-          <Text style={styles.label}>Segmento</Text>
-          <View style={styles.segmentosRow}>
-            {SEGMENTOS.map((seg) => (
-              <View key={seg.id} style={styles.segmentoWrapper}>
-                <PillButton
-                  label={seg.nombre}
-                  selected={segmentoId === seg.id}
-                  onPress={() => {
-                    if (readOnly) return;
-                    setSegmentoId((prev) => (prev === seg.id ? null : seg.id));
-                  }}
-                />
-              </View>
-            ))}
-          </View>
-        </View>
-
-        <View style={styles.field}>
-          <View style={styles.labelRow}>
-            <Text style={styles.label}>Tipo de gasto</Text>
-
-            <InlineAddButton
-              onPress={() => {
-                if (readOnly) return;
-
-                if (!segmentoId) {
-                  Alert.alert('Campo requerido', 'Selecciona primero un segmento.');
-                  return;
-                }
-
-                skipResetOnNextFocusRef.current = true;
-                console.log('[GastoGestionableForm][NAV] Ir a AuxEntityForm(tipo_gasto) -> skip reset on return.');
-
-                navigation.navigate('AuxEntityForm', {
-                  auxType: 'tipo_gasto',
-                  origin: 'gestionables',
-                  returnKey: 'gestionables-tipo_gasto',
-                  returnRouteKey: route.key,
-                  defaultSegmentoId: segmentoId,
-                });
-              }}
-              disabled={readOnly}
-              accessibilityLabel="Crear tipo de gasto"
-            />
-          </View>
-
-          {!segmentoId && (
-            <Text style={styles.helperText}>Selecciona primero un segmento para ver los tipos de gasto.</Text>
-          )}
-
-          {segmentoId && tiposFiltrados.length === 0 && (
-            <Text style={styles.helperText}>No hay tipos de gasto para este segmento.</Text>
-          )}
-
-          {segmentoId && tiposFiltrados.length > 0 && (
-            <View style={styles.segmentosRow}>
-              {tiposFiltrados.map((tipo) => (
-                <View key={tipo.id} style={styles.segmentoWrapper}>
-                  <PillButton
-                    label={tipo.nombre}
-                    selected={tipoId === tipo.id}
-                    onPress={() => {
-                      if (readOnly) return;
-                      setTipoId((prev) => (prev === tipo.id ? null : tipo.id));
-                    }}
-                  />
-                </View>
-              ))}
+      ) : (
+        <>
+          <FormSection title="Datos básicos">
+            <View style={styles.field}>
+              <Text style={styles.label}>Nombre del gasto</Text>
+              <TextInput
+                style={[styles.input, nombre.trim() !== '' && styles.inputFilled]}
+                placeholder="Ej. LUZ PISO CENTRO"
+                value={nombre}
+                onChangeText={setNombre}
+                editable={!readOnly}
+              />
             </View>
-          )}
-        </View>
 
-        <View style={styles.field}>
-          <Text style={styles.label}>Filtrar proveedores por rama</Text>
-          <View style={styles.segmentosRow}>
-            <View style={styles.segmentoWrapper}>
-              <PillButton
-                label="TODOS"
-                size="sm"
-                style={stylesLocal.providerFilterPill}
-                textStyle={stylesLocal.providerFilterPillText}
-                selected={ramaProveedorFiltroId === ALL_PROVIDER_RAMAS_KEY}
-                onPress={() => {
-                  if (readOnly) return;
-                  setRamaProveedorFiltroId(ALL_PROVIDER_RAMAS_KEY);
+            <View style={styles.field}>
+              <Text style={styles.label}>Comentarios</Text>
+              <TextInput
+                style={[styles.input, comentarios.trim() !== '' && styles.inputFilled]}
+                placeholder="Añade notas o comentarios..."
+                value={comentarios}
+                onChangeText={(t) => {
+                  setComentarios(t);
+                  if (!comentariosDirty) setComentariosDirty(true);
                 }}
+                editable={!readOnly}
+                multiline
+                numberOfLines={3}
+                textAlignVertical="top"
               />
             </View>
 
-            {proveedorRamaOptions.map((rama) => (
-              <View key={rama.id} style={styles.segmentoWrapper}>
-                <PillButton
-                  label={rama.nombre}
-                  size="sm"
-                  style={stylesLocal.providerFilterPill}
-                  textStyle={stylesLocal.providerFilterPillText}
-                  selected={ramaProveedorFiltroId === rama.id}
-                  onPress={() => {
-                    if (readOnly) return;
-                    setRamaProveedorFiltroId(rama.id);
-                  }}
-                />
-              </View>
-            ))}
-          </View>
-
-          <Text style={styles.helperText}>
-            Primero puedes acotar por rama y después buscar proveedor por nombre.
-          </Text>
-        </View>
-
-        <View style={styles.field}>
-          <InlineSearchSelect<Proveedor>
-            label="Proveedor"
-            onAddPress={handleAddProveedor}
-            addAccessibilityLabel="Crear proveedor"
-            disabled={readOnly}
-            selected={proveedorSeleccionado}
-            selectedLabel={(p: Proveedor) => p.nombre}
-            onClear={handleClearProveedor}
-            query={busquedaProveedor}
-            onChangeQuery={setBusquedaProveedor}
-            placeholder="Escribe para buscar proveedor"
-            options={proveedoresFiltrados}
-            optionKey={(p: Proveedor) => p.id}
-            optionLabel={(p: Proveedor) => p.nombre}
-            onSelect={(p: Proveedor) => {
-              if (readOnly) return;
-              setProveedorSeleccionado(p);
-            }}
-            emptyText="No hay proveedores que coincidan con la búsqueda."
-          />
-        </View>
-
-        <View style={styles.field}>
-          <Text style={styles.label}>Tienda (opcional)</Text>
-          <TextInput
-            style={[styles.input, tienda.trim() !== '' && styles.inputFilled]}
-            placeholder="Ej. MERCADONA, AMAZON, etc."
-            value={tienda}
-            onChangeText={setTienda}
-            editable={!readOnly}
-          />
-        </View>
-      </FormSection>
-
-      <FormSection title="Importe y condiciones">
-        <View style={styles.field}>
-          <Text style={styles.label}>Número de cuotas</Text>
-          <TextInput
-            style={[styles.input, String(numCuotas) !== '' && styles.inputFilled]}
-            keyboardType="number-pad"
-            value={String(numCuotas)}
-            onChangeText={handleChangeNumCuotas}
-            editable={!readOnly}
-          />
-        </View>
-
-        <View style={styles.fieldRowTwoCols}>
-          <View style={styles.col}>
-            <Text style={styles.label}>Importe cuota</Text>
-            <TextInput
-              style={[
-                styles.input,
-                styles.amountInputBig,
-                importeCuota.trim() !== '' && styles.inputFilled,
-                lockImporteCuota && styles.inputDisabled,
-              ]}
-              editable={!readOnly && !lockImporteCuota}
-              keyboardType="decimal-pad"
-              value={importeCuota}
-              onChangeText={handleChangeImporteCuota}
-              placeholder="Ej. 250,00"
-            />
-          </View>
-
-          <View style={styles.col}>
-            <Text style={styles.label}>Importe total</Text>
-            <TextInput
-              style={[
-                styles.input,
-                styles.amountInputBig,
-                importeTotal.trim() !== '' && styles.inputFilled,
-                lockImporteTotal && styles.inputDisabled,
-              ]}
-              editable={!readOnly && !lockImporteTotal}
-              keyboardType="decimal-pad"
-              value={importeTotal}
-              onChangeText={handleChangeImporteTotal}
-              placeholder="Ej. 1.500,00"
-            />
-          </View>
-        </View>
-
-        <View style={styles.field}>
-          <Text style={styles.label}>Periodicidad</Text>
-          <View style={styles.periodicidadRow}>
-            {periodicidadesForPreset.map((p) => (
-              <View key={p} style={styles.periodicidadPillWrapper}>
-                <PillButton
-                  label={p}
-                  selected={normalizePagoUnico(periodicidad) === p}
-                  onPress={() => {
-                    if (readOnly) return;
-                    setPeriodicidad(p);
-                  }}
-                />
-              </View>
-            ))}
-          </View>
-        </View>
-
-        {isEdit && (
-          <>
-            <View style={styles.fieldRowTwoCols}>
-              <View style={styles.col}>
-                <Text style={styles.label}>Cuotas pagadas</Text>
-                <TextInput
-                  style={[styles.input, styles.inputAdvanced]}
-                  keyboardType="number-pad"
-                  value={String(cuotasPagadas)}
-                  onChangeText={(txt) => setCuotasPagadas(Number(txt.replace(/\D/g, '')) || 0)}
-                  editable={!readOnly}
-                />
-              </View>
-              <View style={styles.col}>
-                <Text style={styles.label}>Cuotas restantes</Text>
-                <TextInput
-                  style={[styles.input, styles.inputAdvanced, styles.inputDisabled]}
-                  editable={false}
-                  value={String(cuotasRestantes)}
-                />
-              </View>
-            </View>
-
-            <View style={styles.fieldRowTwoCols}>
-              <View style={styles.col}>
-                <Text style={styles.label}>Importe pendiente</Text>
-                <TextInput
-                  style={[styles.input, styles.inputAdvanced, styles.inputDisabled]}
-                  editable={false}
-                  value={
-                    importePendiente
-                      ? importePendiente.toLocaleString('es-ES', {
-                          minimumFractionDigits: 2,
-                          maximumFractionDigits: 2,
-                        })
-                      : '0,00'
-                  }
-                />
-              </View>
-              <View style={styles.col}>
-                <Text style={styles.label}>Préstamo ID</Text>
-                <TextInput
-                  style={[styles.input, styles.inputAdvanced, prestamoId.trim() !== '' && styles.inputFilled]}
-                  value={prestamoId}
-                  onChangeText={setPrestamoId}
-                  placeholder="ID del préstamo"
-                  editable={false}
-                />
+            <View style={styles.field}>
+              <Text style={styles.label}>Segmento</Text>
+              <View style={styles.segmentosRow}>
+                {SEGMENTOS.map((seg) => (
+                  <View key={seg.id} style={styles.segmentoWrapper}>
+                    <PillButton
+                      label={seg.nombre}
+                      selected={segmentoId === seg.id}
+                      onPress={() => {
+                        if (readOnly) return;
+                        setSegmentoId((prev) => (prev === seg.id ? null : seg.id));
+                      }}
+                    />
+                  </View>
+                ))}
               </View>
             </View>
 
             <View style={styles.field}>
-              <Text style={styles.label}>Número de cuota</Text>
-              <TextInput
-                style={[styles.input, styles.inputAdvanced, String(numCuota) !== '' && styles.inputFilled]}
-                keyboardType="number-pad"
-                value={String(numCuota)}
-                onChangeText={(txt) => setNumCuota(Number(txt.replace(/\D/g, '')) || 1)}
-                editable={!readOnly}
-              />
-            </View>
-          </>
-        )}
-      </FormSection>
+              <View style={styles.labelRow}>
+                <Text style={styles.label}>Tipo de gasto</Text>
 
-      <FormSection title="Vinculaciones">
-        {segmentoId === VIVIENDAS_SEGMENTO_ID && (
-          <View style={styles.field}>
-            <Text style={styles.label}>Vivienda</Text>
-            <View style={styles.accountsRow}>
-              {viviendasActivas.map((v) => (
-                <View key={v.id} style={styles.accountPillWrapper}>
-                  <AccountPill
-                    label={v.referencia}
-                    subLabel={v.direccion_completa ?? ''}
-                    selected={viviendaId === v.id}
-                    onPress={() => {
-                      if (readOnly) return;
-                      setViviendaId((prev) => (prev === v.id ? null : v.id));
-                    }}
-                  />
+                <InlineAddButton
+                  onPress={() => {
+                    if (readOnly) return;
+
+                    if (!segmentoId) {
+                      Alert.alert('Campo requerido', 'Selecciona primero un segmento.');
+                      return;
+                    }
+
+                    skipResetOnNextFocusRef.current = true;
+                    console.log('[GastoGestionableForm][NAV] Ir a AuxEntityForm(tipo_gasto) -> skip reset on return.');
+
+                    navigation.navigate('AuxEntityForm', {
+                      auxType: 'tipo_gasto',
+                      origin: 'gestionables',
+                      returnKey: 'gestionables-tipo_gasto',
+                      returnRouteKey: route.key,
+                      defaultSegmentoId: segmentoId,
+                    });
+                  }}
+                  disabled={readOnly}
+                  accessibilityLabel="Crear tipo de gasto"
+                />
+              </View>
+
+              {!segmentoId && (
+                <Text style={styles.helperText}>Selecciona primero un segmento para ver los tipos de gasto.</Text>
+              )}
+
+              {segmentoId && tiposFiltrados.length === 0 && (
+                <Text style={styles.helperText}>No hay tipos de gasto para este segmento.</Text>
+              )}
+
+              {segmentoId && tiposFiltrados.length > 0 && (
+                <View style={styles.segmentosRow}>
+                  {tiposFiltrados.map((tipo) => (
+                    <View key={tipo.id} style={styles.segmentoWrapper}>
+                      <PillButton
+                        label={tipo.nombre}
+                        selected={tipoId === tipo.id}
+                        onPress={() => {
+                          if (readOnly) return;
+                          setTipoId((prev) => (prev === tipo.id ? null : tipo.id));
+                        }}
+                      />
+                    </View>
+                  ))}
                 </View>
-              ))}
+              )}
             </View>
-          </View>
-        )}
 
-        <View style={styles.field}>
-          <View style={styles.labelRow}>
-            <Text style={styles.label}>Cuenta de cargo</Text>
-            <InlineAddButton
-              onPress={() => {
-                if (readOnly) return;
-                console.log('TODO: crear nueva cuenta de cargo');
-              }}
-              disabled={readOnly}
-              accessibilityLabel="Crear cuenta de cargo"
-            />
-          </View>
-
-          <View style={styles.accountsRow}>
-            {cuentas.map((cta) => (
-              <View key={cta.id} style={styles.accountPillWrapper}>
-                <AccountPill
-                  label={cta.anagrama}
-                  subLabel={`${cta.liquidez.toLocaleString('es-ES', {
-                    minimumFractionDigits: 2,
-                    maximumFractionDigits: 2,
-                  })} €`}
-                  selected={cuentaId === cta.id}
-                  onPress={() => {
-                    if (readOnly) return;
-                    setCuentaId(cta.id);
-                  }}
-                />
-              </View>
-            ))}
-          </View>
-        </View>
-      </FormSection>
-
-      <FormSection title="Estado y planificación">
-        <View style={styles.field}>
-          <Text style={styles.label}>Fecha</Text>
-          <FormDateButton valueText={formatFechaCorta(fecha)} onPress={handleOpenDatePicker} disabled={readOnly} />
-
-          {showDatePicker && (
-            <DateTimePicker value={new Date(fecha)} mode="date" display="default" onChange={handleDateChange} />
-          )}
-        </View>
-
-        <View style={styles.field}>
-          <Text style={styles.label}>Rango de pago</Text>
-          <View style={styles.rangoRow}>
-            {RANGOS_PAGO.map((rango) => (
-              <View key={rango} style={styles.rangoPillWrapper}>
-                <PillButton
-                  label={rango}
-                  selected={rangoPago === rango}
-                  onPress={() => {
-                    if (readOnly) return;
-                    setRangoPago(rango);
-                  }}
-                />
-              </View>
-            ))}
-          </View>
-        </View>
-      </FormSection>
-
-      <FormSection title="Opciones avanzadas">
-        <TouchableOpacity style={styles.advancedToggle} onPress={() => setShowAdvanced((prev) => !prev)}>
-          <Ionicons
-            name={showAdvanced ? 'chevron-up' : 'chevron-down'}
-            size={16}
-            color={colors.textSecondary}
-          />
-          <Text style={styles.advancedToggleText}>
-            {showAdvanced ? 'Ocultar opciones avanzadas' : 'Mostrar opciones avanzadas'}
-          </Text>
-        </TouchableOpacity>
-
-        {showAdvanced && (
-          <>
             <View style={styles.field}>
-              <Text style={styles.label}>Referencia del gasto (opcional)</Text>
+              <TouchableOpacity
+                style={stylesLocal.providerFilterToggle}
+                onPress={() => setShowProviderFilter((prev) => !prev)}
+              >
+                <View style={stylesLocal.providerFilterToggleTextWrap}>
+                  <Text style={styles.label}>Filtrar proveedores por rama</Text>
+                  <Text style={styles.helperText}>
+                    Filtro actual: {currentProviderFilterLabel}
+                  </Text>
+                </View>
+
+                <Ionicons
+                  name={showProviderFilter ? 'chevron-up' : 'chevron-down'}
+                  size={16}
+                  color={colors.textSecondary}
+                />
+              </TouchableOpacity>
+
+              {showProviderFilter && (
+                <>
+                  <View style={styles.segmentosRow}>
+                    <View style={styles.segmentoWrapper}>
+                      <PillButton
+                        label="TODOS"
+                        size="sm"
+                        style={stylesLocal.providerFilterPill}
+                        textStyle={stylesLocal.providerFilterPillText}
+                        selected={ramaProveedorFiltroId === ALL_PROVIDER_RAMAS_KEY}
+                        onPress={() => {
+                          if (readOnly) return;
+                          setRamaProveedorFiltroId(ALL_PROVIDER_RAMAS_KEY);
+                        }}
+                      />
+                    </View>
+
+                    {proveedorRamaOptions.map((rama) => (
+                      <View key={rama.id} style={styles.segmentoWrapper}>
+                        <PillButton
+                          label={rama.nombre}
+                          size="sm"
+                          style={stylesLocal.providerFilterPill}
+                          textStyle={stylesLocal.providerFilterPillText}
+                          selected={ramaProveedorFiltroId === rama.id}
+                          onPress={() => {
+                            if (readOnly) return;
+                            setRamaProveedorFiltroId(rama.id);
+                          }}
+                        />
+                      </View>
+                    ))}
+                  </View>
+
+                  <Text style={styles.helperText}>
+                    Primero puedes acotar por rama y después buscar proveedor por nombre.
+                  </Text>
+                </>
+              )}
+            </View>
+
+            <View style={styles.field}>
+              <InlineSearchSelect<Proveedor>
+                label="Proveedor"
+                onAddPress={handleAddProveedor}
+                addAccessibilityLabel="Crear proveedor"
+                disabled={readOnly}
+                selected={proveedorSeleccionado}
+                selectedLabel={(p: Proveedor) => p.nombre}
+                onClear={handleClearProveedor}
+                query={busquedaProveedor}
+                onChangeQuery={setBusquedaProveedor}
+                placeholder="Escribe para buscar proveedor"
+                options={proveedoresFiltrados}
+                optionKey={(p: Proveedor) => p.id}
+                optionLabel={(p: Proveedor) => p.nombre}
+                onSelect={(p: Proveedor) => {
+                  if (readOnly) return;
+                  setProveedorSeleccionado(p);
+                }}
+                emptyText="No hay proveedores que coincidan con la búsqueda."
+              />
+            </View>
+
+            <View style={styles.field}>
+              <Text style={styles.label}>Tienda (opcional)</Text>
               <TextInput
-                style={[styles.input, referenciaGasto.trim() !== '' && styles.inputFilled]}
-                placeholder="Ej. LUZ_CASA_CENTRO_2025"
-                value={referenciaGasto}
-                onChangeText={setReferenciaGasto}
+                style={[styles.input, tienda.trim() !== '' && styles.inputFilled]}
+                placeholder="Ej. MERCADONA, AMAZON, etc."
+                value={tienda}
+                onChangeText={setTienda}
                 editable={!readOnly}
               />
+            </View>
+          </FormSection>
+
+          <FormSection title="Importe y condiciones">
+            <View style={styles.field}>
+              <Text style={styles.label}>Número de cuotas</Text>
+              <TextInput
+                style={[styles.input, String(numCuotas) !== '' && styles.inputFilled]}
+                keyboardType="number-pad"
+                value={String(numCuotas)}
+                onChangeText={handleChangeNumCuotas}
+                editable={!readOnly}
+              />
+            </View>
+
+            <View style={styles.fieldRowTwoCols}>
+              <View style={styles.col}>
+                <Text style={styles.label}>Importe cuota</Text>
+                <TextInput
+                  style={[
+                    styles.input,
+                    styles.amountInputBig,
+                    importeCuota.trim() !== '' && styles.inputFilled,
+                    lockImporteCuota && styles.inputDisabled,
+                  ]}
+                  editable={!readOnly && !lockImporteCuota}
+                  keyboardType="decimal-pad"
+                  value={importeCuota}
+                  onChangeText={handleChangeImporteCuota}
+                  placeholder="Ej. 250,00"
+                />
+              </View>
+
+              <View style={styles.col}>
+                <Text style={styles.label}>Importe total</Text>
+                <TextInput
+                  style={[
+                    styles.input,
+                    styles.amountInputBig,
+                    importeTotal.trim() !== '' && styles.inputFilled,
+                    lockImporteTotal && styles.inputDisabled,
+                  ]}
+                  editable={!readOnly && !lockImporteTotal}
+                  keyboardType="decimal-pad"
+                  value={importeTotal}
+                  onChangeText={handleChangeImporteTotal}
+                  placeholder="Ej. 1.500,00"
+                />
+              </View>
+            </View>
+
+            <View style={styles.field}>
+              <Text style={styles.label}>Periodicidad</Text>
+              <View style={styles.periodicidadRow}>
+                {periodicidadesForPreset.map((p) => (
+                  <View key={p} style={styles.periodicidadPillWrapper}>
+                    <PillButton
+                      label={p}
+                      selected={normalizePagoUnico(periodicidad) === p}
+                      onPress={() => {
+                        if (readOnly) return;
+                        setPeriodicidad(p);
+                      }}
+                    />
+                  </View>
+                ))}
+              </View>
             </View>
 
             {isEdit && (
               <>
-                <View style={styles.field}>
-                  <Text style={styles.label}>Estado</Text>
-                  <View style={styles.segmentosRow}>
-                    <View style={styles.segmentoWrapper}>
-                      <PillButton
-                        label="Activo"
-                        selected={activo}
-                        onPress={() => {
-                          if (readOnly) return;
-                          setActivo((prev) => !prev);
-                        }}
-                      />
-                    </View>
-                    <View style={styles.segmentoWrapper}>
-                      <PillButton
-                        label="Pagado"
-                        selected={pagado}
-                        onPress={() => {
-                          if (readOnly) return;
-                          setPagado((prev) => !prev);
-                        }}
-                      />
-                    </View>
-                    <View style={styles.segmentoWrapper}>
-                      <PillButton
-                        label="KPI"
-                        selected={kpi}
-                        onPress={() => {
-                          if (readOnly) return;
-                          setKpi((prev) => !prev);
-                        }}
-                      />
-                    </View>
-                  </View>
-                </View>
-
                 <View style={styles.fieldRowTwoCols}>
                   <View style={styles.col}>
-                    <Text style={styles.label}>Creado el</Text>
+                    <Text style={styles.label}>Cuotas pagadas</Text>
                     <TextInput
                       style={[styles.input, styles.inputAdvanced]}
-                      editable={false}
-                      value={createOn ? formatDateTimeShort(createOn) : ''}
+                      keyboardType="number-pad"
+                      value={String(cuotasPagadas)}
+                      onChangeText={(txt) => setCuotasPagadas(Number(txt.replace(/\D/g, '')) || 0)}
+                      editable={!readOnly}
                     />
                   </View>
                   <View style={styles.col}>
-                    <Text style={styles.label}>Inactivado el</Text>
+                    <Text style={styles.label}>Cuotas restantes</Text>
                     <TextInput
-                      style={[styles.input, styles.inputAdvanced]}
+                      style={[styles.input, styles.inputAdvanced, styles.inputDisabled]}
                       editable={false}
-                      value={inactivatedOn ? formatDateTimeShort(inactivatedOn) : ''}
+                      value={String(cuotasRestantes)}
                     />
                   </View>
                 </View>
 
                 <View style={styles.fieldRowTwoCols}>
                   <View style={styles.col}>
-                    <Text style={styles.label}>Último pago</Text>
+                    <Text style={styles.label}>Importe pendiente</Text>
                     <TextInput
-                      style={[styles.input, styles.inputAdvanced]}
+                      style={[styles.input, styles.inputAdvanced, styles.inputDisabled]}
                       editable={false}
-                      value={ultimoPagoOn ? formatDateTimeShort(ultimoPagoOn) : ''}
+                      value={
+                        importePendiente
+                          ? importePendiente.toLocaleString('es-ES', {
+                              minimumFractionDigits: 2,
+                              maximumFractionDigits: 2,
+                            })
+                          : '0,00'
+                      }
                     />
                   </View>
                   <View style={styles.col}>
-                    <Text style={styles.label}>Modificado el</Text>
+                    <Text style={styles.label}>Préstamo ID</Text>
                     <TextInput
-                      style={[styles.input, styles.inputAdvanced]}
+                      style={[styles.input, styles.inputAdvanced, prestamoId.trim() !== '' && styles.inputFilled]}
+                      value={prestamoId}
+                      onChangeText={setPrestamoId}
+                      placeholder="ID del préstamo"
                       editable={false}
-                      value={modifiedOn ? formatDateTimeShort(modifiedOn) : ''}
                     />
                   </View>
                 </View>
 
                 <View style={styles.field}>
-                  <Text style={styles.label}>Usuario</Text>
+                  <Text style={styles.label}>Número de cuota</Text>
                   <TextInput
-                    style={[styles.input, styles.inputAdvanced]}
-                    editable={false}
-                    value={userName ?? ''}
+                    style={[styles.input, styles.inputAdvanced, String(numCuota) !== '' && styles.inputFilled]}
+                    keyboardType="number-pad"
+                    value={String(numCuota)}
+                    onChangeText={(txt) => setNumCuota(Number(txt.replace(/\D/g, '')) || 1)}
+                    editable={!readOnly}
                   />
                 </View>
               </>
             )}
-          </>
-        )}
-      </FormSection>
+          </FormSection>
+
+          <FormSection title="Vinculaciones">
+            {segmentoId === VIVIENDAS_SEGMENTO_ID && (
+              <View style={styles.field}>
+                <Text style={styles.label}>Vivienda</Text>
+                <View style={styles.accountsRow}>
+                  {viviendasActivas.map((v) => (
+                    <View key={v.id} style={styles.accountPillWrapper}>
+                      <AccountPill
+                        label={v.referencia}
+                        subLabel={v.direccion_completa ?? ''}
+                        selected={viviendaId === v.id}
+                        onPress={() => {
+                          if (readOnly) return;
+                          setViviendaId((prev) => (prev === v.id ? null : v.id));
+                        }}
+                      />
+                    </View>
+                  ))}
+                </View>
+              </View>
+            )}
+
+            <View style={styles.field}>
+              <View style={styles.labelRow}>
+                <Text style={styles.label}>Cuenta de cargo</Text>
+                <InlineAddButton
+                  onPress={() => {
+                    if (readOnly) return;
+                    console.log('TODO: crear nueva cuenta de cargo');
+                  }}
+                  disabled={readOnly}
+                  accessibilityLabel="Crear cuenta de cargo"
+                />
+              </View>
+
+              <View style={styles.accountsRow}>
+                {cuentas.map((cta) => (
+                  <View key={cta.id} style={styles.accountPillWrapper}>
+                    <AccountPill
+                      label={cta.anagrama}
+                      subLabel={`${cta.liquidez.toLocaleString('es-ES', {
+                        minimumFractionDigits: 2,
+                        maximumFractionDigits: 2,
+                      })} €`}
+                      selected={cuentaId === cta.id}
+                      onPress={() => {
+                        if (readOnly) return;
+                        setCuentaId(cta.id);
+                      }}
+                    />
+                  </View>
+                ))}
+              </View>
+            </View>
+          </FormSection>
+
+          <FormSection title="Estado y planificación">
+            <View style={styles.field}>
+              <Text style={styles.label}>Fecha</Text>
+              <FormDateButton valueText={formatFechaCorta(fecha)} onPress={handleOpenDatePicker} disabled={readOnly} />
+
+              {showDatePicker && (
+                <DateTimePicker value={new Date(fecha)} mode="date" display="default" onChange={handleDateChange} />
+              )}
+            </View>
+
+            <View style={styles.field}>
+              <Text style={styles.label}>Rango de pago</Text>
+              <View style={styles.rangoRow}>
+                {RANGOS_PAGO.map((rango) => (
+                  <View key={rango} style={styles.rangoPillWrapper}>
+                    <PillButton
+                      label={rango}
+                      selected={rangoPago === rango}
+                      onPress={() => {
+                        if (readOnly) return;
+                        setRangoPago(rango);
+                      }}
+                    />
+                  </View>
+                ))}
+              </View>
+            </View>
+          </FormSection>
+
+          <FormSection title="Opciones avanzadas">
+            <TouchableOpacity style={styles.advancedToggle} onPress={() => setShowAdvanced((prev) => !prev)}>
+              <Ionicons
+                name={showAdvanced ? 'chevron-up' : 'chevron-down'}
+                size={16}
+                color={colors.textSecondary}
+              />
+              <Text style={styles.advancedToggleText}>
+                {showAdvanced ? 'Ocultar opciones avanzadas' : 'Mostrar opciones avanzadas'}
+              </Text>
+            </TouchableOpacity>
+
+            {showAdvanced && (
+              <>
+                <View style={styles.field}>
+                  <Text style={styles.label}>Referencia del gasto (opcional)</Text>
+                  <TextInput
+                    style={[styles.input, referenciaGasto.trim() !== '' && styles.inputFilled]}
+                    placeholder="Ej. LUZ_CASA_CENTRO_2025"
+                    value={referenciaGasto}
+                    onChangeText={setReferenciaGasto}
+                    editable={!readOnly}
+                  />
+                </View>
+
+                {isEdit && (
+                  <>
+                    <View style={styles.field}>
+                      <Text style={styles.label}>Estado</Text>
+                      <View style={styles.segmentosRow}>
+                        <View style={styles.segmentoWrapper}>
+                          <PillButton
+                            label="Activo"
+                            selected={activo}
+                            onPress={() => {
+                              if (readOnly) return;
+                              setActivo((prev) => !prev);
+                            }}
+                          />
+                        </View>
+                        <View style={styles.segmentoWrapper}>
+                          <PillButton
+                            label="Pagado"
+                            selected={pagado}
+                            onPress={() => {
+                              if (readOnly) return;
+                              setPagado((prev) => !prev);
+                            }}
+                          />
+                        </View>
+                        <View style={styles.segmentoWrapper}>
+                          <PillButton
+                            label="KPI"
+                            selected={kpi}
+                            onPress={() => {
+                              if (readOnly) return;
+                              setKpi((prev) => !prev);
+                            }}
+                          />
+                        </View>
+                      </View>
+                    </View>
+
+                    <View style={styles.fieldRowTwoCols}>
+                      <View style={styles.col}>
+                        <Text style={styles.label}>Creado el</Text>
+                        <TextInput
+                          style={[styles.input, styles.inputAdvanced]}
+                          editable={false}
+                          value={createOn ? formatDateTimeShort(createOn) : ''}
+                        />
+                      </View>
+                      <View style={styles.col}>
+                        <Text style={styles.label}>Inactivado el</Text>
+                        <TextInput
+                          style={[styles.input, styles.inputAdvanced]}
+                          editable={false}
+                          value={inactivatedOn ? formatDateTimeShort(inactivatedOn) : ''}
+                        />
+                      </View>
+                    </View>
+
+                    <View style={styles.fieldRowTwoCols}>
+                      <View style={styles.col}>
+                        <Text style={styles.label}>Último pago</Text>
+                        <TextInput
+                          style={[styles.input, styles.inputAdvanced]}
+                          editable={false}
+                          value={ultimoPagoOn ? formatDateTimeShort(ultimoPagoOn) : ''}
+                        />
+                      </View>
+                      <View style={styles.col}>
+                        <Text style={styles.label}>Modificado el</Text>
+                        <TextInput
+                          style={[styles.input, styles.inputAdvanced]}
+                          editable={false}
+                          value={modifiedOn ? formatDateTimeShort(modifiedOn) : ''}
+                        />
+                      </View>
+                    </View>
+
+                    <View style={styles.field}>
+                      <Text style={styles.label}>Usuario</Text>
+                      <TextInput
+                        style={[styles.input, styles.inputAdvanced]}
+                        editable={false}
+                        value={userName ?? ''}
+                      />
+                    </View>
+                  </>
+                )}
+              </>
+            )}
+          </FormSection>
+        </>
+      )}
     </FormScreen>
   );
 };
@@ -1236,6 +1400,32 @@ export const GastoGestionableFormScreen: React.FC<Props> = ({ navigation, route 
 export default GastoGestionableFormScreen;
 
 const stylesLocal = StyleSheet.create({
+  loader: {
+    flex: 1,
+    minHeight: 220,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  loaderText: {
+    marginTop: 8,
+    color: colors.textSecondary,
+    fontSize: 13,
+  },
+  providerFilterToggle: {
+    minHeight: 42,
+    borderWidth: 1,
+    borderColor: colors.border,
+    borderRadius: 12,
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.sm,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
+  providerFilterToggleTextWrap: {
+    flex: 1,
+    marginRight: spacing.sm,
+  },
   providerFilterPill: {
     minHeight: 28,
     paddingHorizontal: spacing.sm,
