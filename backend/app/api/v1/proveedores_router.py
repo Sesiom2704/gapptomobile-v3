@@ -1,8 +1,6 @@
-# backend/app/api/v1/proveedores_router.py
-
 """
 Ruta: backend/app/api/v1/proveedores_router.py
-Versión: 1.4.0
+Versión: 1.5.0
 Descripción:
 Router de proveedores para GapptoMobile v3.
 
@@ -14,24 +12,10 @@ Responsabilidades:
 - Exponer y persistir todos los nuevos campos del ORM Proveedor.
 - Mantener validaciones de negocio existentes.
 - Soportar filtro por rama_id y por subsegmento_id.
-
-Cambios de esta versión:
-- Se incorporan todos los campos ampliados del ORM:
-    * cif
-    * telefono
-    * email
-    * subsegmento
-    * subsegmento_id
-    * direccion
-    * codigo_postal
-    * persona_contacto
-    * activo
-    * observaciones
-    * acepta_urgencias
-    * ambito_servicio
-- Si llega subsegmento_id, se intenta resolver automáticamente el nombre del
-  subsegmento para guardarlo también en `subsegmento`.
-- Se mantiene DELETE protegido por referencias.
+- NUEVO:
+    * devolver relation_counts
+    * devolver associated_count
+    para mostrar tablas relacionadas y nº de registros asociados.
 """
 
 from __future__ import annotations
@@ -49,6 +33,7 @@ from backend.app.schemas.proveedores import (
     ProveedorCreate,
     ProveedorUpdate,
     ProveedorRead,
+    RelationCountItem,
 )
 from backend.app.utils.text_utils import normalize_upper
 from backend.app.utils.proveedor_utils import validate_proveedor_ubicacion_condicional
@@ -155,6 +140,83 @@ def _normalize_text_fields(data: dict) -> dict:
     return data
 
 
+def _build_relation_counts(db: Session, prov_id: str) -> list[RelationCountItem]:
+    """
+    Devuelve todas las tablas relacionadas relevantes con su nº de registros.
+    """
+    counts = [
+        RelationCountItem(
+            key="gastos",
+            label="Gastos",
+            count=db.query(models.Gasto).filter(models.Gasto.proveedor_id == prov_id).count(),
+        ),
+        RelationCountItem(
+            key="gastos_cotidianos",
+            label="Gastos cotidianos",
+            count=db.query(models.GastoCotidiano)
+            .filter(models.GastoCotidiano.proveedor_id == prov_id)
+            .count(),
+        ),
+        RelationCountItem(
+            key="cuentas_bancarias",
+            label="Cuentas bancarias",
+            count=db.query(models.CuentaBancaria)
+            .filter(models.CuentaBancaria.banco_id == prov_id)
+            .count(),
+        ),
+        RelationCountItem(
+            key="inversiones_como_proveedor",
+            label="Inversiones como proveedor",
+            count=db.query(models.Inversion)
+            .filter(models.Inversion.proveedor_id == prov_id)
+            .count(),
+        ),
+        RelationCountItem(
+            key="inversiones_como_dealer",
+            label="Inversiones como dealer",
+            count=db.query(models.Inversion)
+            .filter(models.Inversion.dealer_id == prov_id)
+            .count(),
+        ),
+        RelationCountItem(
+            key="incidencias_actuales",
+            label="Incidencias actuales",
+            count=db.query(models.Incidencia)
+            .filter(models.Incidencia.proveedor_actual_id == prov_id)
+            .count(),
+        ),
+        RelationCountItem(
+            key="asignaciones_incidencia",
+            label="Asignaciones de incidencia",
+            count=db.query(models.AsignacionIncidencia)
+            .filter(models.AsignacionIncidencia.proveedor_id == prov_id)
+            .count(),
+        ),
+        RelationCountItem(
+            key="citas_incidencia",
+            label="Citas de incidencia",
+            count=db.query(models.CitaIncidencia)
+            .filter(models.CitaIncidencia.proveedor_id == prov_id)
+            .count(),
+        ),
+    ]
+
+    return counts
+
+
+def _serialize_proveedor_with_counts(db: Session, obj: models.Proveedor) -> ProveedorRead:
+    relation_counts = _build_relation_counts(db, obj.id)
+    associated_count = sum(item.count for item in relation_counts)
+
+    return ProveedorRead.model_validate(
+        {
+            **ProveedorRead.model_validate(obj, from_attributes=True).model_dump(),
+            "associated_count": associated_count,
+            "relation_counts": [item.model_dump() for item in relation_counts],
+        }
+    )
+
+
 # =============================================================================
 # GET /proveedores
 # =============================================================================
@@ -181,7 +243,8 @@ def list_proveedores(
         qry = qry.filter(models.Proveedor.subsegmento_id == subsegmento_id)
 
     qry = qry.order_by(models.Proveedor.nombre.asc(), models.Proveedor.id.asc())
-    return qry.all()
+    rows = qry.all()
+    return [_serialize_proveedor_with_counts(db, row) for row in rows]
 
 
 # =============================================================================
@@ -223,7 +286,6 @@ def create_proveedor(
         payload["subsegmento_id"] = sub["subsegmento_id"]
         payload["subsegmento"] = sub["subsegmento"]
     else:
-        # Si no viene subsegmento_id, mantenemos el texto libre si llega
         payload["subsegmento"] = normalize_upper(payload.get("subsegmento"))
 
     # Unicidad nombre por usuario
@@ -241,7 +303,6 @@ def create_proveedor(
             detail="Ya existe un proveedor con este nombre.",
         )
 
-    # Validación condicional existente
     validate_proveedor_ubicacion_condicional(
         db,
         payload["rama_id"],
@@ -278,7 +339,7 @@ def create_proveedor(
     db.add(obj)
     db.commit()
     db.refresh(obj)
-    return obj
+    return _serialize_proveedor_with_counts(db, obj)
 
 
 # =============================================================================
@@ -308,7 +369,6 @@ def update_proveedor(
     data = prov_in.model_dump(exclude_unset=True)
     data = _normalize_text_fields(data)
 
-    # Unicidad nombre si cambia
     if "nombre" in data and data["nombre"] is not None:
         nombre_up = data["nombre"] or ""
         exists = (
@@ -326,7 +386,6 @@ def update_proveedor(
                 detail="Ya existe un proveedor con este nombre.",
             )
 
-    # Ubicación por localidad_id
     if "localidad_id" in data and data["localidad_id"]:
         ub = _resolve_ubicacion_from_localidad_id(db, data["localidad_id"])
         data["localidad"] = ub["localidad"]
@@ -334,11 +393,9 @@ def update_proveedor(
         data["pais"] = ub["pais"]
         data["localidad_id"] = ub["localidad_id"]
 
-    # Permitir vaciar localidad_id explícitamente
     if "localidad_id" in data and data["localidad_id"] is None:
         pass
 
-    # Subsegmento por id
     if "subsegmento_id" in data:
         if data["subsegmento_id"]:
             sub = _resolve_subsegmento_from_id(db, data["subsegmento_id"])
@@ -346,10 +403,8 @@ def update_proveedor(
             data["subsegmento"] = sub["subsegmento"]
         else:
             data["subsegmento_id"] = None
-            # si el cliente lo vacía, también vaciamos el texto
             data["subsegmento"] = None
 
-    # Validación condicional por rama
     rama_objetivo = data.get("rama_id", obj.rama_id)
     loc_objetivo = data.get("localidad", obj.localidad)
     pais_objetivo = data.get("pais", obj.pais)
@@ -368,7 +423,7 @@ def update_proveedor(
 
     db.commit()
     db.refresh(obj)
-    return obj
+    return _serialize_proveedor_with_counts(db, obj)
 
 
 # =============================================================================
@@ -441,6 +496,13 @@ def delete_proveedor(
         is not None
     )
 
+    has_cuentas = (
+        db.query(models.CuentaBancaria.id)
+        .filter(models.CuentaBancaria.banco_id == prov_id)
+        .first()
+        is not None
+    )
+
     if (
         has_gastos
         or has_cotidianos
@@ -448,10 +510,11 @@ def delete_proveedor(
         or has_incidencias
         or has_asignaciones
         or has_citas
+        or has_cuentas
     ):
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
-            detail="No se puede eliminar: el proveedor está referenciado por movimientos o incidencias.",
+            detail="No se puede eliminar: el proveedor está referenciado por otros registros.",
         )
 
     db.delete(obj)

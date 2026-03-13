@@ -1,41 +1,13 @@
 /**
  * Ruta: mobile_app/screens/auxiliares/AuxEntityFormScreen.tsx
- * Versión: 2.2.1
+ * Versión: 2.3.0
  * Descripción:
  * Formulario genérico para creación y edición de auxiliares y proveedores.
  *
- * Responsabilidades:
- * - Alta/edición de:
- *   * proveedor
- *   * tipo_gasto
- *   * tipo_ingreso
- *   * tipo_ramas_ingreso
- *   * tipo_ramas_proveedores
- *   * tipo_subsegmento_proveedor
- *   * otros auxiliares simples
- * - Gestión avanzada de proveedor:
- *   * rama
- *   * subsegmento
- *   * ubicación
- *   * datos fiscales y de contacto
- *   * flags operativos
- * - Confirmación al salir si hay cambios sin guardar.
- *
- * Cambios de esta versión:
- * - Corrige el envío de `subsegmento_id` al crear proveedor.
- * - Añade flujo correcto de creación hija para:
- *   * Rama proveedor
- *   * Subsegmento proveedor
- * - Los formularios hijos se abren con `push`, no con `navigate`,
- *   evitando reutilización de estado/params del proveedor.
- * - Al volver:
- *   * la rama nueva queda seleccionada automáticamente
- *   * el subsegmento nuevo queda seleccionado automáticamente
- * - El subsegmento se abre con la rama del proveedor ya precargada.
- * - Ajusta el bloque "Operativa" para mostrar:
- *   * Activo
- *   * Acepta urgencias
- *   en una misma línea.
+ * Novedades:
+ * - Soporte para mostrar relaciones y número de registros asociados.
+ * - Botón "Relaciones" en edición.
+ * - Despliega listado de tablas relacionadas con sus contadores.
  */
 
 import React, { useEffect, useMemo, useState } from 'react';
@@ -101,9 +73,17 @@ type PaisOption = {
   nombre: string;
 };
 
+type RelationCountItem = {
+  key: string;
+  label: string;
+  count: number;
+};
+
 type SimpleAuxItem = {
   id: string;
   nombre: string;
+  associated_count?: number;
+  relation_counts?: RelationCountItem[];
   [k: string]: any;
 };
 
@@ -156,6 +136,8 @@ export const AuxEntityFormScreen: React.FC<Props> = ({ navigation, route }) => {
   const returnTo: string | undefined = route?.params?.returnTo;
   const returnKey: string | undefined = route?.params?.returnKey;
   const returnRouteKey: string | undefined = route?.params?.returnRouteKey;
+
+  const [showRelations, setShowRelations] = useState(false);
 
   // ==========================================================
   // Estado común
@@ -239,6 +221,43 @@ export const AuxEntityFormScreen: React.FC<Props> = ({ navigation, route }) => {
   const [busquedaPais, setBusquedaPais] = useState('');
 
   const ramaBloqueada = origin === 'cotidianos' && !!ramaId;
+
+  // ==========================================================
+  // Relaciones
+  // ==========================================================
+  const relationItems = useMemo<RelationCountItem[]>(() => {
+    if (isProveedor && editingProveedor) {
+      return Array.isArray((editingProveedor as any).relation_counts)
+        ? ((editingProveedor as any).relation_counts as RelationCountItem[])
+        : [];
+    }
+
+    if (!isProveedor && editingItem) {
+      return Array.isArray((editingItem as any).relation_counts)
+        ? ((editingItem as any).relation_counts as RelationCountItem[])
+        : [];
+    }
+
+    return [];
+  }, [isProveedor, editingProveedor, editingItem]);
+
+  const associatedCount = useMemo<number>(() => {
+    if (isProveedor && editingProveedor) {
+      const direct = Number((editingProveedor as any).associated_count ?? 0);
+      if (direct > 0) return direct;
+      return relationItems.reduce((acc, x) => acc + Number(x.count ?? 0), 0);
+    }
+
+    if (!isProveedor && editingItem) {
+      const direct = Number((editingItem as any).associated_count ?? 0);
+      if (direct > 0) return direct;
+      return relationItems.reduce((acc, x) => acc + Number(x.count ?? 0), 0);
+    }
+
+    return 0;
+  }, [isProveedor, editingProveedor, editingItem, relationItems]);
+
+  const hasRelationsInfo = isEditMode && (relationItems.length > 0 || associatedCount > 0);
 
   // ==========================================================
   // Navegación de retorno
@@ -1599,6 +1618,23 @@ export const AuxEntityFormScreen: React.FC<Props> = ({ navigation, route }) => {
       loading={false}
       footer={
         <View style={styles.bottomActions}>
+          {hasRelationsInfo ? (
+            <TouchableOpacity
+              style={ui.relationsButton}
+              onPress={() => setShowRelations((prev) => !prev)}
+            >
+              <Ionicons
+                name={showRelations ? 'layers' : 'layers-outline'}
+                size={18}
+                color={colors.textPrimary}
+                style={{ marginRight: 8 }}
+              />
+              <Text style={ui.relationsButtonText}>
+                {showRelations ? 'Ocultar relaciones' : `Relaciones (${associatedCount})`}
+              </Text>
+            </TouchableOpacity>
+          ) : null}
+
           <TouchableOpacity style={styles.saveButton} onPress={handleSave}>
             <Ionicons name="save-outline" size={18} color="#FFFFFF" style={{ marginRight: 8 }} />
             <Text style={styles.saveButtonText}>{isEditMode ? 'Guardar cambios' : 'Guardar'}</Text>
@@ -1613,6 +1649,27 @@ export const AuxEntityFormScreen: React.FC<Props> = ({ navigation, route }) => {
         </View>
       }
     >
+      {hasRelationsInfo && showRelations ? (
+        <FormSection title={`Relaciones (${associatedCount} registros)`}>
+          {relationItems.length > 0 ? (
+            relationItems.map((rel) => (
+              <View key={rel.key} style={ui.relationRow}>
+                <View style={{ flex: 1 }}>
+                  <Text style={ui.relationLabel}>{rel.label}</Text>
+                  <Text style={ui.relationKey}>{rel.key}</Text>
+                </View>
+
+                <View style={ui.relationCountBadge}>
+                  <Text style={ui.relationCountText}>{rel.count}</Text>
+                </View>
+              </View>
+            ))
+          ) : (
+            <Text style={styles.helperText}>No hay detalle de relaciones disponible.</Text>
+          )}
+        </FormSection>
+      ) : null}
+
       {!isProveedor ? (
         <>
           <FormSection title="Datos">
@@ -2106,19 +2163,12 @@ const ui = StyleSheet.create({
     paddingBottom: 12,
   },
 
-  /**
-   * Contenedor en línea para mostrar dos campos del bloque Operativa
-   * en horizontal, manteniendo intacta la lógica de cada uno.
-   */
   inlineFieldsRow: {
     flexDirection: 'row',
     alignItems: 'flex-start',
     gap: spacing.md,
   },
 
-  /**
-   * Cada bloque ocupa la mitad disponible.
-   */
   inlineFieldHalf: {
     flex: 1,
   },
@@ -2131,6 +2181,7 @@ const ui = StyleSheet.create({
   booleanItem: {
     minWidth: 72,
   },
+
   inlinePrimaryBtn: {
     flex: 1,
     borderRadius: radius.lg,
@@ -2143,6 +2194,7 @@ const ui = StyleSheet.create({
     color: '#FFFFFF',
     fontWeight: '600',
   },
+
   inlineSecondaryBtn: {
     flex: 1,
     borderRadius: radius.lg,
@@ -2157,6 +2209,57 @@ const ui = StyleSheet.create({
     fontWeight: '600',
     color: colors.textPrimary,
   },
+
+  relationsButton: {
+    marginBottom: 10,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderWidth: 1,
+    borderColor: colors.border,
+    backgroundColor: colors.surface ?? '#FFFFFF',
+    paddingVertical: spacing.md,
+    borderRadius: radius.lg,
+  },
+  relationsButtonText: {
+    color: colors.textPrimary,
+    fontWeight: '600',
+    fontSize: 15,
+  },
+
+  relationRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.md,
+    paddingVertical: 10,
+    borderBottomWidth: 1,
+    borderBottomColor: colors.border,
+  },
+  relationLabel: {
+    fontSize: 15,
+    fontWeight: '600',
+    color: colors.textPrimary,
+  },
+  relationKey: {
+    marginTop: 2,
+    fontSize: 12,
+    color: colors.textSecondary,
+  },
+  relationCountBadge: {
+    minWidth: 40,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 999,
+    backgroundColor: colors.primary,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  relationCountText: {
+    color: '#FFFFFF',
+    fontWeight: '700',
+    fontSize: 13,
+  },
+
   deleteButton: {
     marginTop: 10,
     flexDirection: 'row',

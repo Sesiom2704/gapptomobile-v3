@@ -1,8 +1,6 @@
-# backend/app/schemas/proveedores.py
-
 """
 Ruta: backend/app/schemas/proveedores.py
-Versión: 1.3.0
+Versión: 1.4.0
 Descripción:
 Schemas Pydantic para PROVEEDORES en GapptoMobile v3.
 
@@ -27,11 +25,15 @@ Objetivos:
     * acepta_urgencias
     * ambito_servicio
     * created_at / updated_at
+- NUEVO:
+    * associated_count
+    * relation_counts
+  para mostrar relaciones y número de registros asociados en frontend.
 """
 
 from __future__ import annotations
 
-from typing import Optional
+from typing import Optional, List
 from datetime import datetime
 
 from pydantic import BaseModel, Field, ConfigDict
@@ -59,6 +61,20 @@ class SubsegmentoProveedorRel(BaseModel):
     id: str
     nombre: str
     rama_id: Optional[str] = None
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class RelationCountItem(BaseModel):
+    """
+    Relación informativa para UI:
+    - key: identificador técnico estable
+    - label: texto visible en frontend
+    - count: nº de registros asociados
+    """
+    key: str
+    label: str
+    count: int = 0
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -208,6 +224,10 @@ class ProveedorRead(BaseModel):
     rama_rel: Optional[RamaProveedorRel] = None
     subsegmento_rel: Optional[SubsegmentoProveedorRel] = None
     localidad_rel: Optional[LocalidadWithContext] = None
+
+    # NUEVO: soporte para UI de relaciones
+    associated_count: int = 0
+    relation_counts: List[RelationCountItem] = Field(default_factory=list)
 
     model_config = ConfigDict(from_attributes=True)
 

@@ -1,6 +1,6 @@
 /**
  * Ruta: mobile_app/services/proveedoresApi.ts
- * Versión: 1.5.0
+ * Versión: 1.6.0
  * Descripción:
  * Servicio centralizado de proveedores para GapptoMobile.
  *
@@ -8,14 +8,10 @@
  * - Listar, crear, actualizar y eliminar proveedores.
  * - Tipar correctamente todos los campos expuestos por backend.
  * - Dar soporte al formulario auxiliar de proveedores.
- *
- * Cambios de esta versión:
- * - Se refuerza la separación entre:
- *   * `subsegmento`      -> texto legacy
- *   * `subsegmento_id`   -> FK real al auxiliar
- * - Se mantiene compatibilidad hacia atrás.
- * - Se alinea el helper `createProveedorFromAuxForm` con el flujo correcto
- *   del formulario de proveedor enriquecido.
+ * - NUEVO:
+ *   * consumir associated_count
+ *   * consumir relation_counts
+ *   para mostrar relaciones y registros asociados.
  */
 
 import axios from 'axios';
@@ -47,6 +43,12 @@ export type LocalidadRel = {
       nombre: string;
     } | null;
   } | null;
+};
+
+export type RelationCountItem = {
+  key: string;
+  label: string;
+  count: number;
 };
 
 // =======================
@@ -92,6 +94,12 @@ export type ProveedorRead = {
   rama_rel?: RamaProveedorRel | null;
   subsegmento_rel?: SubsegmentoProveedorRel | null;
   localidad_rel?: LocalidadRel | null;
+
+  /**
+   * NUEVO
+   */
+  associated_count?: number;
+  relation_counts?: RelationCountItem[];
 };
 
 export type ProveedorCreate = {
@@ -199,6 +207,23 @@ function logAxiosError(prefix: string, err: unknown, ctx?: any) {
   }
 }
 
+function normalizeProveedorRead(row: any): ProveedorRead {
+  const relationCounts: RelationCountItem[] = Array.isArray(row?.relation_counts)
+    ? row.relation_counts.map((x: any) => ({
+        key: String(x?.key ?? ''),
+        label: String(x?.label ?? ''),
+        count: Number(x?.count ?? 0),
+      }))
+    : [];
+
+  return {
+    ...row,
+    associated_count:
+      row?.associated_count != null ? Number(row.associated_count) : relationCounts.reduce((acc, x) => acc + Number(x.count ?? 0), 0),
+    relation_counts: relationCounts,
+  };
+}
+
 // =======================
 // API pública
 // =======================
@@ -209,7 +234,8 @@ export async function listProveedores(params?: {
 }): Promise<ProveedorRead[]> {
   try {
     const res = await api.get<ProveedorRead[]>(BASE, { params });
-    return Array.isArray(res.data) ? res.data : [];
+    const rows = Array.isArray(res.data) ? res.data : [];
+    return rows.map(normalizeProveedorRead);
   } catch (err) {
     logAxiosError('[proveedoresApi] Error listProveedores', err, { params });
     throw err;
@@ -245,7 +271,7 @@ export async function createProveedor(payload: ProveedorCreate): Promise<Proveed
     });
 
     const res = await api.post<ProveedorRead>(BASE, safePayload);
-    return res.data;
+    return normalizeProveedorRead(res.data);
   } catch (err) {
     logAxiosError('[proveedoresApi] Error createProveedor', err, { payload });
     throw err;
@@ -306,7 +332,7 @@ export async function updateProveedor(
       `${BASE}/${encodeURIComponent(provId)}`,
       safePayload
     );
-    return res.data;
+    return normalizeProveedorRead(res.data);
   } catch (err) {
     logAxiosError('[proveedoresApi] Error updateProveedor', err, { provId, payload });
     throw err;
