@@ -1,6 +1,6 @@
 """
 Ruta: backend/app/schemas/ramas.py
-Versión: 2.0.0
+Versión: 2.1.0
 Descripción:
 Schemas Pydantic para las tablas auxiliares de ramas y subsegmentos
 de GapptoMobile v3.
@@ -15,14 +15,29 @@ Reglas:
 - El nombre se normaliza en routers/services, no en el schema.
 - Los IDs se generan en backend.
 - Los schemas de update permiten modificación parcial.
-- Se añade soporte para contadores reales de registros asociados.
+- Se añade soporte para:
+    * associated_count
+    * relation_counts
 """
 
 from __future__ import annotations
 
-from typing import Optional
+from typing import Optional, List
 
 from pydantic import BaseModel, ConfigDict, Field
+
+
+# ============================================================
+# RELACIONES GENÉRICAS
+# ============================================================
+
+class RelationCountItem(BaseModel):
+    """
+    Detalle de registros asociados por tabla/relación.
+    """
+    key: str = Field(..., description="Clave técnica de la relación.")
+    label: str = Field(..., description="Etiqueta legible de la relación.")
+    count: int = Field(0, description="Número de registros asociados en esa relación.")
 
 
 # ============================================================
@@ -57,7 +72,11 @@ class TipoRamaIngresoRead(TipoRamaIngresoBase):
     id: str
     associated_count: int = Field(
         0,
-        description="Número real de registros asociados a la rama de ingreso.",
+        description="Número real total de registros asociados a la rama de ingreso.",
+    )
+    relation_counts: List[RelationCountItem] = Field(
+        default_factory=list,
+        description="Detalle por tabla relacionada.",
     )
 
     model_config = ConfigDict(from_attributes=True)
@@ -95,7 +114,11 @@ class TipoRamaGastoRead(TipoRamaGastoBase):
     id: str
     associated_count: int = Field(
         0,
-        description="Número real de registros asociados a la rama de gasto.",
+        description="Número real total de registros asociados a la rama de gasto.",
+    )
+    relation_counts: List[RelationCountItem] = Field(
+        default_factory=list,
+        description="Detalle por tabla relacionada.",
     )
 
     model_config = ConfigDict(from_attributes=True)
@@ -133,7 +156,11 @@ class TipoRamaProveedorRead(TipoRamaProveedorBase):
     id: str
     associated_count: int = Field(
         0,
-        description="Número real de registros asociados a la rama de proveedor.",
+        description="Número real total de registros asociados a la rama de proveedor.",
+    )
+    relation_counts: List[RelationCountItem] = Field(
+        default_factory=list,
+        description="Detalle por tabla relacionada.",
     )
 
     model_config = ConfigDict(from_attributes=True)
@@ -185,13 +212,36 @@ class TipoSubsegmentoProveedorRead(TipoSubsegmentoProveedorBase):
     id: str
     associated_count: int = Field(
         0,
+        description="Número real total de proveedores/registros asociados al subsegmento.",
+    )
+    relation_counts: List[RelationCountItem] = Field(
+        default_factory=list,
+        description="Detalle por tabla relacionada.",
+    )
+
+    model_config = ConfigDict(from_attributes=True)
+
+class RelationCountItem(BaseModel):
+    key: str
+    label: str
+    count: int
+
+class TipoSubsegmentoProveedorRead(TipoSubsegmentoProveedorBase):
+    id: str
+    associated_count: int = Field(
+        0,
         description="Número real de proveedores asociados al subsegmento.",
+    )
+    relation_counts: list[RelationCountItem] = Field(
+        default_factory=list,
+        description="Detalle de tablas relacionadas con contador > 0.",
     )
 
     model_config = ConfigDict(from_attributes=True)
 
 
 __all__ = [
+    "RelationCountItem",
     "TipoRamaIngresoBase",
     "TipoRamaIngresoCreate",
     "TipoRamaIngresoUpdate",

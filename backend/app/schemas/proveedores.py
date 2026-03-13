@@ -25,10 +25,8 @@ Objetivos:
     * acepta_urgencias
     * ambito_servicio
     * created_at / updated_at
-- NUEVO:
-    * associated_count
-    * relation_counts
-  para mostrar relaciones y número de registros asociados en frontend.
+- Separar el detalle de relaciones en un schema específico on-demand
+  para no penalizar el rendimiento del listado/formulario principal.
 """
 
 from __future__ import annotations
@@ -65,16 +63,28 @@ class SubsegmentoProveedorRel(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
 
+# -----------------------------------------------------------------------------
+# Relaciones / conteos
+# -----------------------------------------------------------------------------
 class RelationCountItem(BaseModel):
     """
-    Relación informativa para UI:
-    - key: identificador técnico estable
-    - label: texto visible en frontend
-    - count: nº de registros asociados
+    Representa una tabla relacionada y su número de registros asociados.
     """
-    key: str
-    label: str
-    count: int = 0
+    key: str = Field(..., description="Clave técnica de la relación.")
+    label: str = Field(..., description="Nombre legible de la relación.")
+    count: int = Field(..., description="Número de registros asociados.")
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class ProveedorRelationsRead(BaseModel):
+    """
+    Respuesta específica para consultar relaciones del proveedor bajo demanda.
+    """
+    id: str
+    nombre: str
+    associated_count: int = 0
+    relation_counts: List[RelationCountItem] = Field(default_factory=list)
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -95,18 +105,15 @@ class ProveedorBase(BaseModel):
     nombre: str = Field(..., description="Nombre comercial del proveedor.")
     rama_id: str = Field(..., description="ID de la rama del proveedor.")
 
-    # Ubicación normalizada
     localidad_id: Optional[int] = Field(
         None,
         description="FK a localidades.id.",
     )
 
-    # Ubicación legacy texto
     localidad: Optional[str] = Field(None, description="Localidad texto.")
     comunidad: Optional[str] = Field(None, description="Comunidad/Región texto.")
     pais: Optional[str] = Field(None, description="País texto.")
 
-    # Nuevos campos de proveedor
     cif: Optional[str] = Field(None, description="CIF del proveedor.")
     telefono: Optional[str] = Field(None, description="Teléfono del proveedor.")
     email: Optional[str] = Field(None, description="Email del proveedor.")
@@ -190,6 +197,10 @@ class ProveedorUpdate(BaseModel):
 class ProveedorRead(BaseModel):
     """
     Representación de salida estable del proveedor.
+
+    Nota:
+    - No incluye conteos de relaciones para evitar consultas pesadas
+      en listados y formularios.
     """
     id: str
     nombre: str
@@ -224,10 +235,6 @@ class ProveedorRead(BaseModel):
     rama_rel: Optional[RamaProveedorRel] = None
     subsegmento_rel: Optional[SubsegmentoProveedorRel] = None
     localidad_rel: Optional[LocalidadWithContext] = None
-
-    # NUEVO: soporte para UI de relaciones
-    associated_count: int = 0
-    relation_counts: List[RelationCountItem] = Field(default_factory=list)
 
     model_config = ConfigDict(from_attributes=True)
 

@@ -53,14 +53,13 @@ class CuentaBancariaUpdate(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
 
-class CuentaBancariaRead(BaseModel):
-    """
-    Schema de lectura de cuenta bancaria.
+class RelationCountItem(BaseModel):
+    key: str
+    label: str
+    count: int
 
-    Incluye:
-    - campos persistidos actuales
-    - associated_count: número real de registros asociados
-    """
+
+class CuentaBancariaRead(BaseModel):
     id: str
     banco_id: Optional[str] = None
     referencia: Optional[str] = None
@@ -69,9 +68,10 @@ class CuentaBancariaRead(BaseModel):
     liquidez_inicial: float = 0.0
     user_id: int
     activo: bool = True
-    associated_count: int = Field(
-        0,
-        description="Número real de registros asociados a la cuenta bancaria.",
+    associated_count: int = Field(0, description="Número real de registros asociados.")
+    relation_counts: list[RelationCountItem] = Field(
+        default_factory=list,
+        description="Detalle de tablas relacionadas con contador > 0.",
     )
 
     model_config = ConfigDict(from_attributes=True)

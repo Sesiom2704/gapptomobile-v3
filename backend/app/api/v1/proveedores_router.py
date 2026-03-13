@@ -1,6 +1,6 @@
 """
 Ruta: backend/app/api/v1/proveedores_router.py
-Versión: 1.5.0
+Versión: 1.6.0
 Descripción:
 Router de proveedores para GapptoMobile v3.
 
@@ -9,13 +9,16 @@ Responsabilidades:
 - Mantener soporte multiusuario.
 - Mantener compatibilidad con ubicación legacy por texto y con flujo normalizado
   por localidad_id.
-- Exponer y persistir todos los nuevos campos del ORM Proveedor.
+- Exponer y persistir todos los campos del ORM Proveedor.
 - Mantener validaciones de negocio existentes.
 - Soportar filtro por rama_id y por subsegmento_id.
-- NUEVO:
-    * devolver relation_counts
-    * devolver associated_count
-    para mostrar tablas relacionadas y nº de registros asociados.
+- Exponer relaciones del proveedor bajo demanda para no penalizar el rendimiento
+  del formulario/listado principal.
+
+Cambios de esta versión:
+- En /{prov_id}/relaciones:
+    * se filtran las relaciones con count = 0
+    * associated_count se calcula sobre las relaciones visibles
 """
 
 from __future__ import annotations
@@ -23,7 +26,7 @@ from __future__ import annotations
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 from sqlalchemy import or_
 
 from backend.app.api.v1.auth_router import require_user
@@ -33,6 +36,7 @@ from backend.app.schemas.proveedores import (
     ProveedorCreate,
     ProveedorUpdate,
     ProveedorRead,
+    ProveedorRelationsRead,
     RelationCountItem,
 )
 from backend.app.utils.text_utils import normalize_upper
@@ -52,7 +56,14 @@ def _resolve_ubicacion_from_localidad_id(db: Session, localidad_id: int) -> dict
     """
     Deriva localidad/comunidad/pais desde localidad_id.
     """
-    loc = db.get(models.Localidad, localidad_id)
+    loc = (
+        db.query(models.Localidad)
+        .options(
+            joinedload(models.Localidad.region).joinedload(models.Region.pais)
+        )
+        .filter(models.Localidad.id == localidad_id)
+        .first()
+    )
     if not loc:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -140,81 +151,83 @@ def _normalize_text_fields(data: dict) -> dict:
     return data
 
 
-def _build_relation_counts(db: Session, prov_id: str) -> list[RelationCountItem]:
+def _get_proveedor_for_user(
+    db: Session,
+    prov_id: str,
+    current_user: models.User,
+) -> models.Proveedor:
+    obj = (
+        db.query(models.Proveedor)
+        .filter(
+            models.Proveedor.id == prov_id,
+            models.Proveedor.user_id == current_user.id,
+        )
+        .first()
+    )
+    if not obj:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Proveedor no encontrado",
+        )
+    return obj
+
+
+def _build_proveedor_relation_counts(
+    db: Session,
+    prov_id: str,
+) -> list[RelationCountItem]:
     """
-    Devuelve todas las tablas relacionadas relevantes con su nº de registros.
+    Devuelve el detalle de tablas relacionadas y su número de registros.
+    Solo devuelve relaciones con count > 0.
     """
-    counts = [
-        RelationCountItem(
-            key="gastos",
-            label="Gastos",
-            count=db.query(models.Gasto).filter(models.Gasto.proveedor_id == prov_id).count(),
+    relation_defs = [
+        (
+            "cuentas_bancarias",
+            "Cuentas bancarias",
+            db.query(models.CuentaBancaria).filter(models.CuentaBancaria.banco_id == prov_id).count(),
         ),
-        RelationCountItem(
-            key="gastos_cotidianos",
-            label="Gastos cotidianos",
-            count=db.query(models.GastoCotidiano)
-            .filter(models.GastoCotidiano.proveedor_id == prov_id)
-            .count(),
+        (
+            "gastos",
+            "Gastos",
+            db.query(models.Gasto).filter(models.Gasto.proveedor_id == prov_id).count(),
         ),
-        RelationCountItem(
-            key="cuentas_bancarias",
-            label="Cuentas bancarias",
-            count=db.query(models.CuentaBancaria)
-            .filter(models.CuentaBancaria.banco_id == prov_id)
-            .count(),
+        (
+            "gastos_cotidianos",
+            "Gastos cotidianos",
+            db.query(models.GastoCotidiano).filter(models.GastoCotidiano.proveedor_id == prov_id).count(),
         ),
-        RelationCountItem(
-            key="inversiones_como_proveedor",
-            label="Inversiones como proveedor",
-            count=db.query(models.Inversion)
-            .filter(models.Inversion.proveedor_id == prov_id)
-            .count(),
+        (
+            "inversiones_como_proveedor",
+            "Inversiones como proveedor",
+            db.query(models.Inversion).filter(models.Inversion.proveedor_id == prov_id).count(),
         ),
-        RelationCountItem(
-            key="inversiones_como_dealer",
-            label="Inversiones como dealer",
-            count=db.query(models.Inversion)
-            .filter(models.Inversion.dealer_id == prov_id)
-            .count(),
+        (
+            "inversiones_como_dealer",
+            "Inversiones como dealer",
+            db.query(models.Inversion).filter(models.Inversion.dealer_id == prov_id).count(),
         ),
-        RelationCountItem(
-            key="incidencias_actuales",
-            label="Incidencias actuales",
-            count=db.query(models.Incidencia)
-            .filter(models.Incidencia.proveedor_actual_id == prov_id)
-            .count(),
+        (
+            "incidencias_actuales",
+            "Incidencias actuales",
+            db.query(models.Incidencia).filter(models.Incidencia.proveedor_actual_id == prov_id).count(),
         ),
-        RelationCountItem(
-            key="asignaciones_incidencia",
-            label="Asignaciones de incidencia",
-            count=db.query(models.AsignacionIncidencia)
-            .filter(models.AsignacionIncidencia.proveedor_id == prov_id)
-            .count(),
+        (
+            "asignaciones_incidencia",
+            "Asignaciones de incidencias",
+            db.query(models.AsignacionIncidencia).filter(models.AsignacionIncidencia.proveedor_id == prov_id).count(),
         ),
-        RelationCountItem(
-            key="citas_incidencia",
-            label="Citas de incidencia",
-            count=db.query(models.CitaIncidencia)
-            .filter(models.CitaIncidencia.proveedor_id == prov_id)
-            .count(),
+        (
+            "citas_incidencia",
+            "Citas de incidencias",
+            db.query(models.CitaIncidencia).filter(models.CitaIncidencia.proveedor_id == prov_id).count(),
         ),
     ]
 
-    return counts
-
-
-def _serialize_proveedor_with_counts(db: Session, obj: models.Proveedor) -> ProveedorRead:
-    relation_counts = _build_relation_counts(db, obj.id)
-    associated_count = sum(item.count for item in relation_counts)
-
-    return ProveedorRead.model_validate(
-        {
-            **ProveedorRead.model_validate(obj, from_attributes=True).model_dump(),
-            "associated_count": associated_count,
-            "relation_counts": [item.model_dump() for item in relation_counts],
-        }
-    )
+    return [
+        RelationCountItem(key=key, label=label, count=count)
+        for key, label, count in relation_defs
+        if int(count or 0) > 0
+    ]
 
 
 # =============================================================================
@@ -234,7 +247,17 @@ def list_proveedores(
     """
     Lista proveedores del usuario autenticado.
     """
-    qry = db.query(models.Proveedor).filter(models.Proveedor.user_id == current_user.id)
+    qry = (
+        db.query(models.Proveedor)
+        .options(
+            joinedload(models.Proveedor.rama_rel),
+            joinedload(models.Proveedor.subsegmento_rel),
+            joinedload(models.Proveedor.localidad_rel)
+            .joinedload(models.Localidad.region)
+            .joinedload(models.Region.pais),
+        )
+        .filter(models.Proveedor.user_id == current_user.id)
+    )
 
     if rama_id:
         qry = qry.filter(models.Proveedor.rama_id == rama_id)
@@ -243,8 +266,36 @@ def list_proveedores(
         qry = qry.filter(models.Proveedor.subsegmento_id == subsegmento_id)
 
     qry = qry.order_by(models.Proveedor.nombre.asc(), models.Proveedor.id.asc())
-    rows = qry.all()
-    return [_serialize_proveedor_with_counts(db, row) for row in rows]
+    return qry.all()
+
+
+# =============================================================================
+# GET /proveedores/{prov_id}/relaciones
+# =============================================================================
+@router.get(
+    "/{prov_id}/relaciones",
+    response_model=ProveedorRelationsRead,
+    summary="Consultar relaciones del proveedor",
+)
+def get_proveedor_relaciones(
+    prov_id: str,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(require_user),
+):
+    """
+    Devuelve el detalle de tablas relacionadas y el número de registros asociados
+    al proveedor. Se usa bajo demanda desde el formulario.
+    """
+    obj = _get_proveedor_for_user(db, prov_id, current_user)
+    relation_counts = _build_proveedor_relation_counts(db, prov_id)
+    associated_count = sum(item.count for item in relation_counts)
+
+    return ProveedorRelationsRead(
+        id=obj.id,
+        nombre=obj.nombre,
+        associated_count=associated_count,
+        relation_counts=relation_counts,
+    )
 
 
 # =============================================================================
@@ -270,7 +321,6 @@ def create_proveedor(
 
     nombre_up = payload.get("nombre") or ""
 
-    # Ubicación
     if payload.get("localidad_id"):
         ub = _resolve_ubicacion_from_localidad_id(db, payload["localidad_id"])
         payload["localidad"] = ub["localidad"]
@@ -280,7 +330,6 @@ def create_proveedor(
     else:
         payload["localidad_id"] = None
 
-    # Subsegmento
     if payload.get("subsegmento_id"):
         sub = _resolve_subsegmento_from_id(db, payload["subsegmento_id"])
         payload["subsegmento_id"] = sub["subsegmento_id"]
@@ -288,7 +337,6 @@ def create_proveedor(
     else:
         payload["subsegmento"] = normalize_upper(payload.get("subsegmento"))
 
-    # Unicidad nombre por usuario
     exists = (
         db.query(models.Proveedor)
         .filter(
@@ -339,7 +387,7 @@ def create_proveedor(
     db.add(obj)
     db.commit()
     db.refresh(obj)
-    return _serialize_proveedor_with_counts(db, obj)
+    return obj
 
 
 # =============================================================================
@@ -359,12 +407,7 @@ def update_proveedor(
     """
     Actualiza un proveedor existente.
     """
-    obj = db.get(models.Proveedor, prov_id)
-    if not obj or obj.user_id != current_user.id:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Proveedor no encontrado",
-        )
+    obj = _get_proveedor_for_user(db, prov_id, current_user)
 
     data = prov_in.model_dump(exclude_unset=True)
     data = _normalize_text_fields(data)
@@ -423,7 +466,7 @@ def update_proveedor(
 
     db.commit()
     db.refresh(obj)
-    return _serialize_proveedor_with_counts(db, obj)
+    return obj
 
 
 # =============================================================================
@@ -442,12 +485,7 @@ def delete_proveedor(
     """
     Elimina un proveedor si no tiene referencias.
     """
-    obj = db.get(models.Proveedor, prov_id)
-    if not obj or obj.user_id != current_user.id:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Proveedor no encontrado",
-        )
+    obj = _get_proveedor_for_user(db, prov_id, current_user)
 
     has_gastos = (
         db.query(models.Gasto.id)
@@ -496,13 +534,6 @@ def delete_proveedor(
         is not None
     )
 
-    has_cuentas = (
-        db.query(models.CuentaBancaria.id)
-        .filter(models.CuentaBancaria.banco_id == prov_id)
-        .first()
-        is not None
-    )
-
     if (
         has_gastos
         or has_cotidianos
@@ -510,11 +541,10 @@ def delete_proveedor(
         or has_incidencias
         or has_asignaciones
         or has_citas
-        or has_cuentas
     ):
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
-            detail="No se puede eliminar: el proveedor está referenciado por otros registros.",
+            detail="No se puede eliminar: el proveedor está referenciado por movimientos o incidencias.",
         )
 
     db.delete(obj)

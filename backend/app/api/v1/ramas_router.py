@@ -1,6 +1,6 @@
 """
 Ruta: backend/app/api/v1/ramas_router.py
-Versión: 2.0.0
+Versión: 2.1.0
 Descripción:
 API v1 - RAMAS
 - TipoRamasIngreso
@@ -14,14 +14,11 @@ Responsabilidades:
 - Exposición de contadores reales de registros asociados.
 
 Cambios de esta versión:
-- Se añade `associated_count` en listados de:
+- Se añade `associated_count` y `relation_counts` en:
     * ramas de ingreso
     * ramas de gasto
     * ramas de proveedores
-- Los contadores se calculan desde relaciones reales del dominio:
-    * RamaIngreso: tipos_ingreso + ingresos
-    * RamaGasto: tipos_gasto + gastos agregados de esos tipos
-    * RamaProveedor: proveedores + subsegmentos
+- `relation_counts` solo incluye relaciones con count > 0.
 """
 
 from __future__ import annotations
@@ -63,18 +60,12 @@ router = APIRouter(
 # ============================================================
 
 def _to_dict(model: Any, *, exclude_unset: bool = False) -> dict:
-    """
-    Compatibilidad Pydantic v1/v2.
-    """
     if hasattr(model, "model_dump"):
         return model.model_dump(exclude_unset=exclude_unset)
     return model.dict(exclude_unset=exclude_unset)
 
 
 def _ensure_unique_nombre_on_create(db: Session, orm_model: Any, nombre_up: str, detail: str) -> None:
-    """
-    Valida que no exista ya una rama con el mismo nombre al crear.
-    """
     exists = db.query(orm_model).filter(orm_model.nombre == nombre_up).first()
     if exists:
         raise HTTPException(
@@ -91,9 +82,6 @@ def _ensure_unique_nombre_on_update(
     nombre_up: str,
     detail: str,
 ) -> None:
-    """
-    Valida que al renombrar no se duplique el nombre con otro registro distinto.
-    """
     exists = (
         db.query(orm_model)
         .filter(
@@ -110,9 +98,6 @@ def _ensure_unique_nombre_on_update(
 
 
 def _build_count_map(query_rows: list[tuple[str, int]]) -> Dict[str, int]:
-    """
-    Convierte filas agregadas SQL [(fk_id, count), ...] a dict.
-    """
     out: Dict[str, int] = {}
     for fk_id, qty in query_rows:
         key = str(fk_id or "").strip()
@@ -122,10 +107,7 @@ def _build_count_map(query_rows: list[tuple[str, int]]) -> Dict[str, int]:
     return out
 
 
-def _merge_count_maps(*maps: Dict[str, int]) -> Dict[str, int]:
-    """
-    Suma múltiples mapas de contadores por la misma clave.
-    """
+def _sum_maps(*maps: Dict[str, int]) -> Dict[str, int]:
     merged: Dict[str, int] = {}
     for mp in maps:
         for key, value in mp.items():
@@ -133,45 +115,63 @@ def _merge_count_maps(*maps: Dict[str, int]) -> Dict[str, int]:
     return merged
 
 
+def _make_relation_counts(defs: list[tuple[str, str, Dict[str, int]]], entity_id: str) -> list[dict]:
+    rows: list[dict] = []
+    for key, label, mp in defs:
+        count = int(mp.get(entity_id, 0))
+        if count > 0:
+            rows.append({
+                "key": key,
+                "label": label,
+                "count": count,
+            })
+    return rows
+
+
 def _serialize_rama_ingreso(
     obj: models.TipoRamasIngreso,
     associated_count: int,
+    relation_counts: list[dict] | None = None,
 ) -> dict:
     return {
         "id": obj.id,
         "nombre": obj.nombre,
         "associated_count": int(associated_count or 0),
+        "relation_counts": relation_counts or [],
     }
 
 
 def _serialize_rama_gasto(
     obj: models.TipoRamasGasto,
     associated_count: int,
+    relation_counts: list[dict] | None = None,
 ) -> dict:
     return {
         "id": obj.id,
         "nombre": obj.nombre,
         "associated_count": int(associated_count or 0),
+        "relation_counts": relation_counts or [],
     }
 
 
 def _serialize_rama_proveedor(
     obj: models.TipoRamasProveedores,
     associated_count: int,
+    relation_counts: list[dict] | None = None,
 ) -> dict:
     return {
         "id": obj.id,
         "nombre": obj.nombre,
         "associated_count": int(associated_count or 0),
+        "relation_counts": relation_counts or [],
     }
 
 
-def _get_ramas_ingreso_count_map(db: Session) -> Dict[str, int]:
-    """
-    Cuenta referencias reales por rama de ingreso:
-    - tipos_ingreso
-    - ingresos
-    """
+# ============================================================
+# Count maps por dominio
+# ============================================================
+
+def _get_ramas_ingreso_relation_maps(db: Session) -> dict[str, Dict[str, int]]:
     tipos_rows = (
         db.query(models.TipoIngreso.rama_id, func.count(models.TipoIngreso.id))
         .filter(models.TipoIngreso.rama_id.isnot(None))
@@ -186,23 +186,13 @@ def _get_ramas_ingreso_count_map(db: Session) -> Dict[str, int]:
         .all()
     )
 
-    return _merge_count_maps(
-        _build_count_map(tipos_rows),
-        _build_count_map(ingresos_rows),
-    )
+    return {
+        "tipos_ingreso": _build_count_map(tipos_rows),
+        "ingresos": _build_count_map(ingresos_rows),
+    }
 
 
-def _get_ramas_gasto_count_map(db: Session) -> Dict[str, int]:
-    """
-    Cuenta referencias reales por rama de gasto:
-    - tipos_gasto
-    - gastos
-    - gastos_cotidianos
-    - inversiones
-
-    Nota:
-    - Para los tres últimos, el conteo se deriva vía TipoGasto.rama_id.
-    """
+def _get_ramas_gasto_relation_maps(db: Session) -> dict[str, Dict[str, int]]:
     tipos_rows = (
         db.query(models.TipoGasto.rama_id, func.count(models.TipoGasto.id))
         .filter(models.TipoGasto.rama_id.isnot(None))
@@ -234,20 +224,15 @@ def _get_ramas_gasto_count_map(db: Session) -> Dict[str, int]:
         .all()
     )
 
-    return _merge_count_maps(
-        _build_count_map(tipos_rows),
-        _build_count_map(gastos_rows),
-        _build_count_map(cotidianos_rows),
-        _build_count_map(inversiones_rows),
-    )
+    return {
+        "tipos_gasto": _build_count_map(tipos_rows),
+        "gastos": _build_count_map(gastos_rows),
+        "gastos_cotidianos": _build_count_map(cotidianos_rows),
+        "inversiones": _build_count_map(inversiones_rows),
+    }
 
 
-def _get_ramas_proveedor_count_map(db: Session) -> Dict[str, int]:
-    """
-    Cuenta referencias reales por rama de proveedor:
-    - proveedores
-    - subsegmentos
-    """
+def _get_ramas_proveedor_relation_maps(db: Session) -> dict[str, Dict[str, int]]:
     proveedores_rows = (
         db.query(models.Proveedor.rama_id, func.count(models.Proveedor.id))
         .filter(models.Proveedor.rama_id.isnot(None))
@@ -262,10 +247,19 @@ def _get_ramas_proveedor_count_map(db: Session) -> Dict[str, int]:
         .all()
     )
 
-    return _merge_count_maps(
-        _build_count_map(proveedores_rows),
-        _build_count_map(subsegmentos_rows),
+    cuentas_rows = (
+        db.query(models.Proveedor.rama_id, func.count(models.CuentaBancaria.id))
+        .join(models.CuentaBancaria, models.CuentaBancaria.banco_id == models.Proveedor.id)
+        .filter(models.Proveedor.rama_id.isnot(None))
+        .group_by(models.Proveedor.rama_id)
+        .all()
     )
+
+    return {
+        "proveedores": _build_count_map(proveedores_rows),
+        "subsegmentos": _build_count_map(subsegmentos_rows),
+        "cuentas_bancarias": _build_count_map(cuentas_rows),
+    }
 
 
 # ============================================================
@@ -280,22 +274,26 @@ def _get_ramas_proveedor_count_map(db: Session) -> Dict[str, int]:
 def list_ramas_ingreso(
     db: Session = Depends(get_db),
 ):
-    """
-    Devuelve todas las ramas de ingreso ordenadas por nombre.
-
-    Incluye `associated_count` calculado desde relaciones reales:
-    - tipos_ingreso
-    - ingresos
-    """
     items = (
         db.query(models.TipoRamasIngreso)
         .order_by(models.TipoRamasIngreso.nombre.asc())
         .all()
     )
-    count_map = _get_ramas_ingreso_count_map(db)
+
+    relation_maps = _get_ramas_ingreso_relation_maps(db)
+    total_map = _sum_maps(*relation_maps.values())
+
+    relation_defs = [
+        ("tipos_ingreso", "Tipos de ingreso", relation_maps["tipos_ingreso"]),
+        ("ingresos", "Ingresos", relation_maps["ingresos"]),
+    ]
 
     return [
-        _serialize_rama_ingreso(item, count_map.get(item.id, 0))
+        _serialize_rama_ingreso(
+            item,
+            total_map.get(item.id, 0),
+            _make_relation_counts(relation_defs, item.id),
+        )
         for item in items
     ]
 
@@ -310,14 +308,6 @@ def create_rama_ingreso(
     rama_in: TipoRamaIngresoCreate,
     db: Session = Depends(get_db),
 ):
-    """
-    Crea una nueva rama de ingreso.
-
-    Reglas:
-    - NOMBRE se guarda en MAYÚSCULAS.
-    - No se puede repetir NOMBRE.
-    - El ID no lo envía el cliente.
-    """
     nombre_up = normalize_upper(rama_in.nombre) or ""
 
     _ensure_unique_nombre_on_create(
@@ -336,7 +326,7 @@ def create_rama_ingreso(
     db.add(obj)
     db.commit()
     db.refresh(obj)
-    return _serialize_rama_ingreso(obj, 0)
+    return _serialize_rama_ingreso(obj, 0, [])
 
 
 @router.put(
@@ -349,9 +339,6 @@ def update_rama_ingreso(
     rama_in: TipoRamaIngresoUpdate,
     db: Session = Depends(get_db),
 ):
-    """
-    Actualiza una rama de ingreso.
-    """
     obj = db.get(models.TipoRamasIngreso, rama_id)
     if not obj:
         raise HTTPException(
@@ -378,8 +365,18 @@ def update_rama_ingreso(
     db.commit()
     db.refresh(obj)
 
-    count_map = _get_ramas_ingreso_count_map(db)
-    return _serialize_rama_ingreso(obj, count_map.get(obj.id, 0))
+    relation_maps = _get_ramas_ingreso_relation_maps(db)
+    total_map = _sum_maps(*relation_maps.values())
+    relation_defs = [
+        ("tipos_ingreso", "Tipos de ingreso", relation_maps["tipos_ingreso"]),
+        ("ingresos", "Ingresos", relation_maps["ingresos"]),
+    ]
+
+    return _serialize_rama_ingreso(
+        obj,
+        total_map.get(obj.id, 0),
+        _make_relation_counts(relation_defs, obj.id),
+    )
 
 
 @router.delete(
@@ -391,9 +388,6 @@ def delete_rama_ingreso(
     rama_id: str,
     db: Session = Depends(get_db),
 ):
-    """
-    Elimina una rama de ingreso.
-    """
     obj = db.get(models.TipoRamasIngreso, rama_id)
     if not obj:
         raise HTTPException(
@@ -418,22 +412,27 @@ def delete_rama_ingreso(
 def list_ramas_proveedores(
     db: Session = Depends(get_db),
 ):
-    """
-    Devuelve todas las ramas de proveedores ordenadas por nombre.
-
-    Incluye `associated_count` calculado desde relaciones reales:
-    - proveedores
-    - subsegmentos
-    """
     items = (
         db.query(models.TipoRamasProveedores)
         .order_by(models.TipoRamasProveedores.nombre.asc())
         .all()
     )
-    count_map = _get_ramas_proveedor_count_map(db)
+
+    relation_maps = _get_ramas_proveedor_relation_maps(db)
+    total_map = _sum_maps(*relation_maps.values())
+
+    relation_defs = [
+        ("proveedores", "Proveedores", relation_maps["proveedores"]),
+        ("subsegmentos", "Subsegmentos de proveedor", relation_maps["subsegmentos"]),
+        ("cuentas_bancarias", "Cuentas bancarias", relation_maps["cuentas_bancarias"]),
+    ]
 
     return [
-        _serialize_rama_proveedor(item, count_map.get(item.id, 0))
+        _serialize_rama_proveedor(
+            item,
+            total_map.get(item.id, 0),
+            _make_relation_counts(relation_defs, item.id),
+        )
         for item in items
     ]
 
@@ -448,9 +447,6 @@ def create_rama_proveedor(
     rama_in: TipoRamaProveedorCreate,
     db: Session = Depends(get_db),
 ):
-    """
-    Crea una nueva rama de proveedor.
-    """
     nombre_up = normalize_upper(rama_in.nombre) or ""
 
     _ensure_unique_nombre_on_create(
@@ -469,7 +465,7 @@ def create_rama_proveedor(
     db.add(obj)
     db.commit()
     db.refresh(obj)
-    return _serialize_rama_proveedor(obj, 0)
+    return _serialize_rama_proveedor(obj, 0, [])
 
 
 @router.put(
@@ -482,9 +478,6 @@ def update_rama_proveedor(
     rama_in: TipoRamaProveedorUpdate,
     db: Session = Depends(get_db),
 ):
-    """
-    Actualiza una rama de proveedor.
-    """
     obj = db.get(models.TipoRamasProveedores, rama_id)
     if not obj:
         raise HTTPException(
@@ -511,8 +504,19 @@ def update_rama_proveedor(
     db.commit()
     db.refresh(obj)
 
-    count_map = _get_ramas_proveedor_count_map(db)
-    return _serialize_rama_proveedor(obj, count_map.get(obj.id, 0))
+    relation_maps = _get_ramas_proveedor_relation_maps(db)
+    total_map = _sum_maps(*relation_maps.values())
+    relation_defs = [
+        ("proveedores", "Proveedores", relation_maps["proveedores"]),
+        ("subsegmentos", "Subsegmentos de proveedor", relation_maps["subsegmentos"]),
+        ("cuentas_bancarias", "Cuentas bancarias", relation_maps["cuentas_bancarias"]),
+    ]
+
+    return _serialize_rama_proveedor(
+        obj,
+        total_map.get(obj.id, 0),
+        _make_relation_counts(relation_defs, obj.id),
+    )
 
 
 @router.delete(
@@ -524,9 +528,6 @@ def delete_rama_proveedor(
     rama_id: str,
     db: Session = Depends(get_db),
 ):
-    """
-    Elimina una rama de proveedor.
-    """
     obj = db.get(models.TipoRamasProveedores, rama_id)
     if not obj:
         raise HTTPException(
@@ -551,24 +552,28 @@ def delete_rama_proveedor(
 def list_ramas_gasto(
     db: Session = Depends(get_db),
 ):
-    """
-    Devuelve todas las ramas de gasto ordenadas por nombre.
-
-    Incluye `associated_count` calculado desde relaciones reales:
-    - tipos_gasto
-    - gastos
-    - gastos_cotidianos
-    - inversiones
-    """
     items = (
         db.query(models.TipoRamasGasto)
         .order_by(models.TipoRamasGasto.nombre.asc())
         .all()
     )
-    count_map = _get_ramas_gasto_count_map(db)
+
+    relation_maps = _get_ramas_gasto_relation_maps(db)
+    total_map = _sum_maps(*relation_maps.values())
+
+    relation_defs = [
+        ("tipos_gasto", "Tipos de gasto", relation_maps["tipos_gasto"]),
+        ("gastos", "Gastos", relation_maps["gastos"]),
+        ("gastos_cotidianos", "Gastos cotidianos", relation_maps["gastos_cotidianos"]),
+        ("inversiones", "Inversiones", relation_maps["inversiones"]),
+    ]
 
     return [
-        _serialize_rama_gasto(item, count_map.get(item.id, 0))
+        _serialize_rama_gasto(
+            item,
+            total_map.get(item.id, 0),
+            _make_relation_counts(relation_defs, item.id),
+        )
         for item in items
     ]
 
@@ -583,9 +588,6 @@ def create_rama_gasto(
     rama_in: TipoRamaGastoCreate,
     db: Session = Depends(get_db),
 ):
-    """
-    Crea una nueva rama de gasto.
-    """
     nombre_up = normalize_upper(rama_in.nombre) or ""
 
     _ensure_unique_nombre_on_create(
@@ -604,7 +606,7 @@ def create_rama_gasto(
     db.add(obj)
     db.commit()
     db.refresh(obj)
-    return _serialize_rama_gasto(obj, 0)
+    return _serialize_rama_gasto(obj, 0, [])
 
 
 @router.put(
@@ -617,9 +619,6 @@ def update_rama_gasto(
     rama_in: TipoRamaGastoUpdate,
     db: Session = Depends(get_db),
 ):
-    """
-    Actualiza una rama de gasto.
-    """
     obj = db.get(models.TipoRamasGasto, rama_id)
     if not obj:
         raise HTTPException(
@@ -646,8 +645,20 @@ def update_rama_gasto(
     db.commit()
     db.refresh(obj)
 
-    count_map = _get_ramas_gasto_count_map(db)
-    return _serialize_rama_gasto(obj, count_map.get(obj.id, 0))
+    relation_maps = _get_ramas_gasto_relation_maps(db)
+    total_map = _sum_maps(*relation_maps.values())
+    relation_defs = [
+        ("tipos_gasto", "Tipos de gasto", relation_maps["tipos_gasto"]),
+        ("gastos", "Gastos", relation_maps["gastos"]),
+        ("gastos_cotidianos", "Gastos cotidianos", relation_maps["gastos_cotidianos"]),
+        ("inversiones", "Inversiones", relation_maps["inversiones"]),
+    ]
+
+    return _serialize_rama_gasto(
+        obj,
+        total_map.get(obj.id, 0),
+        _make_relation_counts(relation_defs, obj.id),
+    )
 
 
 @router.delete(
@@ -659,9 +670,6 @@ def delete_rama_gasto(
     rama_id: str,
     db: Session = Depends(get_db),
 ):
-    """
-    Elimina una rama de gasto.
-    """
     obj = db.get(models.TipoRamasGasto, rama_id)
     if not obj:
         raise HTTPException(

@@ -1,6 +1,6 @@
 """
 Ruta: backend/app/api/v1/tipos_router.py
-Versión: 2.0.0
+Versión: 2.1.0
 Descripción:
 API v1 - TIPOS
 - TipoGasto
@@ -12,12 +12,14 @@ Responsabilidades:
 - Normalización de nombres a MAYÚSCULAS.
 - Validación de duplicados en create/update.
 - Exposición de contadores reales de registros asociados.
+- Exposición de detalle por tabla relacionada (`relation_counts`).
 
 Cambios de esta versión:
-- Se añade `associated_count` en listados de:
+- Se añade `associated_count` y `relation_counts` en listados y responses de:
     * TipoGasto
     * TipoIngreso
     * TipoSegmentoGasto
+- `relation_counts` solo incluye tablas con count > 0.
 - Los contadores se calculan desde relaciones reales del dominio:
     * TipoGasto: gastos + gastos_cotidianos + inversiones
     * TipoIngreso: ingresos
@@ -157,34 +159,96 @@ def _merge_count_maps(*maps: Dict[str, int]) -> Dict[str, int]:
     return merged
 
 
-def _serialize_tipo_gasto(item: models.TipoGasto, associated_count: int) -> dict:
+def _build_relation_counts(items: list[tuple[str, str, int]]) -> list[dict]:
+    """
+    Construye relation_counts filtrando counts en 0.
+    """
+    out: list[dict] = []
+    for key, label, count in items:
+        qty = int(count or 0)
+        if qty <= 0:
+            continue
+        out.append(
+            {
+                "key": key,
+                "label": label,
+                "count": qty,
+            }
+        )
+    return out
+
+
+def _serialize_tipo_gasto(
+    item: models.TipoGasto,
+    *,
+    gastos_count: int = 0,
+    cotidianos_count: int = 0,
+    inversiones_count: int = 0,
+) -> dict:
+    relation_counts = _build_relation_counts(
+        [
+            ("gastos", "Gastos", gastos_count),
+            ("gastos_cotidianos", "Gastos cotidianos", cotidianos_count),
+            ("inversiones", "Inversiones", inversiones_count),
+        ]
+    )
+
+    associated_count = sum(x["count"] for x in relation_counts)
+
     return {
         "id": item.id,
         "nombre": item.nombre,
         "rama_id": item.rama_id,
         "segmento_id": item.segmento_id,
-        "associated_count": int(associated_count or 0),
+        "associated_count": associated_count,
+        "relation_counts": relation_counts,
     }
 
 
-def _serialize_tipo_ingreso(item: models.TipoIngreso, associated_count: int) -> dict:
+def _serialize_tipo_ingreso(
+    item: models.TipoIngreso,
+    *,
+    ingresos_count: int = 0,
+) -> dict:
+    relation_counts = _build_relation_counts(
+        [
+            ("ingresos", "Ingresos", ingresos_count),
+        ]
+    )
+
+    associated_count = sum(x["count"] for x in relation_counts)
+
     return {
         "id": item.id,
         "nombre": item.nombre,
         "rama_id": item.rama_id,
-        "associated_count": int(associated_count or 0),
+        "associated_count": associated_count,
+        "relation_counts": relation_counts,
     }
 
 
-def _serialize_tipo_segmento(item: models.TipoSegmentoGasto, associated_count: int) -> dict:
+def _serialize_tipo_segmento(
+    item: models.TipoSegmentoGasto,
+    *,
+    gastos_count: int = 0,
+) -> dict:
+    relation_counts = _build_relation_counts(
+        [
+            ("gastos", "Gastos", gastos_count),
+        ]
+    )
+
+    associated_count = sum(x["count"] for x in relation_counts)
+
     return {
         "id": item.id,
         "nombre": item.nombre,
-        "associated_count": int(associated_count or 0),
+        "associated_count": associated_count,
+        "relation_counts": relation_counts,
     }
 
 
-def _get_tipo_gasto_count_map(db: Session) -> Dict[str, int]:
+def _get_tipo_gasto_relation_maps(db: Session) -> Dict[str, Dict[str, int]]:
     """
     Cuenta referencias reales por tipo de gasto:
     - gastos
@@ -212,14 +276,14 @@ def _get_tipo_gasto_count_map(db: Session) -> Dict[str, int]:
         .all()
     )
 
-    return _merge_count_maps(
-        _build_count_map(gastos_rows),
-        _build_count_map(cotidianos_rows),
-        _build_count_map(inversiones_rows),
-    )
+    return {
+        "gastos": _build_count_map(gastos_rows),
+        "gastos_cotidianos": _build_count_map(cotidianos_rows),
+        "inversiones": _build_count_map(inversiones_rows),
+    }
 
 
-def _get_tipo_ingreso_count_map(db: Session) -> Dict[str, int]:
+def _get_tipo_ingreso_relation_maps(db: Session) -> Dict[str, Dict[str, int]]:
     """
     Cuenta referencias reales por tipo de ingreso:
     - ingresos
@@ -230,10 +294,13 @@ def _get_tipo_ingreso_count_map(db: Session) -> Dict[str, int]:
         .group_by(models.Ingreso.tipo_id)
         .all()
     )
-    return _build_count_map(rows)
+
+    return {
+        "ingresos": _build_count_map(rows),
+    }
 
 
-def _get_segmento_gasto_count_map(db: Session) -> Dict[str, int]:
+def _get_segmento_gasto_relation_maps(db: Session) -> Dict[str, Dict[str, int]]:
     """
     Cuenta referencias reales por segmento de gasto:
     - gastos
@@ -244,7 +311,10 @@ def _get_segmento_gasto_count_map(db: Session) -> Dict[str, int]:
         .group_by(models.Gasto.segmento_id)
         .all()
     )
-    return _build_count_map(rows)
+
+    return {
+        "gastos": _build_count_map(rows),
+    }
 
 
 # ==========================
@@ -274,10 +344,9 @@ def list_tipos_gasto(
     - segmento_id
     - rama_id
 
-    Incluye `associated_count` calculado desde relaciones reales:
-    - gastos
-    - gastos_cotidianos
-    - inversiones
+    Incluye:
+    - associated_count
+    - relation_counts
     """
     q = db.query(models.TipoGasto)
 
@@ -288,10 +357,15 @@ def list_tipos_gasto(
         q = q.filter(models.TipoGasto.rama_id == normalize_upper(rama_id))
 
     items = q.order_by(models.TipoGasto.nombre.asc()).all()
-    count_map = _get_tipo_gasto_count_map(db)
+    relation_maps = _get_tipo_gasto_relation_maps(db)
 
     return [
-        _serialize_tipo_gasto(item, count_map.get(item.id, 0))
+        _serialize_tipo_gasto(
+            item,
+            gastos_count=relation_maps["gastos"].get(item.id, 0),
+            cotidianos_count=relation_maps["gastos_cotidianos"].get(item.id, 0),
+            inversiones_count=relation_maps["inversiones"].get(item.id, 0),
+        )
         for item in items
     ]
 
@@ -334,7 +408,7 @@ def create_tipo_gasto(
     db.add(obj)
     db.commit()
     db.refresh(obj)
-    return _serialize_tipo_gasto(obj, 0)
+    return _serialize_tipo_gasto(obj)
 
 
 @router.put(
@@ -387,8 +461,13 @@ def update_tipo_gasto(
     db.commit()
     db.refresh(obj)
 
-    count_map = _get_tipo_gasto_count_map(db)
-    return _serialize_tipo_gasto(obj, count_map.get(obj.id, 0))
+    relation_maps = _get_tipo_gasto_relation_maps(db)
+    return _serialize_tipo_gasto(
+        obj,
+        gastos_count=relation_maps["gastos"].get(obj.id, 0),
+        cotidianos_count=relation_maps["gastos_cotidianos"].get(obj.id, 0),
+        inversiones_count=relation_maps["inversiones"].get(obj.id, 0),
+    )
 
 
 @router.delete(
@@ -440,8 +519,9 @@ def list_tipos_ingreso(
     Comportamiento:
     - Si se informa rama_id, devuelve solo los tipos asociados a esa rama.
 
-    Incluye `associated_count` calculado desde relaciones reales:
-    - ingresos
+    Incluye:
+    - associated_count
+    - relation_counts
     """
     q = db.query(models.TipoIngreso)
 
@@ -450,10 +530,13 @@ def list_tipos_ingreso(
         q = q.filter(models.TipoIngreso.rama_id == rama_id)
 
     items = q.order_by(models.TipoIngreso.nombre.asc()).all()
-    count_map = _get_tipo_ingreso_count_map(db)
+    relation_maps = _get_tipo_ingreso_relation_maps(db)
 
     return [
-        _serialize_tipo_ingreso(item, count_map.get(item.id, 0))
+        _serialize_tipo_ingreso(
+            item,
+            ingresos_count=relation_maps["ingresos"].get(item.id, 0),
+        )
         for item in items
     ]
 
@@ -506,7 +589,7 @@ def create_tipo_ingreso(
     db.add(obj)
     db.commit()
     db.refresh(obj)
-    return _serialize_tipo_ingreso(obj, 0)
+    return _serialize_tipo_ingreso(obj)
 
 
 @router.put(
@@ -557,8 +640,11 @@ def update_tipo_ingreso(
     db.commit()
     db.refresh(obj)
 
-    count_map = _get_tipo_ingreso_count_map(db)
-    return _serialize_tipo_ingreso(obj, count_map.get(obj.id, 0))
+    relation_maps = _get_tipo_ingreso_relation_maps(db)
+    return _serialize_tipo_ingreso(
+        obj,
+        ingresos_count=relation_maps["ingresos"].get(obj.id, 0),
+    )
 
 
 @router.delete(
@@ -603,18 +689,22 @@ def list_tipos_segmento(
     """
     Devuelve la lista completa de segmentos de gasto.
 
-    Incluye `associated_count` calculado desde relaciones reales:
-    - gastos
+    Incluye:
+    - associated_count
+    - relation_counts
     """
     items = (
         db.query(models.TipoSegmentoGasto)
         .order_by(models.TipoSegmentoGasto.nombre.asc())
         .all()
     )
-    count_map = _get_segmento_gasto_count_map(db)
+    relation_maps = _get_segmento_gasto_relation_maps(db)
 
     return [
-        _serialize_tipo_segmento(item, count_map.get(item.id, 0))
+        _serialize_tipo_segmento(
+            item,
+            gastos_count=relation_maps["gastos"].get(item.id, 0),
+        )
         for item in items
     ]
 
@@ -655,7 +745,7 @@ def create_tipo_segmento(
     db.add(obj)
     db.commit()
     db.refresh(obj)
-    return _serialize_tipo_segmento(obj, 0)
+    return _serialize_tipo_segmento(obj)
 
 
 @router.put(
@@ -701,8 +791,11 @@ def update_tipo_segmento(
     db.commit()
     db.refresh(obj)
 
-    count_map = _get_segmento_gasto_count_map(db)
-    return _serialize_tipo_segmento(obj, count_map.get(obj.id, 0))
+    relation_maps = _get_segmento_gasto_relation_maps(db)
+    return _serialize_tipo_segmento(
+        obj,
+        gastos_count=relation_maps["gastos"].get(obj.id, 0),
+    )
 
 
 @router.delete(

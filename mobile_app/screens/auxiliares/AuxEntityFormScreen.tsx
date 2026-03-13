@@ -1,13 +1,13 @@
 /**
  * Ruta: mobile_app/screens/auxiliares/AuxEntityFormScreen.tsx
- * Versión: 2.3.0
+ * Versión: 2.3.2
  * Descripción:
  * Formulario genérico para creación y edición de auxiliares y proveedores.
  *
- * Novedades:
- * - Soporte para mostrar relaciones y número de registros asociados.
- * - Botón "Relaciones" en edición.
- * - Despliega listado de tablas relacionadas con sus contadores.
+ * Ajustes:
+ * - El botón "Relaciones" se mantiene en el footer.
+ * - El bloque con el detalle de relaciones se renderiza al final del formulario.
+ * - Se ocultan las relaciones con count = 0.
  */
 
 import React, { useEffect, useMemo, useState } from 'react';
@@ -139,14 +139,8 @@ export const AuxEntityFormScreen: React.FC<Props> = ({ navigation, route }) => {
 
   const [showRelations, setShowRelations] = useState(false);
 
-  // ==========================================================
-  // Estado común
-  // ==========================================================
   const [nombre, setNombre] = useState('');
 
-  // ==========================================================
-  // AUX NO PROVEEDOR
-  // ==========================================================
   const [ramaGastoId, setRamaGastoId] = useState<string | null>(null);
   const [segmentoGastoId, setSegmentoGastoId] = useState<string | null>(
     route?.params?.defaultSegmentoId ?? null
@@ -166,9 +160,6 @@ export const AuxEntityFormScreen: React.FC<Props> = ({ navigation, route }) => {
   const [subsegmentoRamasProveedor, setSubsegmentoRamasProveedor] = useState<RamaProveedor[]>([]);
   const [busquedaSubsegmentoRama, setBusquedaSubsegmentoRama] = useState('');
 
-  // ==========================================================
-  // PROVEEDOR
-  // ==========================================================
   const [ramaId, setRamaId] = useState<string | null>(route?.params?.defaultRamaId ?? null);
   const [ramaNombre, setRamaNombre] = useState<string | null>(null);
 
@@ -194,7 +185,6 @@ export const AuxEntityFormScreen: React.FC<Props> = ({ navigation, route }) => {
   const [aceptaUrgencias, setAceptaUrgencias] = useState<boolean>(false);
   const [activo, setActivo] = useState<boolean>(true);
 
-  // Fallback inline ubicación
   const [creatingLocalidad, setCreatingLocalidad] = useState(false);
   const [creatingRegion, setCreatingRegion] = useState(false);
   const [creatingPais, setCreatingPais] = useState(false);
@@ -203,7 +193,6 @@ export const AuxEntityFormScreen: React.FC<Props> = ({ navigation, route }) => {
   const [newRegionText, setNewRegionText] = useState('');
   const [newPaisText, setNewPaisText] = useState('');
 
-  // Catálogos proveedor
   const [ramaOptions, setRamaOptions] = useState<RamaProveedor[]>([]);
   const [localidadOptions, setLocalidadOptions] = useState<LocalidadWithContext[]>([]);
   const [regionOptions, setRegionOptions] = useState<RegionOption[]>([]);
@@ -222,46 +211,40 @@ export const AuxEntityFormScreen: React.FC<Props> = ({ navigation, route }) => {
 
   const ramaBloqueada = origin === 'cotidianos' && !!ramaId;
 
-  // ==========================================================
-  // Relaciones
-  // ==========================================================
   const relationItems = useMemo<RelationCountItem[]>(() => {
+    let raw: RelationCountItem[] = [];
+
     if (isProveedor && editingProveedor) {
-      return Array.isArray((editingProveedor as any).relation_counts)
+      raw = Array.isArray((editingProveedor as any).relation_counts)
         ? ((editingProveedor as any).relation_counts as RelationCountItem[])
         : [];
-    }
-
-    if (!isProveedor && editingItem) {
-      return Array.isArray((editingItem as any).relation_counts)
+    } else if (!isProveedor && editingItem) {
+      raw = Array.isArray((editingItem as any).relation_counts)
         ? ((editingItem as any).relation_counts as RelationCountItem[])
         : [];
     }
 
-    return [];
+    return raw.filter((rel) => Number(rel?.count ?? 0) > 0);
   }, [isProveedor, editingProveedor, editingItem]);
 
   const associatedCount = useMemo<number>(() => {
-    if (isProveedor && editingProveedor) {
-      const direct = Number((editingProveedor as any).associated_count ?? 0);
-      if (direct > 0) return direct;
+    if (relationItems.length > 0) {
       return relationItems.reduce((acc, x) => acc + Number(x.count ?? 0), 0);
     }
 
+    if (isProveedor && editingProveedor) {
+      return Number((editingProveedor as any).associated_count ?? 0);
+    }
+
     if (!isProveedor && editingItem) {
-      const direct = Number((editingItem as any).associated_count ?? 0);
-      if (direct > 0) return direct;
-      return relationItems.reduce((acc, x) => acc + Number(x.count ?? 0), 0);
+      return Number((editingItem as any).associated_count ?? 0);
     }
 
     return 0;
   }, [isProveedor, editingProveedor, editingItem, relationItems]);
 
-  const hasRelationsInfo = isEditMode && (relationItems.length > 0 || associatedCount > 0);
+  const hasRelationsInfo = isEditMode && relationItems.length > 0;
 
-  // ==========================================================
-  // Navegación de retorno
-  // ==========================================================
   const findOwningNavigatorByRouteKey = (nav: any, targetRouteKey: string) => {
     let current = nav;
     while (current) {
@@ -270,9 +253,7 @@ export const AuxEntityFormScreen: React.FC<Props> = ({ navigation, route }) => {
         const routes = state?.routes ?? [];
         const found = routes.some((r: any) => r?.key === targetRouteKey);
         if (found) return current;
-      } catch {
-        // noop
-      }
+      } catch {}
       current = current.getParent?.() ?? null;
     }
     return null;
@@ -302,9 +283,7 @@ export const AuxEntityFormScreen: React.FC<Props> = ({ navigation, route }) => {
             source: returnRouteKey,
           });
           return;
-        } catch {
-          // fallback abajo
-        }
+        } catch {}
       }
     }
 
@@ -313,9 +292,7 @@ export const AuxEntityFormScreen: React.FC<Props> = ({ navigation, route }) => {
         const parent = navigation.getParent?.();
         const nav = parent ?? navigation;
         nav.navigate({ name: returnTo, params: { auxResult }, merge: true });
-      } catch {
-        // noop
-      }
+      } catch {}
     }
   };
 
@@ -329,9 +306,6 @@ export const AuxEntityFormScreen: React.FC<Props> = ({ navigation, route }) => {
     if (navigation.canGoBack?.()) navigation.goBack();
   };
 
-  // ==========================================================
-  // Helpers de carga
-  // ==========================================================
   const buildRegionAndPaisOptionsFromLocalidades = (locs: LocalidadWithContext[]) => {
     const regionMap = new Map<number, RegionOption>();
     const paisMap = new Map<number, PaisOption>();
@@ -387,12 +361,10 @@ export const AuxEntityFormScreen: React.FC<Props> = ({ navigation, route }) => {
   const ensureSubsegmentosProveedorLoaded = async (ramaFiltro?: string | null) => {
     try {
       setLoadingSubsegmentos(true);
-
       const data = await listAux<TipoSubsegmentoProveedorItem>(
         'tipo_subsegmento_proveedor',
         ramaFiltro ? { rama_id: ramaFiltro } : undefined
       );
-
       setSubsegmentoOptions(data ?? []);
     } catch (err) {
       console.error('[AuxEntityForm] Error cargando subsegmentos proveedor', err);
@@ -458,9 +430,6 @@ export const AuxEntityFormScreen: React.FC<Props> = ({ navigation, route }) => {
     }
   };
 
-  // ==========================================================
-  // Inicialización edición proveedor
-  // ==========================================================
   useEffect(() => {
     if (!isProveedor) return;
     if (!isEditMode || !editingProveedor) return;
@@ -493,9 +462,6 @@ export const AuxEntityFormScreen: React.FC<Props> = ({ navigation, route }) => {
     }
   }, [isProveedor, isEditMode, editingProveedor]);
 
-  // ==========================================================
-  // Inicialización edición aux
-  // ==========================================================
   useEffect(() => {
     if (isProveedor) return;
     if (!editingItem) return;
@@ -516,9 +482,6 @@ export const AuxEntityFormScreen: React.FC<Props> = ({ navigation, route }) => {
     }
   }, [isProveedor, editingItem, isTipoGasto, isTipoIngreso, isSubsegmentoProveedor]);
 
-  // ==========================================================
-  // Catálogos auxiliares
-  // ==========================================================
   useEffect(() => {
     const loadCatalogs = async () => {
       try {
@@ -581,18 +544,13 @@ export const AuxEntityFormScreen: React.FC<Props> = ({ navigation, route }) => {
     void ensureRamasProveedorLoaded();
   }, [isProveedor, ramaId, ramaNombre, ramaOptions, ramaBloqueada, busquedaRamaProveedor]);
 
-  // ==========================================================
-  // Integración retorno desde formularios hijos
-  // ==========================================================
   useEffect(() => {
     const auxResult = route?.params?.auxResult;
     if (!auxResult) return;
 
     try {
       navigation.setParams?.({ auxResult: undefined });
-    } catch {
-      // noop
-    }
+    } catch {}
 
     if (!isProveedor) return;
 
@@ -677,9 +635,6 @@ export const AuxEntityFormScreen: React.FC<Props> = ({ navigation, route }) => {
     }
   }, [route?.params?.auxResult, isProveedor, navigation, ramaOptions, ramaId]);
 
-  // ==========================================================
-  // Filtrados
-  // ==========================================================
   const ramasProveedorFiltradas = useMemo(() => {
     if (ramaBloqueada && ramaId) {
       return ramaOptions.filter((r) => r.id === ramaId);
@@ -757,9 +712,6 @@ export const AuxEntityFormScreen: React.FC<Props> = ({ navigation, route }) => {
     return subsegmentoRamasProveedor.filter((r) => (r.nombre ?? '').toLowerCase().includes(term));
   }, [subsegmentoRamasProveedor, busquedaSubsegmentoRama]);
 
-  // ==========================================================
-  // Select / clear
-  // ==========================================================
   const clearRama = () => {
     if (ramaBloqueada) return;
     setRamaId(null);
@@ -885,9 +837,6 @@ export const AuxEntityFormScreen: React.FC<Props> = ({ navigation, route }) => {
     setBusquedaPais('');
   };
 
-  // ==========================================================
-  // Creación inline ubicación
-  // ==========================================================
   const ensurePaisCreatedIfNeeded = async (): Promise<number | null> => {
     if (paisId) return paisId;
 
@@ -1026,9 +975,6 @@ export const AuxEntityFormScreen: React.FC<Props> = ({ navigation, route }) => {
     }
   };
 
-  // ==========================================================
-  // Validaciones
-  // ==========================================================
   const normalize = (v: any) => String(v ?? '').trim();
 
   const isValidEmail = (value: string): boolean => {
@@ -1057,9 +1003,6 @@ export const AuxEntityFormScreen: React.FC<Props> = ({ navigation, route }) => {
     return /^[ABCDEFGHJNPQRSUVW]\d{7}[0-9A-J]$/.test(cleaned);
   };
 
-  // ==========================================================
-  // Guardado auxiliar genérico
-  // ==========================================================
   const handleSaveGenericAux = async () => {
     const nombreFinal = nombre.trim();
     if (!nombreFinal) {
@@ -1146,9 +1089,6 @@ export const AuxEntityFormScreen: React.FC<Props> = ({ navigation, route }) => {
     }
   };
 
-  // ==========================================================
-  // Guardado proveedor
-  // ==========================================================
   const handleSave = async () => {
     if (!isProveedor) {
       await handleSaveGenericAux();
@@ -1284,9 +1224,6 @@ export const AuxEntityFormScreen: React.FC<Props> = ({ navigation, route }) => {
     }
   };
 
-  // ==========================================================
-  // Eliminar
-  // ==========================================================
   const handleDelete = () => {
     if (!isEditMode) return;
 
@@ -1340,9 +1277,6 @@ export const AuxEntityFormScreen: React.FC<Props> = ({ navigation, route }) => {
     );
   };
 
-  // ==========================================================
-  // Dirty state
-  // ==========================================================
   const initialSnapshot = useMemo<DirtySnapshot>(() => {
     if (isProveedor) {
       if (editingProveedor) {
@@ -1364,7 +1298,6 @@ export const AuxEntityFormScreen: React.FC<Props> = ({ navigation, route }) => {
           ambitoServicio: normalize((editingProveedor as any)?.ambito_servicio),
           aceptaUrgencias: String(Boolean((editingProveedor as any)?.acepta_urgencias ?? false)),
           activo: String((editingProveedor as any)?.activo !== false),
-
           ramaGastoId: '',
           segmentoGastoId: '',
           ramaIngresoId: '',
@@ -1390,7 +1323,6 @@ export const AuxEntityFormScreen: React.FC<Props> = ({ navigation, route }) => {
         ambitoServicio: '',
         aceptaUrgencias: 'false',
         activo: 'true',
-
         ramaGastoId: '',
         segmentoGastoId: '',
         ramaIngresoId: '',
@@ -1402,7 +1334,6 @@ export const AuxEntityFormScreen: React.FC<Props> = ({ navigation, route }) => {
       return {
         mode: 'aux',
         nombre: normalize(editingItem.nombre),
-
         ramaId: '',
         subsegmentoId: '',
         localidad: '',
@@ -1418,7 +1349,6 @@ export const AuxEntityFormScreen: React.FC<Props> = ({ navigation, route }) => {
         ambitoServicio: '',
         aceptaUrgencias: '',
         activo: '',
-
         ramaGastoId: normalize((editingItem as any).rama_id),
         segmentoGastoId: normalize((editingItem as any).segmento_id),
         ramaIngresoId: normalize((editingItem as any).rama_id),
@@ -1429,7 +1359,6 @@ export const AuxEntityFormScreen: React.FC<Props> = ({ navigation, route }) => {
     return {
       mode: 'aux',
       nombre: '',
-
       ramaId: '',
       subsegmentoId: '',
       localidad: '',
@@ -1445,7 +1374,6 @@ export const AuxEntityFormScreen: React.FC<Props> = ({ navigation, route }) => {
       ambitoServicio: '',
       aceptaUrgencias: '',
       activo: '',
-
       ramaGastoId: '',
       segmentoGastoId: '',
       ramaIngresoId: '',
@@ -1557,9 +1485,6 @@ export const AuxEntityFormScreen: React.FC<Props> = ({ navigation, route }) => {
     );
   };
 
-  // ==========================================================
-  // Títulos
-  // ==========================================================
   const title =
     auxType === 'proveedor'
       ? isEditMode
@@ -1608,9 +1533,6 @@ export const AuxEntityFormScreen: React.FC<Props> = ({ navigation, route }) => {
     return subsegmentoRamasProveedor.find((r) => r.id === subsegmentoRamaId) ?? null;
   }, [subsegmentoRamaId, subsegmentoRamasProveedor]);
 
-  // ==========================================================
-  // Render
-  // ==========================================================
   return (
     <FormScreen
       title={title}
@@ -1649,27 +1571,6 @@ export const AuxEntityFormScreen: React.FC<Props> = ({ navigation, route }) => {
         </View>
       }
     >
-      {hasRelationsInfo && showRelations ? (
-        <FormSection title={`Relaciones (${associatedCount} registros)`}>
-          {relationItems.length > 0 ? (
-            relationItems.map((rel) => (
-              <View key={rel.key} style={ui.relationRow}>
-                <View style={{ flex: 1 }}>
-                  <Text style={ui.relationLabel}>{rel.label}</Text>
-                  <Text style={ui.relationKey}>{rel.key}</Text>
-                </View>
-
-                <View style={ui.relationCountBadge}>
-                  <Text style={ui.relationCountText}>{rel.count}</Text>
-                </View>
-              </View>
-            ))
-          ) : (
-            <Text style={styles.helperText}>No hay detalle de relaciones disponible.</Text>
-          )}
-        </FormSection>
-      ) : null}
-
       {!isProveedor ? (
         <>
           <FormSection title="Datos">
@@ -2150,6 +2051,27 @@ export const AuxEntityFormScreen: React.FC<Props> = ({ navigation, route }) => {
           </FormSection>
         </>
       )}
+
+      {hasRelationsInfo && showRelations ? (
+        <FormSection title={`Relaciones (${associatedCount} registros)`}>
+          {relationItems.length > 0 ? (
+            relationItems.map((rel) => (
+              <View key={rel.key} style={ui.relationRow}>
+                <View style={{ flex: 1 }}>
+                  <Text style={ui.relationLabel}>{rel.label}</Text>
+                  <Text style={ui.relationKey}>{rel.key}</Text>
+                </View>
+
+                <View style={ui.relationCountBadge}>
+                  <Text style={ui.relationCountText}>{rel.count}</Text>
+                </View>
+              </View>
+            ))
+          ) : (
+            <Text style={styles.helperText}>No hay detalle de relaciones disponible.</Text>
+          )}
+        </FormSection>
+      ) : null}
     </FormScreen>
   );
 };
@@ -2162,17 +2084,14 @@ const ui = StyleSheet.create({
     paddingTop: 12,
     paddingBottom: 12,
   },
-
   inlineFieldsRow: {
     flexDirection: 'row',
     alignItems: 'flex-start',
     gap: spacing.md,
   },
-
   inlineFieldHalf: {
     flex: 1,
   },
-
   booleanRow: {
     flexDirection: 'row',
     gap: spacing.sm,
@@ -2181,7 +2100,6 @@ const ui = StyleSheet.create({
   booleanItem: {
     minWidth: 72,
   },
-
   inlinePrimaryBtn: {
     flex: 1,
     borderRadius: radius.lg,
@@ -2194,7 +2112,6 @@ const ui = StyleSheet.create({
     color: '#FFFFFF',
     fontWeight: '600',
   },
-
   inlineSecondaryBtn: {
     flex: 1,
     borderRadius: radius.lg,
@@ -2209,7 +2126,6 @@ const ui = StyleSheet.create({
     fontWeight: '600',
     color: colors.textPrimary,
   },
-
   relationsButton: {
     marginBottom: 10,
     flexDirection: 'row',
@@ -2226,7 +2142,6 @@ const ui = StyleSheet.create({
     fontWeight: '600',
     fontSize: 15,
   },
-
   relationRow: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -2259,7 +2174,6 @@ const ui = StyleSheet.create({
     fontWeight: '700',
     fontSize: 13,
   },
-
   deleteButton: {
     marginTop: 10,
     flexDirection: 'row',

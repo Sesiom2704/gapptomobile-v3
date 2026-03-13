@@ -1,6 +1,6 @@
 """
 Ruta: backend/app/api/v1/cuentas_router.py
-Versión: 2.0.0
+Versión: 2.1.0
 Descripción:
 API v1 - CUENTAS BANCARIAS
 
@@ -17,13 +17,16 @@ Endpoints:
 - DELETE /api/v1/cuentas/{id}     -> eliminar una cuenta
 
 Cambios de esta versión:
-- Se añade `associated_count` en lectura de cuentas bancarias.
+- Se añade:
+    * associated_count
+    * relation_counts
 - El contador se calcula desde relaciones reales:
     * gastos
     * ingresos
     * gastos_cotidianos
     * movimientos_origen
     * movimientos_destino
+- Se ocultan del detalle las relaciones con count = 0.
 - Se mantiene el anagrama unificado:
     "REFERENCIA - NOMBRE DEL BANCO"
 """
@@ -89,7 +92,6 @@ class CuentaBancariaCreateBody(BaseModel):
 # ============================================================
 
 def _normalize_spaces(text: str) -> str:
-    """strip() y colapsa múltiples espacios internos en uno."""
     if not text:
         return ""
     return " ".join(text.strip().split())
@@ -112,9 +114,6 @@ def _get_cuenta_for_user(
     cuenta_id: str,
     current_user: models.User,
 ) -> models.CuentaBancaria:
-    """
-    Recupera una cuenta asegurando que pertenece al usuario autenticado.
-    """
     obj = (
         db.query(models.CuentaBancaria)
         .filter(
@@ -129,9 +128,6 @@ def _get_cuenta_for_user(
 
 
 def _build_count_map(query_rows: list[tuple[str, int]]) -> Dict[str, int]:
-    """
-    Convierte filas agregadas SQL [(fk_id, count), ...] a dict.
-    """
     out: Dict[str, int] = {}
     for fk_id, qty in query_rows:
         key = str(fk_id or "").strip()
@@ -142,9 +138,6 @@ def _build_count_map(query_rows: list[tuple[str, int]]) -> Dict[str, int]:
 
 
 def _merge_count_maps(*maps: Dict[str, int]) -> Dict[str, int]:
-    """
-    Suma múltiples mapas de contadores por la misma clave.
-    """
     merged: Dict[str, int] = {}
     for mp in maps:
         for key, value in mp.items():
@@ -152,12 +145,25 @@ def _merge_count_maps(*maps: Dict[str, int]) -> Dict[str, int]:
     return merged
 
 
-def _get_cuenta_associated_count_map(
+def _make_relation_counts(defs: list[tuple[str, str, Dict[str, int]]], entity_id: str) -> list[dict]:
+    rows: list[dict] = []
+    for key, label, mp in defs:
+        count = int(mp.get(entity_id, 0))
+        if count > 0:
+            rows.append({
+                "key": key,
+                "label": label,
+                "count": count,
+            })
+    return rows
+
+
+def _get_cuenta_relation_maps(
     db: Session,
     current_user: models.User,
-) -> Dict[str, int]:
+) -> dict[str, Dict[str, int]]:
     """
-    Calcula el número real de referencias asociadas por cuenta bancaria.
+    Calcula relaciones reales por cuenta bancaria.
 
     Relaciones consideradas:
     - gastos
@@ -165,9 +171,6 @@ def _get_cuenta_associated_count_map(
     - gastos_cotidianos
     - movimientos_origen
     - movimientos_destino
-
-    Se filtra por user_id cuando el modelo lo soporta para mantener
-    consistencia multiusuario.
     """
     gastos_rows = (
         db.query(models.Gasto.cuenta_id, func.count(models.Gasto.id))
@@ -219,22 +222,20 @@ def _get_cuenta_associated_count_map(
         .all()
     )
 
-    return _merge_count_maps(
-        _build_count_map(gastos_rows),
-        _build_count_map(ingresos_rows),
-        _build_count_map(cotidianos_rows),
-        _build_count_map(movimientos_origen_rows),
-        _build_count_map(movimientos_destino_rows),
-    )
+    return {
+        "gastos": _build_count_map(gastos_rows),
+        "ingresos": _build_count_map(ingresos_rows),
+        "gastos_cotidianos": _build_count_map(cotidianos_rows),
+        "movimientos_origen": _build_count_map(movimientos_origen_rows),
+        "movimientos_destino": _build_count_map(movimientos_destino_rows),
+    }
 
 
 def _serialize_cuenta(
     obj: models.CuentaBancaria,
     associated_count: int,
+    relation_counts: Optional[list[dict]] = None,
 ) -> dict:
-    """
-    Serializa una cuenta bancaria con contador asociado.
-    """
     return {
         "id": obj.id,
         "banco_id": obj.banco_id,
@@ -245,6 +246,7 @@ def _serialize_cuenta(
         "user_id": int(obj.user_id),
         "activo": bool(obj.activo),
         "associated_count": int(associated_count or 0),
+        "relation_counts": relation_counts or [],
     }
 
 
@@ -277,7 +279,9 @@ def list_cuentas_bancarias(
     """
     Devuelve las cuentas bancarias del usuario autenticado.
 
-    Incluye `associated_count` con el número real de registros asociados.
+    Incluye:
+    - associated_count
+    - relation_counts
     """
     q = (
         db.query(models.CuentaBancaria)
@@ -291,10 +295,30 @@ def list_cuentas_bancarias(
         q = q.filter(models.CuentaBancaria.activo == activo)
 
     items = q.order_by(models.CuentaBancaria.id).all()
-    count_map = _get_cuenta_associated_count_map(db, current_user)
+
+    relation_maps = _get_cuenta_relation_maps(db, current_user)
+    relation_defs = [
+        ("gastos", "Gastos", relation_maps["gastos"]),
+        ("ingresos", "Ingresos", relation_maps["ingresos"]),
+        ("gastos_cotidianos", "Gastos cotidianos", relation_maps["gastos_cotidianos"]),
+        ("movimientos_origen", "Movimientos origen", relation_maps["movimientos_origen"]),
+        ("movimientos_destino", "Movimientos destino", relation_maps["movimientos_destino"]),
+    ]
+
+    merged = _merge_count_maps(
+        relation_maps["gastos"],
+        relation_maps["ingresos"],
+        relation_maps["gastos_cotidianos"],
+        relation_maps["movimientos_origen"],
+        relation_maps["movimientos_destino"],
+    )
 
     return [
-        _serialize_cuenta(item, count_map.get(item.id, 0))
+        _serialize_cuenta(
+            item,
+            merged.get(item.id, 0),
+            _make_relation_counts(relation_defs, item.id),
+        )
         for item in items
     ]
 
@@ -309,12 +333,30 @@ def get_cuenta_bancaria(
     db: Session = Depends(get_db),
     current_user: models.User = Depends(require_user),
 ):
-    """
-    Recupera una cuenta bancaria por su ID, asegurando que pertenece al usuario actual.
-    """
     obj = _get_cuenta_for_user(db, cuenta_id, current_user)
-    count_map = _get_cuenta_associated_count_map(db, current_user)
-    return _serialize_cuenta(obj, count_map.get(obj.id, 0))
+
+    relation_maps = _get_cuenta_relation_maps(db, current_user)
+    relation_defs = [
+        ("gastos", "Gastos", relation_maps["gastos"]),
+        ("ingresos", "Ingresos", relation_maps["ingresos"]),
+        ("gastos_cotidianos", "Gastos cotidianos", relation_maps["gastos_cotidianos"]),
+        ("movimientos_origen", "Movimientos origen", relation_maps["movimientos_origen"]),
+        ("movimientos_destino", "Movimientos destino", relation_maps["movimientos_destino"]),
+    ]
+
+    merged = _merge_count_maps(
+        relation_maps["gastos"],
+        relation_maps["ingresos"],
+        relation_maps["gastos_cotidianos"],
+        relation_maps["movimientos_origen"],
+        relation_maps["movimientos_destino"],
+    )
+
+    return _serialize_cuenta(
+        obj,
+        merged.get(obj.id, 0),
+        _make_relation_counts(relation_defs, obj.id),
+    )
 
 
 @router.post(
@@ -334,15 +376,6 @@ def create_cuenta_bancaria(
     db: Session = Depends(get_db),
     current_user: models.User = Depends(require_user),
 ):
-    """
-    Crea una nueva cuenta bancaria para el usuario autenticado.
-
-    Reglas de negocio:
-    - banco_id debe existir y ser rama 'Bancos y financieras'.
-    - ID se genera con prefijo 'CTA-'.
-    - ANAGRAMA = "REFERENCIA - NOMBRE DEL BANCO".
-    - user_id siempre se asigna desde el token.
-    """
     proveedor = ensure_proveedor_es_banco(db, cuenta_in.banco_id)
 
     new_id = generate_cuenta_bancaria_id(db)
@@ -360,7 +393,8 @@ def create_cuenta_bancaria(
     db.add(obj)
     db.commit()
     db.refresh(obj)
-    return _serialize_cuenta(obj, 0)
+
+    return _serialize_cuenta(obj, 0, [])
 
 
 @router.put(
@@ -374,15 +408,6 @@ def update_cuenta_bancaria(
     db: Session = Depends(get_db),
     current_user: models.User = Depends(require_user),
 ):
-    """
-    Actualiza una cuenta bancaria del usuario actual.
-
-    Reglas:
-    - Solo se puede actualizar si la cuenta pertenece al usuario actual.
-    - Si cambian banco_id o referencia y no se envía anagrama -> recalcula anagrama.
-    - Si se envía anagrama -> se respeta tal cual.
-    - liquidez / liquidez_inicial / activo se aplican solo si vienen en el body.
-    """
     obj = _get_cuenta_for_user(db, cuenta_id, current_user)
 
     recalc_anagrama = False
@@ -419,8 +444,28 @@ def update_cuenta_bancaria(
     db.commit()
     db.refresh(obj)
 
-    count_map = _get_cuenta_associated_count_map(db, current_user)
-    return _serialize_cuenta(obj, count_map.get(obj.id, 0))
+    relation_maps = _get_cuenta_relation_maps(db, current_user)
+    relation_defs = [
+        ("gastos", "Gastos", relation_maps["gastos"]),
+        ("ingresos", "Ingresos", relation_maps["ingresos"]),
+        ("gastos_cotidianos", "Gastos cotidianos", relation_maps["gastos_cotidianos"]),
+        ("movimientos_origen", "Movimientos origen", relation_maps["movimientos_origen"]),
+        ("movimientos_destino", "Movimientos destino", relation_maps["movimientos_destino"]),
+    ]
+
+    merged = _merge_count_maps(
+        relation_maps["gastos"],
+        relation_maps["ingresos"],
+        relation_maps["gastos_cotidianos"],
+        relation_maps["movimientos_origen"],
+        relation_maps["movimientos_destino"],
+    )
+
+    return _serialize_cuenta(
+        obj,
+        merged.get(obj.id, 0),
+        _make_relation_counts(relation_defs, obj.id),
+    )
 
 
 @router.delete(
@@ -432,11 +477,6 @@ def delete_cuenta_bancaria(
     cuenta_id: str,
     db: Session = Depends(get_db),
 ):
-    """
-    Elimina una cuenta bancaria por su ID.
-
-    Se mantiene el comportamiento actual.
-    """
     obj = db.get(models.CuentaBancaria, cuenta_id)
     if not obj:
         raise HTTPException(

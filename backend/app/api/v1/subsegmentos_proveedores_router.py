@@ -1,6 +1,6 @@
 """
 Ruta: backend/app/api/v1/subsegmentos_proveedores_router.py
-Versión: 2.0.0
+Versión: 2.1.0
 Descripción:
 Router CRUD para la tabla auxiliar `tipo_subsegmentos_proveedores`.
 
@@ -13,7 +13,9 @@ Objetivos:
     * ids generados en backend
     * validación de unicidad por (nombre, rama_id)
     * schemas Pydantic explícitos
-- Exponer contador real de proveedores asociados.
+- Exponer:
+    * associated_count
+    * relation_counts
 """
 
 from __future__ import annotations
@@ -47,16 +49,10 @@ router = APIRouter(
 # ============================================================
 
 def _generate_subsegmento_proveedor_id() -> str:
-    """
-    Genera un ID técnico para subsegmento de proveedor.
-    """
     return "TSPR-" + uuid4().hex[:10].upper()
 
 
 def _get_model_cls():
-    """
-    Obtiene el modelo ORM de forma robusta.
-    """
     model_cls = getattr(models, "TipoSubsegmentoProveedor", None)
     if model_cls is None:
         raise HTTPException(
@@ -67,10 +63,6 @@ def _get_model_cls():
 
 
 def _validate_rama_if_present(db: Session, rama_id: Optional[str]) -> Optional[str]:
-    """
-    Valida que la rama exista si viene informada.
-    Devuelve rama_id normalizada a str o None.
-    """
     rama_id_final = (rama_id or "").strip() or None
 
     if rama_id_final:
@@ -92,11 +84,6 @@ def _ensure_unique_nombre(
     rama_id: Optional[str],
     exclude_id: Optional[str] = None,
 ) -> None:
-    """
-    Valida unicidad razonable de subsegmento:
-    - mismo nombre
-    - misma rama_id (incluyendo NULL)
-    """
     qry = db.query(model_cls).filter(model_cls.nombre == nombre)
 
     if exclude_id:
@@ -116,9 +103,6 @@ def _ensure_unique_nombre(
 
 
 def _build_count_map(query_rows: list[tuple[str, int]]) -> Dict[str, int]:
-    """
-    Convierte filas agregadas SQL [(fk_id, count), ...] a dict.
-    """
     out: Dict[str, int] = {}
     for fk_id, qty in query_rows:
         key = str(fk_id or "").strip()
@@ -128,28 +112,46 @@ def _build_count_map(query_rows: list[tuple[str, int]]) -> Dict[str, int]:
     return out
 
 
-def _get_subsegmento_count_map(db: Session) -> Dict[str, int]:
+def _make_relation_counts(defs: list[tuple[str, str, Dict[str, int]]], entity_id: str) -> list[dict]:
+    rows: list[dict] = []
+    for key, label, mp in defs:
+        count = int(mp.get(entity_id, 0))
+        if count > 0:
+            rows.append({
+                "key": key,
+                "label": label,
+                "count": count,
+            })
+    return rows
+
+
+def _get_relation_maps(db: Session) -> dict[str, Dict[str, int]]:
     """
-    Cuenta el número real de proveedores asociados a cada subsegmento.
+    Relaciones reales del subsegmento de proveedor.
     """
-    rows = (
+    proveedores_rows = (
         db.query(models.Proveedor.subsegmento_id, func.count(models.Proveedor.id))
         .filter(models.Proveedor.subsegmento_id.isnot(None))
         .group_by(models.Proveedor.subsegmento_id)
         .all()
     )
-    return _build_count_map(rows)
+
+    return {
+        "proveedores": _build_count_map(proveedores_rows),
+    }
 
 
-def _serialize_subsegmento(obj, associated_count: int) -> dict:
-    """
-    Serializa un subsegmento con contador asociado.
-    """
+def _serialize_subsegmento(
+    obj,
+    associated_count: int,
+    relation_counts: Optional[list[dict]] = None,
+) -> dict:
     return {
         "id": obj.id,
         "nombre": obj.nombre,
         "rama_id": obj.rama_id,
         "associated_count": int(associated_count or 0),
+        "relation_counts": relation_counts or [],
     }
 
 
@@ -173,7 +175,9 @@ def list_subsegmentos_proveedores(
     Notas:
     - Es catálogo global, no multiusuario.
     - Permite filtro opcional por rama_id.
-    - Incluye `associated_count` con el número real de proveedores asociados.
+    - Incluye:
+        * associated_count
+        * relation_counts
     """
     model_cls = _get_model_cls()
 
@@ -183,10 +187,18 @@ def list_subsegmentos_proveedores(
         qry = qry.filter(model_cls.rama_id == rama_id)
 
     items = qry.order_by(model_cls.nombre.asc(), model_cls.id.asc()).all()
-    count_map = _get_subsegmento_count_map(db)
+
+    relation_maps = _get_relation_maps(db)
+    relation_defs = [
+        ("proveedores", "Proveedores", relation_maps["proveedores"]),
+    ]
 
     return [
-        _serialize_subsegmento(item, count_map.get(item.id, 0))
+        _serialize_subsegmento(
+            item,
+            relation_maps["proveedores"].get(item.id, 0),
+            _make_relation_counts(relation_defs, item.id),
+        )
         for item in items
     ]
 
@@ -242,7 +254,8 @@ def create_subsegmento_proveedor(
     db.add(obj)
     db.commit()
     db.refresh(obj)
-    return _serialize_subsegmento(obj, 0)
+
+    return _serialize_subsegmento(obj, 0, [])
 
 
 # ============================================================
@@ -301,8 +314,16 @@ def update_subsegmento_proveedor(
     db.commit()
     db.refresh(obj)
 
-    count_map = _get_subsegmento_count_map(db)
-    return _serialize_subsegmento(obj, count_map.get(obj.id, 0))
+    relation_maps = _get_relation_maps(db)
+    relation_defs = [
+        ("proveedores", "Proveedores", relation_maps["proveedores"]),
+    ]
+
+    return _serialize_subsegmento(
+        obj,
+        relation_maps["proveedores"].get(obj.id, 0),
+        _make_relation_counts(relation_defs, obj.id),
+    )
 
 
 # ============================================================

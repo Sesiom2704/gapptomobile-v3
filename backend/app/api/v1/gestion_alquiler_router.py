@@ -40,6 +40,8 @@ from backend.app.schemas.gestion_alquiler import (
     PersonaCreate,
     PersonaUpdate,
     PersonaPickerOut,
+    PersonaRelationsRead,
+    RelationCountItem,
     ContratoSchema,
     ContratoCreate,
     ContratoUpdate,
@@ -270,6 +272,74 @@ def _is_contrato_no_operativo(contrato: models.Contrato) -> bool:
     contrato_inactivo = contrato.inactivatedon is not None
     return estado in {"finalizado", "cancelado"} or contrato_inactivo
 
+def _build_persona_relation_counts(
+    db: Session,
+    persona_id: str,
+    user_id: int,
+) -> list[RelationCountItem]:
+    """
+    Devuelve el detalle de tablas relacionadas y su número de registros.
+    Solo devuelve relaciones con count > 0.
+    """
+    relation_defs = [
+        (
+            "contratos_participante",
+            "Participaciones en contratos",
+            db.query(models.ContratoParticipante)
+            .filter(
+                models.ContratoParticipante.user_id == user_id,
+                models.ContratoParticipante.persona_id == persona_id,
+                models.ContratoParticipante.inactivatedon.is_(None),
+            )
+            .count(),
+        ),
+    ]
+
+    return [
+        RelationCountItem(key=key, label=label, count=count)
+        for key, label, count in relation_defs
+        if int(count or 0) > 0
+    ]
+
+
+def _get_persona_associated_count(
+    db: Session,
+    persona_id: str,
+    user_id: int,
+) -> int:
+    """
+    Conteo agregado ligero para listados.
+    """
+    return (
+        db.query(models.ContratoParticipante)
+        .filter(
+            models.ContratoParticipante.user_id == user_id,
+            models.ContratoParticipante.persona_id == persona_id,
+            models.ContratoParticipante.inactivatedon.is_(None),
+        )
+        .count()
+    )
+
+
+def _persona_to_schema(
+    db: Session,
+    row: models.Persona,
+    user_id: int,
+) -> PersonaSchema:
+    return PersonaSchema(
+        id=row.id,
+        user_id=row.user_id,
+        nombre_completo=row.nombre_completo,
+        dni=row.dni,
+        telefono=row.telefono,
+        email=row.email,
+        fecha_nacimiento=row.fecha_nacimiento,
+        observaciones=row.observaciones,
+        createon=row.createon,
+        modifiedon=row.modifiedon,
+        inactivatedon=row.inactivatedon,
+        associated_count=_get_persona_associated_count(db, row.id, user_id),
+    )
 
 # ==========================================================
 # Helpers de objeto_alquiler y compatibilidad
@@ -648,7 +718,7 @@ def listar_personas(
         )
 
     rows = query.order_by(models.Persona.nombre_completo.asc()).all()
-    return [PersonaSchema.model_validate(r) for r in rows]
+    return [_persona_to_schema(db, r, current_user.id) for r in rows]
 
 
 @router.get(
@@ -686,7 +756,6 @@ def picker_personas(
         for r in rows
     ]
 
-
 @router.get(
     "/personas/{persona_id}",
     response_model=PersonaSchema,
@@ -698,8 +767,57 @@ def get_persona(
     current_user: models.User = Depends(require_user),
 ):
     row = _get_owned_persona(db, persona_id, current_user.id)
-    return PersonaSchema.model_validate(row)
+    return _persona_to_schema(db, row, current_user.id)
 
+@router.get(
+    "/personas/{persona_id}/relaciones",
+    response_model=PersonaRelationsRead,
+    summary="Consultar relaciones de una persona",
+)
+def get_persona_relaciones(
+    persona_id: str,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(require_user),
+):
+    """
+    Devuelve el detalle de tablas relacionadas y el número de registros asociados
+    a la persona. Solo incluye relaciones con count > 0.
+    """
+    row = _get_owned_persona(db, persona_id, current_user.id)
+    relation_counts = _build_persona_relation_counts(db, persona_id, current_user.id)
+    associated_count = sum(item.count for item in relation_counts)
+
+    return PersonaRelationsRead(
+        id=row.id,
+        nombre_completo=row.nombre_completo,
+        associated_count=associated_count,
+        relation_counts=relation_counts,
+    )
+
+@router.get(
+    "/personas/{persona_id}/relaciones",
+    response_model=PersonaRelationsRead,
+    summary="Consultar relaciones de una persona",
+)
+def get_persona_relaciones(
+    persona_id: str,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(require_user),
+):
+    """
+    Devuelve el detalle de tablas relacionadas y el número de registros asociados
+    a la persona. Solo incluye relaciones con count > 0.
+    """
+    row = _get_owned_persona(db, persona_id, current_user.id)
+    relation_counts = _build_persona_relation_counts(db, persona_id, current_user.id)
+    associated_count = sum(item.count for item in relation_counts)
+
+    return PersonaRelationsRead(
+        id=row.id,
+        nombre_completo=row.nombre_completo,
+        associated_count=associated_count,
+        relation_counts=relation_counts,
+    )
 
 @router.post(
     "/personas",
@@ -725,7 +843,7 @@ def crear_persona(
     db.add(row)
     db.commit()
     db.refresh(row)
-    return PersonaSchema.model_validate(row)
+    return _persona_to_schema(db, row, current_user.id)
 
 
 @router.put(
@@ -762,9 +880,10 @@ def actualizar_persona(
     if payload.inactivatedon is not None:
         row.inactivatedon = payload.inactivatedon
 
+    db.add(row)
     db.commit()
     db.refresh(row)
-    return PersonaSchema.model_validate(row)
+    return _persona_to_schema(db, row, current_user.id)
 
 
 # ==========================================================
