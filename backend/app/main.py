@@ -1,6 +1,6 @@
 """
 Archivo: backend/app/main.py
-Versión: 1.1.0
+Versión: 1.2.0
 
 Descripción:
 Punto de entrada principal del backend de GapptoMobile v3.
@@ -15,12 +15,9 @@ Funcionalidades incluidas:
 - Registro del nuevo router principal del dominio BOT
 - Registro del router técnico de gestión de BD
 
-Notas de diseño:
-- Se sustituye el antiguo import de bot_router.py por el nuevo
-  router principal ubicado en app/api/v1/bot/router.py.
-- La base estable para BOT_SERVICE queda en /api/v1/bot.
-- Este archivo no debe contener lógica de negocio; solo bootstrap,
-  healthchecks, middleware e inclusión de routers.
+Cambios de esta versión:
+- Se registra el router CRUD de subsegmentos de proveedores.
+- Se mantiene intacta la estructura previa del bootstrap.
 """
 
 from __future__ import annotations
@@ -238,6 +235,7 @@ from backend.app.api.v1 import (
     inversiones_router,
     endeudamiento_router,
     gestion_alquiler_router,
+    subsegmentos_proveedores_router,
 )
 
 # Router principal BOT en nueva ubicación
@@ -255,6 +253,7 @@ app.include_router(cuentas_router.router, prefix=API_V1)
 app.include_router(proveedores_router.router, prefix=API_V1)
 app.include_router(tipos_router.router, prefix=API_V1)
 app.include_router(ramas_router.router, prefix=API_V1)
+app.include_router(subsegmentos_proveedores_router.router, prefix=API_V1)
 app.include_router(patrimonio_router.router, prefix=API_V1)
 app.include_router(prestamos_router.router, prefix=API_V1)
 app.include_router(users_router.router, prefix=API_V1)

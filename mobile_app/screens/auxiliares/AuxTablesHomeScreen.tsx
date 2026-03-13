@@ -1,4 +1,15 @@
-// screens/auxiliares/AuxTablesHomeScreen.tsx
+/**
+ * Ruta: screens/auxiliares/AuxTablesHomeScreen.tsx
+ * Versión: 1.1.0
+ * Descripción:
+ * Pantalla de navegación de tablas auxiliares de GapptoMobile v3.
+ *
+ * Cambios de esta versión:
+ * - Se añade la entrada "Subsegmentos de proveedores".
+ * - Se mantiene intacta la navegación existente.
+ * - Se reutiliza el patrón visual actual del proyecto.
+ */
+
 import React from 'react';
 import { View, Text, ScrollView, TouchableOpacity } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
@@ -84,6 +95,13 @@ export const AuxTablesHomeScreen: React.FC<Props> = ({ navigation }) => {
               subtitle="Clasificación de proveedores."
               icon="business-outline"
               onPress={() => goTo('tipo_ramas_proveedores')}
+            />
+
+            <AuxMenuItem
+              label="Subsegmentos de proveedores"
+              subtitle="Segundo nivel de clasificación por rama."
+              icon="albums-outline"
+              onPress={() => goTo('tipo_subsegmento_proveedor')}
             />
 
             <AuxMenuItem

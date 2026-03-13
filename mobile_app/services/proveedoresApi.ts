@@ -1,8 +1,6 @@
-// mobile_app/services/proveedoresApi.ts
-
 /**
  * Ruta: mobile_app/services/proveedoresApi.ts
- * Versión: 1.4.0
+ * Versión: 1.5.0
  * Descripción:
  * Servicio centralizado de proveedores para GapptoMobile.
  *
@@ -12,13 +10,12 @@
  * - Dar soporte al formulario auxiliar de proveedores.
  *
  * Cambios de esta versión:
- * - Se añaden todos los campos editables del ORM de Proveedor:
- *   cif, telefono, email, subsegmento, direccion, codigo_postal,
- *   persona_contacto, activo, observaciones, acepta_urgencias,
- *   ambito_servicio, subsegmento_id, created_at, updated_at.
- * - Se tipa la relación opcional subsegmento_rel.
- * - Se amplía createProveedorFromAuxForm para soportar todos los campos.
- * - Se mantienen compatibilidades previas.
+ * - Se refuerza la separación entre:
+ *   * `subsegmento`      -> texto legacy
+ *   * `subsegmento_id`   -> FK real al auxiliar
+ * - Se mantiene compatibilidad hacia atrás.
+ * - Se alinea el helper `createProveedorFromAuxForm` con el flujo correcto
+ *   del formulario de proveedor enriquecido.
  */
 
 import axios from 'axios';
@@ -342,6 +339,11 @@ export async function createProveedorFromAuxForm(args: {
   telefono?: string | null;
   email?: string | null;
 
+  /**
+   * Compatibilidad:
+   * - subsegmento: texto legacy opcional
+   * - subsegmentoId: FK real al auxiliar
+   */
   subsegmento?: string | null;
   subsegmentoId?: string | null;
 

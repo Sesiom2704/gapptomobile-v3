@@ -1,6 +1,6 @@
 /**
  * Ruta: mobile_app/screens/auxiliares/AuxEntityFormScreen.tsx
- * Versión: 1.4.0
+ * Versión: 2.0.0
  * Descripción:
  * Formulario genérico para creación y edición de auxiliares y proveedores.
  *
@@ -20,13 +20,15 @@
  *   * flags operativos
  * - Confirmación al salir si hay cambios sin guardar.
  *
- * Ajustes incluidos:
- * - Soporte completo de subsegmentos de proveedor.
- * - Corrección del error:
- *     "No se han podido cargar los subsegmentos del proveedor"
- *   siempre que exista el router backend:
- *     /api/v1/subsegmentos/proveedores
- * - Mantiene el flujo de retorno hacia pantallas origen.
+ * Cambios de esta versión:
+ * - Corrige el envío de `subsegmento_id` al crear proveedor.
+ * - Mantiene compatibilidad con `subsegmento` como texto legacy.
+ * - Reorganiza el formulario de proveedor en secciones funcionales:
+ *   * Datos básicos
+ *   * Ubicación
+ *   * Contacto y fiscal
+ *   * Operativa
+ * - Mantiene componentes visuales existentes del proyecto.
  */
 
 import React, { useEffect, useMemo, useState } from 'react';
@@ -39,7 +41,6 @@ import FormScreen from '../../components/forms/FormScreen';
 import { FormSection } from '../../components/forms/FormSection';
 import { commonFormStyles } from '../../components/forms/formStyles';
 import { InlineSearchSelect } from '../../components/ui/InlineSearchSelect';
-import { SelectedInlineValue } from '../../components/ui/SelectedInlineValue';
 import { PillButton } from '../../components/ui/PillButton';
 
 import { colors, spacing, radius } from '../../theme';
@@ -123,6 +124,7 @@ type DirtySnapshot = {
   ramaGastoId: string;
   segmentoGastoId: string;
   ramaIngresoId: string;
+  subsegmentoRamaId: string;
 };
 
 const NOOP = () => {};
@@ -544,7 +546,7 @@ export const AuxEntityFormScreen: React.FC<Props> = ({ navigation, route }) => {
     }
 
     void ensureRamasProveedorLoaded();
-  }, [isProveedor, ramaId, ramaNombre, ramaOptions, ramaBloqueada]);
+  }, [isProveedor, ramaId, ramaNombre, ramaOptions, ramaBloqueada, busquedaRamaProveedor]);
 
   // ==========================================================
   // Integración retorno desde LocalidadFormScreen
@@ -1139,7 +1141,8 @@ export const AuxEntityFormScreen: React.FC<Props> = ({ navigation, route }) => {
         ambitoServicio: payloadForBackend.ambito_servicio,
         aceptaUrgencias: payloadForBackend.acepta_urgencias,
         activo: payloadForBackend.activo,
-        subsegmento: subsegmentoId,
+        subsegmentoId: payloadForBackend.subsegmento_id,
+        subsegmento: null,
       });
 
       sendResultAndClose({
@@ -1264,6 +1267,7 @@ export const AuxEntityFormScreen: React.FC<Props> = ({ navigation, route }) => {
           ramaGastoId: '',
           segmentoGastoId: '',
           ramaIngresoId: '',
+          subsegmentoRamaId: '',
         };
       }
 
@@ -1289,6 +1293,7 @@ export const AuxEntityFormScreen: React.FC<Props> = ({ navigation, route }) => {
         ramaGastoId: '',
         segmentoGastoId: '',
         ramaIngresoId: '',
+        subsegmentoRamaId: '',
       };
     }
 
@@ -1316,6 +1321,7 @@ export const AuxEntityFormScreen: React.FC<Props> = ({ navigation, route }) => {
         ramaGastoId: normalize((editingItem as any).rama_id),
         segmentoGastoId: normalize((editingItem as any).segmento_id),
         ramaIngresoId: normalize((editingItem as any).rama_id),
+        subsegmentoRamaId: normalize((editingItem as any).rama_id),
       };
     }
 
@@ -1342,6 +1348,7 @@ export const AuxEntityFormScreen: React.FC<Props> = ({ navigation, route }) => {
       ramaGastoId: '',
       segmentoGastoId: '',
       ramaIngresoId: '',
+      subsegmentoRamaId: '',
     };
   }, [isProveedor, editingProveedor, editingItem, ramaBloqueada, ramaId]);
 
@@ -1391,13 +1398,15 @@ export const AuxEntityFormScreen: React.FC<Props> = ({ navigation, route }) => {
       ramaGastoId: normalize(ramaGastoId),
       segmentoGastoId: normalize(segmentoGastoId),
       ramaIngresoId: normalize(ramaIngresoId),
+      subsegmentoRamaId: normalize(subsegmentoRamaId),
     };
 
     return (
       current.nombre !== initialSnapshot.nombre ||
       current.ramaGastoId !== initialSnapshot.ramaGastoId ||
       current.segmentoGastoId !== initialSnapshot.segmentoGastoId ||
-      current.ramaIngresoId !== initialSnapshot.ramaIngresoId
+      current.ramaIngresoId !== initialSnapshot.ramaIngresoId ||
+      current.subsegmentoRamaId !== initialSnapshot.subsegmentoRamaId
     );
   }, [
     isProveedor,
@@ -1427,6 +1436,7 @@ export const AuxEntityFormScreen: React.FC<Props> = ({ navigation, route }) => {
     ramaGastoId,
     segmentoGastoId,
     ramaIngresoId,
+    subsegmentoRamaId,
     initialSnapshot,
   ]);
 
@@ -1517,135 +1527,147 @@ export const AuxEntityFormScreen: React.FC<Props> = ({ navigation, route }) => {
         </View>
       }
     >
-      <FormSection title="Datos">
-        <View style={styles.field}>
-          <Text style={styles.label}>Nombre</Text>
-          <TextInput
-            style={[styles.input, nombre.trim() !== '' ? styles.inputFilled : null]}
-            placeholder="Nombre..."
-            value={nombre}
-            onChangeText={setNombre}
-          />
-        </View>
-      </FormSection>
-
       {!isProveedor ? (
-        <FormSection
-          title={
-            isTipoGasto
-              ? 'Configuración tipo de gasto'
-              : isTipoIngreso
-              ? 'Configuración tipo de ingreso'
-              : isSubsegmentoProveedor
-              ? 'Configuración subsegmento de proveedor'
-              : 'Configuración'
-          }
-        >
-          {isTipoGasto ? (
-            <>
-              <View style={styles.field}>
-                <InlineSearchSelect<{ id: string; nombre: string }>
-                  label="Rama de gasto"
-                  onAddPress={NOOP}
-                  addAccessibilityLabel="Añadir (no aplica)"
-                  disabled={false}
-                  selected={ramaGastoId ? ramasGasto.find((x) => x.id === ramaGastoId) ?? null : null}
-                  selectedLabel={(x) => x.nombre}
-                  onClear={() => setRamaGastoId(null)}
-                  query={busquedaRamaGasto}
-                  onChangeQuery={setBusquedaRamaGasto}
-                  placeholder="Escribe para buscar rama"
-                  options={ramasGastoFiltradas}
-                  optionKey={(x) => x.id}
-                  optionLabel={(x) => x.nombre}
-                  onSelect={(x) => {
-                    setRamaGastoId(x.id);
-                    setBusquedaRamaGasto('');
-                  }}
-                  emptyText="No hay ramas que coincidan con la búsqueda."
-                />
-              </View>
+        <>
+          <FormSection title="Datos">
+            <View style={styles.field}>
+              <Text style={styles.label}>Nombre</Text>
+              <TextInput
+                style={[styles.input, nombre.trim() !== '' ? styles.inputFilled : null]}
+                placeholder="Nombre..."
+                value={nombre}
+                onChangeText={setNombre}
+              />
+            </View>
+          </FormSection>
 
+          <FormSection
+            title={
+              isTipoGasto
+                ? 'Configuración tipo de gasto'
+                : isTipoIngreso
+                ? 'Configuración tipo de ingreso'
+                : isSubsegmentoProveedor
+                ? 'Configuración subsegmento de proveedor'
+                : 'Configuración'
+            }
+          >
+            {isTipoGasto ? (
+              <>
+                <View style={styles.field}>
+                  <InlineSearchSelect<{ id: string; nombre: string }>
+                    label="Rama de gasto"
+                    onAddPress={NOOP}
+                    addAccessibilityLabel="Añadir (no aplica)"
+                    disabled={false}
+                    selected={ramaGastoId ? ramasGasto.find((x) => x.id === ramaGastoId) ?? null : null}
+                    selectedLabel={(x) => x.nombre}
+                    onClear={() => setRamaGastoId(null)}
+                    query={busquedaRamaGasto}
+                    onChangeQuery={setBusquedaRamaGasto}
+                    placeholder="Escribe para buscar rama"
+                    options={ramasGastoFiltradas}
+                    optionKey={(x) => x.id}
+                    optionLabel={(x) => x.nombre}
+                    onSelect={(x) => {
+                      setRamaGastoId(x.id);
+                      setBusquedaRamaGasto('');
+                    }}
+                    emptyText="No hay ramas que coincidan con la búsqueda."
+                  />
+                </View>
+
+                <View style={styles.field}>
+                  <InlineSearchSelect<{ id: string; nombre: string }>
+                    label="Segmento"
+                    onAddPress={NOOP}
+                    addAccessibilityLabel="Añadir (no aplica)"
+                    disabled={false}
+                    selected={
+                      segmentoGastoId
+                        ? segmentosGasto.find((x) => x.id === segmentoGastoId) ?? null
+                        : null
+                    }
+                    selectedLabel={(x) => x.nombre}
+                    onClear={() => setSegmentoGastoId(null)}
+                    query={busquedaSegmentoGasto}
+                    onChangeQuery={setBusquedaSegmentoGasto}
+                    placeholder="Escribe para buscar segmento"
+                    options={segmentosGastoFiltrados}
+                    optionKey={(x) => x.id}
+                    optionLabel={(x) => x.nombre}
+                    onSelect={(x) => {
+                      setSegmentoGastoId(x.id);
+                      setBusquedaSegmentoGasto('');
+                    }}
+                    emptyText="No hay segmentos que coincidan con la búsqueda."
+                  />
+                </View>
+              </>
+            ) : isTipoIngreso ? (
               <View style={styles.field}>
                 <InlineSearchSelect<{ id: string; nombre: string }>
-                  label="Segmento"
+                  label="Rama de ingreso"
                   onAddPress={NOOP}
                   addAccessibilityLabel="Añadir (no aplica)"
                   disabled={false}
-                  selected={
-                    segmentoGastoId
-                      ? segmentosGasto.find((x) => x.id === segmentoGastoId) ?? null
-                      : null
-                  }
+                  selected={selectedRamaIngreso}
                   selectedLabel={(x) => x.nombre}
-                  onClear={() => setSegmentoGastoId(null)}
-                  query={busquedaSegmentoGasto}
-                  onChangeQuery={setBusquedaSegmentoGasto}
-                  placeholder="Escribe para buscar segmento"
-                  options={segmentosGastoFiltrados}
+                  onClear={() => setRamaIngresoId(null)}
+                  query={busquedaRamaIngreso}
+                  onChangeQuery={setBusquedaRamaIngreso}
+                  placeholder="Escribe para buscar rama de ingreso"
+                  options={ramasIngresoFiltradas}
                   optionKey={(x) => x.id}
                   optionLabel={(x) => x.nombre}
                   onSelect={(x) => {
-                    setSegmentoGastoId(x.id);
-                    setBusquedaSegmentoGasto('');
+                    setRamaIngresoId(x.id);
+                    setBusquedaRamaIngreso('');
                   }}
-                  emptyText="No hay segmentos que coincidan con la búsqueda."
+                  emptyText="No hay ramas de ingreso que coincidan con la búsqueda."
                 />
               </View>
-            </>
-          ) : isTipoIngreso ? (
-            <View style={styles.field}>
-              <InlineSearchSelect<{ id: string; nombre: string }>
-                label="Rama de ingreso"
-                onAddPress={NOOP}
-                addAccessibilityLabel="Añadir (no aplica)"
-                disabled={false}
-                selected={selectedRamaIngreso}
-                selectedLabel={(x) => x.nombre}
-                onClear={() => setRamaIngresoId(null)}
-                query={busquedaRamaIngreso}
-                onChangeQuery={setBusquedaRamaIngreso}
-                placeholder="Escribe para buscar rama de ingreso"
-                options={ramasIngresoFiltradas}
-                optionKey={(x) => x.id}
-                optionLabel={(x) => x.nombre}
-                onSelect={(x) => {
-                  setRamaIngresoId(x.id);
-                  setBusquedaRamaIngreso('');
-                }}
-                emptyText="No hay ramas de ingreso que coincidan con la búsqueda."
-              />
-            </View>
-          ) : isSubsegmentoProveedor ? (
-            <View style={styles.field}>
-              <InlineSearchSelect<RamaProveedor>
-                label="Rama de proveedor (opcional)"
-                onAddPress={NOOP}
-                addAccessibilityLabel="Añadir (no aplica)"
-                disabled={false}
-                selected={selectedSubsegmentoRama}
-                selectedLabel={(x) => x.nombre}
-                onClear={() => setSubsegmentoRamaId(null)}
-                query={busquedaSubsegmentoRama}
-                onChangeQuery={setBusquedaSubsegmentoRama}
-                placeholder="Escribe para buscar rama de proveedor"
-                options={subsegmentoRamasFiltradas}
-                optionKey={(x) => x.id}
-                optionLabel={(x) => x.nombre}
-                onSelect={(x) => {
-                  setSubsegmentoRamaId(x.id);
-                  setBusquedaSubsegmentoRama('');
-                }}
-                emptyText="No hay ramas de proveedor que coincidan con la búsqueda."
-              />
-            </View>
-          ) : (
-            <Text style={styles.helperText}>Completa el nombre y guarda.</Text>
-          )}
-        </FormSection>
+            ) : isSubsegmentoProveedor ? (
+              <View style={styles.field}>
+                <InlineSearchSelect<RamaProveedor>
+                  label="Rama de proveedor (opcional)"
+                  onAddPress={NOOP}
+                  addAccessibilityLabel="Añadir (no aplica)"
+                  disabled={false}
+                  selected={selectedSubsegmentoRama}
+                  selectedLabel={(x) => x.nombre}
+                  onClear={() => setSubsegmentoRamaId(null)}
+                  query={busquedaSubsegmentoRama}
+                  onChangeQuery={setBusquedaSubsegmentoRama}
+                  placeholder="Escribe para buscar rama de proveedor"
+                  options={subsegmentoRamasFiltradas}
+                  optionKey={(x) => x.id}
+                  optionLabel={(x) => x.nombre}
+                  onSelect={(x) => {
+                    setSubsegmentoRamaId(x.id);
+                    setBusquedaSubsegmentoRama('');
+                  }}
+                  emptyText="No hay ramas de proveedor que coincidan con la búsqueda."
+                />
+              </View>
+            ) : (
+              <Text style={styles.helperText}>Completa el nombre y guarda.</Text>
+            )}
+          </FormSection>
+        </>
       ) : (
         <>
-          <FormSection title="Proveedor">
+          <FormSection title="Datos básicos">
+            <View style={styles.field}>
+              <Text style={styles.label}>Nombre</Text>
+              <TextInput
+                style={[styles.input, nombre.trim() !== '' ? styles.inputFilled : null]}
+                placeholder="Nombre..."
+                value={nombre}
+                onChangeText={setNombre}
+              />
+            </View>
+
             <View style={styles.field}>
               <InlineSearchSelect<RamaProveedor>
                 label="Rama proveedor"
@@ -1680,7 +1702,7 @@ export const AuxEntityFormScreen: React.FC<Props> = ({ navigation, route }) => {
 
             <View style={styles.field}>
               <InlineSearchSelect<TipoSubsegmentoProveedorItem>
-                label="Subsegmento (opcional)"
+                label="Subsegmento proveedor"
                 onAddPress={NOOP}
                 addAccessibilityLabel="Añadir (no aplica)"
                 disabled={!ramaId}
@@ -1706,6 +1728,16 @@ export const AuxEntityFormScreen: React.FC<Props> = ({ navigation, route }) => {
               {loadingSubsegmentos ? (
                 <Text style={styles.helperText}>Cargando subsegmentos...</Text>
               ) : null}
+            </View>
+
+            <View style={styles.field}>
+              <Text style={styles.label}>Persona de contacto (opcional)</Text>
+              <TextInput
+                style={[styles.input, personaContacto.trim() !== '' ? styles.inputFilled : null]}
+                placeholder="Nombre de contacto..."
+                value={personaContacto}
+                onChangeText={setPersonaContacto}
+              />
             </View>
           </FormSection>
 
@@ -1838,9 +1870,30 @@ export const AuxEntityFormScreen: React.FC<Props> = ({ navigation, route }) => {
 
               {loadingPaises ? <Text style={styles.helperText}>Cargando países...</Text> : null}
             </View>
+
+            <View style={styles.field}>
+              <Text style={styles.label}>Dirección (opcional)</Text>
+              <TextInput
+                style={[styles.input, direccion.trim() !== '' ? styles.inputFilled : null]}
+                placeholder="Dirección..."
+                value={direccion}
+                onChangeText={setDireccion}
+              />
+            </View>
+
+            <View style={styles.field}>
+              <Text style={styles.label}>Código postal (opcional)</Text>
+              <TextInput
+                style={[styles.input, codigoPostal.trim() !== '' ? styles.inputFilled : null]}
+                placeholder="Ej. 28001"
+                value={codigoPostal}
+                onChangeText={setCodigoPostal}
+                keyboardType="number-pad"
+              />
+            </View>
           </FormSection>
 
-          <FormSection title="Datos de contacto y operación">
+          <FormSection title="Contacto y fiscal">
             <View style={styles.field}>
               <Text style={styles.label}>CIF (opcional)</Text>
               <TextInput
@@ -1874,36 +1927,51 @@ export const AuxEntityFormScreen: React.FC<Props> = ({ navigation, route }) => {
                 keyboardType="email-address"
               />
             </View>
+          </FormSection>
 
+          <FormSection title="Operativa">
             <View style={styles.field}>
-              <Text style={styles.label}>Dirección (opcional)</Text>
-              <TextInput
-                style={[styles.input, direccion.trim() !== '' ? styles.inputFilled : null]}
-                placeholder="Dirección..."
-                value={direccion}
-                onChangeText={setDireccion}
-              />
+              <Text style={styles.label}>Activo</Text>
+              <View style={ui.booleanRow}>
+                <View style={ui.booleanItem}>
+                  <PillButton
+                    label="Sí"
+                    selected={activo === true}
+                    onPress={() => setActivo(true)}
+                    size="sm"
+                  />
+                </View>
+                <View style={ui.booleanItem}>
+                  <PillButton
+                    label="No"
+                    selected={activo === false}
+                    onPress={() => setActivo(false)}
+                    size="sm"
+                  />
+                </View>
+              </View>
             </View>
 
             <View style={styles.field}>
-              <Text style={styles.label}>Código postal (opcional)</Text>
-              <TextInput
-                style={[styles.input, codigoPostal.trim() !== '' ? styles.inputFilled : null]}
-                placeholder="Ej. 28001"
-                value={codigoPostal}
-                onChangeText={setCodigoPostal}
-                keyboardType="number-pad"
-              />
-            </View>
-
-            <View style={styles.field}>
-              <Text style={styles.label}>Persona de contacto (opcional)</Text>
-              <TextInput
-                style={[styles.input, personaContacto.trim() !== '' ? styles.inputFilled : null]}
-                placeholder="Nombre de contacto..."
-                value={personaContacto}
-                onChangeText={setPersonaContacto}
-              />
+              <Text style={styles.label}>Acepta urgencias</Text>
+              <View style={ui.booleanRow}>
+                <View style={ui.booleanItem}>
+                  <PillButton
+                    label="Sí"
+                    selected={aceptaUrgencias === true}
+                    onPress={() => setAceptaUrgencias(true)}
+                    size="sm"
+                  />
+                </View>
+                <View style={ui.booleanItem}>
+                  <PillButton
+                    label="No"
+                    selected={aceptaUrgencias === false}
+                    onPress={() => setAceptaUrgencias(false)}
+                    size="sm"
+                  />
+                </View>
+              </View>
             </View>
 
             <View style={styles.field}>
@@ -1931,50 +1999,6 @@ export const AuxEntityFormScreen: React.FC<Props> = ({ navigation, route }) => {
                 numberOfLines={4}
                 textAlignVertical="top"
               />
-            </View>
-
-            <View style={styles.field}>
-              <Text style={styles.label}>Acepta urgencias</Text>
-              <View style={ui.booleanRow}>
-                <View style={ui.booleanItem}>
-                  <PillButton
-                    label="Sí"
-                    selected={aceptaUrgencias === true}
-                    onPress={() => setAceptaUrgencias(true)}
-                    size="sm"
-                  />
-                </View>
-                <View style={ui.booleanItem}>
-                  <PillButton
-                    label="No"
-                    selected={aceptaUrgencias === false}
-                    onPress={() => setAceptaUrgencias(false)}
-                    size="sm"
-                  />
-                </View>
-              </View>
-            </View>
-
-            <View style={styles.field}>
-              <Text style={styles.label}>Activo</Text>
-              <View style={ui.booleanRow}>
-                <View style={ui.booleanItem}>
-                  <PillButton
-                    label="Sí"
-                    selected={activo === true}
-                    onPress={() => setActivo(true)}
-                    size="sm"
-                  />
-                </View>
-                <View style={ui.booleanItem}>
-                  <PillButton
-                    label="No"
-                    selected={activo === false}
-                    onPress={() => setActivo(false)}
-                    size="sm"
-                  />
-                </View>
-              </View>
             </View>
           </FormSection>
         </>
