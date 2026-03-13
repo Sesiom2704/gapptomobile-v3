@@ -1,6 +1,6 @@
 """
 Archivo: backend/app/schemas/gestion_alquiler.py
-Versión: 3.2.0
+Versión: 3.3.0
 
 Descripción:
 Schemas Pydantic para el módulo de gestión de alquileres.
@@ -11,11 +11,14 @@ Funcionalidades incluidas:
 - Participantes
 - Nuevas opciones dinámicas de objeto de alquiler por patrimonio
 - Soporte al nuevo campo contratos.objeto_alquiler
+- Soporte para relaciones on-demand en personas
 
 Notas de diseño:
 - objeto_alquiler se guarda como código técnico estable.
 - El frontend mostrará etiquetas legibles.
 - El backend valida qué opciones son válidas para cada patrimonio.
+- Las relaciones de persona se consultan en un endpoint específico para no
+  penalizar listados ni formularios.
 """
 
 from __future__ import annotations
@@ -24,6 +27,21 @@ from datetime import date, datetime
 from typing import Optional, List
 
 from pydantic import BaseModel, ConfigDict, Field
+
+
+# ==========================
+# RELACIONES / CONTEOS
+# ==========================
+
+class RelationCountItem(BaseModel):
+    """
+    Representa una tabla relacionada y su número de registros asociados.
+    """
+    key: str = Field(..., description="Clave técnica de la relación.")
+    label: str = Field(..., description="Nombre legible de la relación.")
+    count: int = Field(..., description="Número de registros asociados.")
+
+    model_config = ConfigDict(from_attributes=True)
 
 
 # ==========================
@@ -55,9 +73,32 @@ class PersonaUpdate(BaseModel):
 
 class PersonaSchema(PersonaBase):
     id: str
+    user_id: Optional[int] = None
     createon: Optional[datetime] = None
     modifiedon: Optional[datetime] = None
     inactivatedon: Optional[datetime] = None
+    associated_count: int = Field(
+        0,
+        description="Número real de registros asociados a la persona.",
+    )
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class PersonaRelationsRead(BaseModel):
+    """
+    Respuesta específica para consultar relaciones de una persona bajo demanda.
+    """
+    id: str
+    nombre_completo: str
+    associated_count: int = Field(
+        0,
+        description="Número total de registros asociados a la persona.",
+    )
+    relation_counts: List[RelationCountItem] = Field(
+        default_factory=list,
+        description="Detalle de tablas relacionadas y su número de registros.",
+    )
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -210,10 +251,12 @@ class ContratoResumenActivoOut(BaseModel):
 
 
 __all__ = [
+    "RelationCountItem",
     "PersonaBase",
     "PersonaCreate",
     "PersonaUpdate",
     "PersonaSchema",
+    "PersonaRelationsRead",
     "PersonaPickerOut",
     "ContratoParticipanteBase",
     "ContratoParticipanteCreate",
