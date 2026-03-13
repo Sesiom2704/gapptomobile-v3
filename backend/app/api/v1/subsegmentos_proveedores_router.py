@@ -1,19 +1,18 @@
-# backend/app/api/v1/subsegmentos_proveedores_router.py
-
 """
 Ruta: backend/app/api/v1/subsegmentos_proveedores_router.py
-Versión: 1.0.0
+Versión: 1.1.0
 Descripción:
-Router CRUD para la nueva tabla auxiliar de subsegmentos de proveedores.
+Router CRUD para la tabla auxiliar `tipo_subsegmentos_proveedores`.
 
 Objetivos:
-- Gestionar el catálogo `tipo_subsegmentos_proveedores`.
+- Gestionar el catálogo de subsegmentos de proveedores.
 - Permitir relación opcional con `tipo_ramas_proveedores`.
 - Impedir borrado si existen proveedores asociados.
-- Mantener estilo y reglas del resto de auxiliares:
+- Mantener estilo homogéneo con el resto de auxiliares:
     * nombre normalizado a MAYÚSCULAS
     * ids generados en backend
-    * unicidad razonable
+    * validación de unicidad por (nombre, rama_id)
+    * schemas Pydantic explícitos
 """
 
 from __future__ import annotations
@@ -24,9 +23,14 @@ from uuid import uuid4
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session
 
+from backend.app.api.v1.auth_router import require_user
 from backend.app.db.session import get_db
 from backend.app.db import models
-from backend.app.api.v1.auth_router import require_user
+from backend.app.schemas.ramas import (
+    TipoSubsegmentoProveedorCreate,
+    TipoSubsegmentoProveedorRead,
+    TipoSubsegmentoProveedorUpdate,
+)
 from backend.app.utils.text_utils import normalize_upper
 
 
@@ -36,27 +40,86 @@ router = APIRouter(
 )
 
 
-# =============================================================================
+# ============================================================
 # Helpers
-# =============================================================================
+# ============================================================
+
 def _generate_subsegmento_proveedor_id() -> str:
+    """
+    Genera un ID técnico para subsegmento de proveedor.
+    """
     return "TSPR-" + uuid4().hex[:10].upper()
 
 
-def _serialize(obj) -> dict:
-    return {
-        "id": obj.id,
-        "nombre": obj.nombre,
-        "rama_id": obj.rama_id,
-    }
+def _get_model_cls():
+    """
+    Obtiene el modelo ORM de forma robusta.
+    """
+    model_cls = getattr(models, "TipoSubsegmentoProveedor", None)
+    if model_cls is None:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="El modelo TipoSubsegmentoProveedor no está disponible en models.py",
+        )
+    return model_cls
 
 
-# =============================================================================
+def _validate_rama_if_present(db: Session, rama_id: Optional[str]) -> Optional[str]:
+    """
+    Valida que la rama exista si viene informada.
+    Devuelve rama_id normalizada a str o None.
+    """
+    rama_id_final = (rama_id or "").strip() or None
+
+    if rama_id_final:
+        rama_exists = db.get(models.TipoRamasProveedores, rama_id_final)
+        if not rama_exists:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="La rama de proveedor indicada no existe.",
+            )
+
+    return rama_id_final
+
+
+def _ensure_unique_nombre(
+    db: Session,
+    model_cls,
+    *,
+    nombre: str,
+    rama_id: Optional[str],
+    exclude_id: Optional[str] = None,
+) -> None:
+    """
+    Valida unicidad razonable de subsegmento:
+    - mismo nombre
+    - misma rama_id (incluyendo NULL)
+    """
+    qry = db.query(model_cls).filter(model_cls.nombre == nombre)
+
+    if exclude_id:
+        qry = qry.filter(model_cls.id != exclude_id)
+
+    if rama_id:
+        qry = qry.filter(model_cls.rama_id == rama_id)
+    else:
+        qry = qry.filter(model_cls.rama_id.is_(None))
+
+    exists = qry.first()
+    if exists:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Ya existe un subsegmento de proveedor con ese nombre para esa rama.",
+        )
+
+
+# ============================================================
 # GET
-# =============================================================================
+# ============================================================
+
 @router.get(
     "",
-    response_model=List[dict],
+    response_model=List[TipoSubsegmentoProveedorRead],
     summary="Listar subsegmentos de proveedores",
 )
 def list_subsegmentos_proveedores(
@@ -66,76 +129,62 @@ def list_subsegmentos_proveedores(
 ):
     """
     Lista los subsegmentos de proveedores.
+
+    Notas:
+    - Es catálogo global, no multiusuario.
+    - Permite filtro opcional por rama_id.
     """
-    model_cls = getattr(models, "TipoSubsegmentoProveedor", None)
-    if model_cls is None:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="El modelo TipoSubsegmentoProveedor no está disponible en models.py",
-        )
+    model_cls = _get_model_cls()
 
     qry = db.query(model_cls)
 
     if rama_id:
         qry = qry.filter(model_cls.rama_id == rama_id)
 
-    rows = qry.order_by(model_cls.nombre.asc(), model_cls.id.asc()).all()
-    return [_serialize(r) for r in rows]
+    return qry.order_by(model_cls.nombre.asc(), model_cls.id.asc()).all()
 
 
-# =============================================================================
+# ============================================================
 # POST
-# =============================================================================
+# ============================================================
+
 @router.post(
     "",
-    response_model=dict,
+    response_model=TipoSubsegmentoProveedorRead,
     status_code=status.HTTP_201_CREATED,
     summary="Crear subsegmento de proveedor",
 )
 def create_subsegmento_proveedor(
-    payload: dict,
+    payload: TipoSubsegmentoProveedorCreate,
     db: Session = Depends(get_db),
     current_user: models.User = Depends(require_user),
 ):
     """
     Crea un subsegmento de proveedor.
+
+    Reglas:
+    - nombre obligatorio
+    - nombre normalizado a MAYÚSCULAS
+    - rama_id opcional
+    - unicidad por (nombre, rama_id)
     """
-    model_cls = getattr(models, "TipoSubsegmentoProveedor", None)
-    if model_cls is None:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="El modelo TipoSubsegmentoProveedor no está disponible en models.py",
-        )
+    model_cls = _get_model_cls()
 
-    nombre = normalize_upper(payload.get("nombre")) or ""
-    rama_id = (payload.get("rama_id") or "").strip() or None
-
+    nombre = normalize_upper(payload.nombre) or ""
     if not nombre:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail="El nombre es obligatorio.",
         )
 
-    if rama_id:
-        rama_exists = db.get(models.TipoRamasProveedores, rama_id)
-        if not rama_exists:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="La rama de proveedor indicada no existe.",
-            )
+    rama_id = _validate_rama_if_present(db, payload.rama_id)
 
-    exists_q = db.query(model_cls).filter(model_cls.nombre == nombre)
-    if rama_id:
-        exists_q = exists_q.filter(model_cls.rama_id == rama_id)
-    else:
-        exists_q = exists_q.filter(model_cls.rama_id.is_(None))
-
-    exists = exists_q.first()
-    if exists:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Ya existe un subsegmento de proveedor con ese nombre para esa rama.",
-        )
+    _ensure_unique_nombre(
+        db,
+        model_cls,
+        nombre=nombre,
+        rama_id=rama_id,
+    )
 
     obj = model_cls(
         id=_generate_subsegmento_proveedor_id(),
@@ -146,32 +195,32 @@ def create_subsegmento_proveedor(
     db.add(obj)
     db.commit()
     db.refresh(obj)
-    return _serialize(obj)
+    return obj
 
 
-# =============================================================================
+# ============================================================
 # PUT
-# =============================================================================
+# ============================================================
+
 @router.put(
     "/{subsegmento_id}",
-    response_model=dict,
+    response_model=TipoSubsegmentoProveedorRead,
     summary="Actualizar subsegmento de proveedor",
 )
 def update_subsegmento_proveedor(
     subsegmento_id: str,
-    payload: dict,
+    payload: TipoSubsegmentoProveedorUpdate,
     db: Session = Depends(get_db),
     current_user: models.User = Depends(require_user),
 ):
     """
     Actualiza un subsegmento de proveedor.
+
+    Permite update parcial de:
+    - nombre
+    - rama_id
     """
-    model_cls = getattr(models, "TipoSubsegmentoProveedor", None)
-    if model_cls is None:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="El modelo TipoSubsegmentoProveedor no está disponible en models.py",
-        )
+    model_cls = _get_model_cls()
 
     obj = db.get(model_cls, subsegmento_id)
     if not obj:
@@ -180,8 +229,10 @@ def update_subsegmento_proveedor(
             detail="Subsegmento de proveedor no encontrado.",
         )
 
-    if "nombre" in payload:
-        nombre = normalize_upper(payload.get("nombre")) or ""
+    data = payload.model_dump(exclude_unset=True)
+
+    if "nombre" in data:
+        nombre = normalize_upper(data.get("nombre")) or ""
         if not nombre:
             raise HTTPException(
                 status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
@@ -189,41 +240,26 @@ def update_subsegmento_proveedor(
             )
         obj.nombre = nombre
 
-    if "rama_id" in payload:
-        rama_id = (payload.get("rama_id") or "").strip() or None
-        if rama_id:
-            rama_exists = db.get(models.TipoRamasProveedores, rama_id)
-            if not rama_exists:
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail="La rama de proveedor indicada no existe.",
-                )
-        obj.rama_id = rama_id
+    if "rama_id" in data:
+        obj.rama_id = _validate_rama_if_present(db, data.get("rama_id"))
 
-    exists_q = db.query(model_cls).filter(
-        model_cls.id != obj.id,
-        model_cls.nombre == obj.nombre,
+    _ensure_unique_nombre(
+        db,
+        model_cls,
+        nombre=obj.nombre,
+        rama_id=obj.rama_id,
+        exclude_id=obj.id,
     )
-    if obj.rama_id:
-        exists_q = exists_q.filter(model_cls.rama_id == obj.rama_id)
-    else:
-        exists_q = exists_q.filter(model_cls.rama_id.is_(None))
-
-    exists = exists_q.first()
-    if exists:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Ya existe otro subsegmento de proveedor con ese nombre para esa rama.",
-        )
 
     db.commit()
     db.refresh(obj)
-    return _serialize(obj)
+    return obj
 
 
-# =============================================================================
+# ============================================================
 # DELETE
-# =============================================================================
+# ============================================================
+
 @router.delete(
     "/{subsegmento_id}",
     status_code=status.HTTP_204_NO_CONTENT,
@@ -237,12 +273,7 @@ def delete_subsegmento_proveedor(
     """
     Elimina un subsegmento de proveedor si no tiene proveedores asociados.
     """
-    model_cls = getattr(models, "TipoSubsegmentoProveedor", None)
-    if model_cls is None:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="El modelo TipoSubsegmentoProveedor no está disponible en models.py",
-        )
+    model_cls = _get_model_cls()
 
     obj = db.get(model_cls, subsegmento_id)
     if not obj:

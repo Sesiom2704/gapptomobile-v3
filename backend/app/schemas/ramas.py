@@ -1,10 +1,9 @@
-# backend/app/schemas/ramas.py
-
 """
 Ruta: backend/app/schemas/ramas.py
 Versión: 1.2.0
 Descripción:
-Schemas Pydantic para los catálogos de RAMAS y SUBSEGMENTOS de GapptoMobile v3.
+Schemas Pydantic para las tablas auxiliares de ramas y subsegmentos
+de GapptoMobile v3.
 
 Incluye:
 - TipoRamasIngreso
@@ -12,15 +11,10 @@ Incluye:
 - TipoRamasProveedores
 - TipoSubsegmentoProveedor
 
-Objetivos:
-- Mantener consistencia entre catálogos auxiliares del dominio.
-- Permitir que el backend exponga payloads homogéneos.
-- Preparar el nuevo catálogo auxiliar de subsegmentos de proveedores.
-- Mantener compatibilidad con Pydantic v2 y construcción desde ORM.
-
 Reglas:
-- El nombre se normaliza en router/service, no en schema.
+- El nombre se normaliza en routers/services, no en el schema.
 - Los IDs se generan en backend.
+- Los schemas de update permiten modificación parcial.
 """
 
 from __future__ import annotations
@@ -30,9 +24,9 @@ from typing import Optional
 from pydantic import BaseModel, ConfigDict, Field
 
 
-# ============================================================================
+# ============================================================
 # RAMAS DE INGRESO
-# ============================================================================
+# ============================================================
 
 class TipoRamaIngresoBase(BaseModel):
     """
@@ -50,23 +44,23 @@ class TipoRamaIngresoCreate(TipoRamaIngresoBase):
 
 class TipoRamaIngresoUpdate(BaseModel):
     """
-    Payload de actualización de rama de ingreso.
+    Payload de actualización parcial de rama de ingreso.
     """
     nombre: Optional[str] = Field(None, description="Nuevo nombre de la rama de ingreso.")
 
 
 class TipoRamaIngresoRead(TipoRamaIngresoBase):
     """
-    Schema de salida para rama de ingreso.
+    Respuesta de lectura de rama de ingreso.
     """
     id: str
 
     model_config = ConfigDict(from_attributes=True)
 
 
-# ============================================================================
+# ============================================================
 # RAMAS DE GASTO
-# ============================================================================
+# ============================================================
 
 class TipoRamaGastoBase(BaseModel):
     """
@@ -84,23 +78,23 @@ class TipoRamaGastoCreate(TipoRamaGastoBase):
 
 class TipoRamaGastoUpdate(BaseModel):
     """
-    Payload de actualización de rama de gasto.
+    Payload de actualización parcial de rama de gasto.
     """
     nombre: Optional[str] = Field(None, description="Nuevo nombre de la rama de gasto.")
 
 
 class TipoRamaGastoRead(TipoRamaGastoBase):
     """
-    Schema de salida para rama de gasto.
+    Respuesta de lectura de rama de gasto.
     """
     id: str
 
     model_config = ConfigDict(from_attributes=True)
 
 
-# ============================================================================
-# RAMAS DE PROVEEDOR
-# ============================================================================
+# ============================================================
+# RAMAS DE PROVEEDORES
+# ============================================================
 
 class TipoRamaProveedorBase(BaseModel):
     """
@@ -118,36 +112,38 @@ class TipoRamaProveedorCreate(TipoRamaProveedorBase):
 
 class TipoRamaProveedorUpdate(BaseModel):
     """
-    Payload de actualización de rama de proveedor.
+    Payload de actualización parcial de rama de proveedor.
     """
     nombre: Optional[str] = Field(None, description="Nuevo nombre de la rama de proveedor.")
 
 
 class TipoRamaProveedorRead(TipoRamaProveedorBase):
     """
-    Schema de salida para rama de proveedor.
+    Respuesta de lectura de rama de proveedor.
     """
     id: str
 
     model_config = ConfigDict(from_attributes=True)
 
 
-# ============================================================================
-# SUBSEGMENTOS DE PROVEEDOR
-# ============================================================================
+# ============================================================
+# SUBSEGMENTOS DE PROVEEDORES
+# ============================================================
 
 class TipoSubsegmentoProveedorBase(BaseModel):
     """
     Campos base de un subsegmento de proveedor.
 
-    Nota:
-    - rama_id es opcional para permitir subsegmentos genéricos,
-      aunque la UI normalmente trabajará asociados a una rama.
+    Ejemplos:
+    - ELECTRODOMÉSTICOS
+    - CERRAJERÍA
+    - FONTANERÍA
+    - LIMPIEZA
     """
     nombre: str = Field(..., description="Nombre del subsegmento de proveedor.")
     rama_id: Optional[str] = Field(
         None,
-        description="ID de la rama de proveedor a la que pertenece el subsegmento.",
+        description="ID de la rama de proveedor asociada. Puede ser NULL.",
     )
 
 
@@ -160,18 +156,18 @@ class TipoSubsegmentoProveedorCreate(TipoSubsegmentoProveedorBase):
 
 class TipoSubsegmentoProveedorUpdate(BaseModel):
     """
-    Payload de actualización de subsegmento de proveedor.
+    Payload de actualización parcial de subsegmento de proveedor.
     """
     nombre: Optional[str] = Field(None, description="Nuevo nombre del subsegmento.")
     rama_id: Optional[str] = Field(
         None,
-        description="Nueva rama_id del subsegmento de proveedor.",
+        description="Nueva rama de proveedor asociada. Puede ser NULL.",
     )
 
 
 class TipoSubsegmentoProveedorRead(TipoSubsegmentoProveedorBase):
     """
-    Schema de salida para subsegmento de proveedor.
+    Respuesta de lectura de subsegmento de proveedor.
     """
     id: str
 
