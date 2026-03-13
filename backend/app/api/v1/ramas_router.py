@@ -1,36 +1,36 @@
-# backend/app/api/v1/ramas_router.py
-
 """
+Ruta: backend/app/api/v1/ramas_router.py
+Versión: 2.0.0
+Descripción:
 API v1 - RAMAS
 - TipoRamasIngreso
 - TipoRamasGasto
 - TipoRamasProveedores
 
-Mantiene:
-- Endpoints y patrón CRUD por tipo de rama.
-- Reglas:
-    * NOMBRE siempre en MAYÚSCULAS (strip + upper).
-    * No se permiten duplicados por NOMBRE al crear.
-    * 404 si la rama no existe al actualizar/borrar.
+Responsabilidades:
+- CRUD de ramas auxiliares.
+- Normalización de nombres a MAYÚSCULAS.
+- Validación de duplicados en create/update.
+- Exposición de contadores reales de registros asociados.
 
-Mejoras v3:
-- Uso de schemas separados (ramas.py).
-- IDs generados en backend.
-- Normalización de texto centralizada con normalize_upper().
-- Se añade soporte completo para ramas de ingresos.
-
-Nota funcional:
-- Las ramas de ingresos se usarán en UI como primer selector:
-    1) el usuario elige una rama
-    2) después se muestran los tipos de ingreso asociados a esa rama
+Cambios de esta versión:
+- Se añade `associated_count` en listados de:
+    * ramas de ingreso
+    * ramas de gasto
+    * ramas de proveedores
+- Los contadores se calculan desde relaciones reales del dominio:
+    * RamaIngreso: tipos_ingreso + ingresos
+    * RamaGasto: tipos_gasto + gastos agregados de esos tipos
+    * RamaProveedor: proveedores + subsegmentos
 """
 
 from __future__ import annotations
 
-from typing import List, Any
+from typing import List, Any, Dict
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
+from sqlalchemy import func
 
 from backend.app.db.session import get_db
 from backend.app.db import models
@@ -109,6 +109,165 @@ def _ensure_unique_nombre_on_update(
         )
 
 
+def _build_count_map(query_rows: list[tuple[str, int]]) -> Dict[str, int]:
+    """
+    Convierte filas agregadas SQL [(fk_id, count), ...] a dict.
+    """
+    out: Dict[str, int] = {}
+    for fk_id, qty in query_rows:
+        key = str(fk_id or "").strip()
+        if not key:
+            continue
+        out[key] = int(qty or 0)
+    return out
+
+
+def _merge_count_maps(*maps: Dict[str, int]) -> Dict[str, int]:
+    """
+    Suma múltiples mapas de contadores por la misma clave.
+    """
+    merged: Dict[str, int] = {}
+    for mp in maps:
+        for key, value in mp.items():
+            merged[key] = merged.get(key, 0) + int(value or 0)
+    return merged
+
+
+def _serialize_rama_ingreso(
+    obj: models.TipoRamasIngreso,
+    associated_count: int,
+) -> dict:
+    return {
+        "id": obj.id,
+        "nombre": obj.nombre,
+        "associated_count": int(associated_count or 0),
+    }
+
+
+def _serialize_rama_gasto(
+    obj: models.TipoRamasGasto,
+    associated_count: int,
+) -> dict:
+    return {
+        "id": obj.id,
+        "nombre": obj.nombre,
+        "associated_count": int(associated_count or 0),
+    }
+
+
+def _serialize_rama_proveedor(
+    obj: models.TipoRamasProveedores,
+    associated_count: int,
+) -> dict:
+    return {
+        "id": obj.id,
+        "nombre": obj.nombre,
+        "associated_count": int(associated_count or 0),
+    }
+
+
+def _get_ramas_ingreso_count_map(db: Session) -> Dict[str, int]:
+    """
+    Cuenta referencias reales por rama de ingreso:
+    - tipos_ingreso
+    - ingresos
+    """
+    tipos_rows = (
+        db.query(models.TipoIngreso.rama_id, func.count(models.TipoIngreso.id))
+        .filter(models.TipoIngreso.rama_id.isnot(None))
+        .group_by(models.TipoIngreso.rama_id)
+        .all()
+    )
+
+    ingresos_rows = (
+        db.query(models.Ingreso.rama_id, func.count(models.Ingreso.id))
+        .filter(models.Ingreso.rama_id.isnot(None))
+        .group_by(models.Ingreso.rama_id)
+        .all()
+    )
+
+    return _merge_count_maps(
+        _build_count_map(tipos_rows),
+        _build_count_map(ingresos_rows),
+    )
+
+
+def _get_ramas_gasto_count_map(db: Session) -> Dict[str, int]:
+    """
+    Cuenta referencias reales por rama de gasto:
+    - tipos_gasto
+    - gastos
+    - gastos_cotidianos
+    - inversiones
+
+    Nota:
+    - Para los tres últimos, el conteo se deriva vía TipoGasto.rama_id.
+    """
+    tipos_rows = (
+        db.query(models.TipoGasto.rama_id, func.count(models.TipoGasto.id))
+        .filter(models.TipoGasto.rama_id.isnot(None))
+        .group_by(models.TipoGasto.rama_id)
+        .all()
+    )
+
+    gastos_rows = (
+        db.query(models.TipoGasto.rama_id, func.count(models.Gasto.id))
+        .join(models.Gasto, models.Gasto.tipo_id == models.TipoGasto.id)
+        .filter(models.TipoGasto.rama_id.isnot(None))
+        .group_by(models.TipoGasto.rama_id)
+        .all()
+    )
+
+    cotidianos_rows = (
+        db.query(models.TipoGasto.rama_id, func.count(models.GastoCotidiano.id))
+        .join(models.GastoCotidiano, models.GastoCotidiano.tipo_id == models.TipoGasto.id)
+        .filter(models.TipoGasto.rama_id.isnot(None))
+        .group_by(models.TipoGasto.rama_id)
+        .all()
+    )
+
+    inversiones_rows = (
+        db.query(models.TipoGasto.rama_id, func.count(models.Inversion.id))
+        .join(models.Inversion, models.Inversion.tipo_gasto_id == models.TipoGasto.id)
+        .filter(models.TipoGasto.rama_id.isnot(None))
+        .group_by(models.TipoGasto.rama_id)
+        .all()
+    )
+
+    return _merge_count_maps(
+        _build_count_map(tipos_rows),
+        _build_count_map(gastos_rows),
+        _build_count_map(cotidianos_rows),
+        _build_count_map(inversiones_rows),
+    )
+
+
+def _get_ramas_proveedor_count_map(db: Session) -> Dict[str, int]:
+    """
+    Cuenta referencias reales por rama de proveedor:
+    - proveedores
+    - subsegmentos
+    """
+    proveedores_rows = (
+        db.query(models.Proveedor.rama_id, func.count(models.Proveedor.id))
+        .filter(models.Proveedor.rama_id.isnot(None))
+        .group_by(models.Proveedor.rama_id)
+        .all()
+    )
+
+    subsegmentos_rows = (
+        db.query(models.TipoSubsegmentoProveedor.rama_id, func.count(models.TipoSubsegmentoProveedor.id))
+        .filter(models.TipoSubsegmentoProveedor.rama_id.isnot(None))
+        .group_by(models.TipoSubsegmentoProveedor.rama_id)
+        .all()
+    )
+
+    return _merge_count_maps(
+        _build_count_map(proveedores_rows),
+        _build_count_map(subsegmentos_rows),
+    )
+
+
 # ============================================================
 # RAMAS DE INGRESOS
 # ============================================================
@@ -124,13 +283,21 @@ def list_ramas_ingreso(
     """
     Devuelve todas las ramas de ingreso ordenadas por nombre.
 
-    Estas ramas alimentan el primer nivel de selección del formulario de ingresos.
+    Incluye `associated_count` calculado desde relaciones reales:
+    - tipos_ingreso
+    - ingresos
     """
-    return (
+    items = (
         db.query(models.TipoRamasIngreso)
         .order_by(models.TipoRamasIngreso.nombre.asc())
         .all()
     )
+    count_map = _get_ramas_ingreso_count_map(db)
+
+    return [
+        _serialize_rama_ingreso(item, count_map.get(item.id, 0))
+        for item in items
+    ]
 
 
 @router.post(
@@ -150,10 +317,6 @@ def create_rama_ingreso(
     - NOMBRE se guarda en MAYÚSCULAS.
     - No se puede repetir NOMBRE.
     - El ID no lo envía el cliente.
-
-    Nota:
-    - Para ingresos iniciales ya tienes IDs funcionales cargados por SQL.
-    - Aquí generamos un ID simple y coherente para altas nuevas.
     """
     nombre_up = normalize_upper(rama_in.nombre) or ""
 
@@ -164,9 +327,6 @@ def create_rama_ingreso(
         "Ya existe esa rama de ingreso.",
     )
 
-    # Prefijo coherente con el nuevo dominio.
-    # Se mantiene estilo parecido al resto, aunque el formato histórico
-    # de los datos semilla sea diferente.
     new_id = generate_tipo_rama_ingreso_id(db)
 
     obj = models.TipoRamasIngreso(
@@ -176,7 +336,7 @@ def create_rama_ingreso(
     db.add(obj)
     db.commit()
     db.refresh(obj)
-    return obj
+    return _serialize_rama_ingreso(obj, 0)
 
 
 @router.put(
@@ -191,11 +351,6 @@ def update_rama_ingreso(
 ):
     """
     Actualiza una rama de ingreso.
-
-    Reglas:
-    - Si no existe -> 404.
-    - Si se envía nombre, se normaliza a MAYÚSCULAS.
-    - No se permite renombrar a un nombre ya existente.
     """
     obj = db.get(models.TipoRamasIngreso, rama_id)
     if not obj:
@@ -222,7 +377,9 @@ def update_rama_ingreso(
 
     db.commit()
     db.refresh(obj)
-    return obj
+
+    count_map = _get_ramas_ingreso_count_map(db)
+    return _serialize_rama_ingreso(obj, count_map.get(obj.id, 0))
 
 
 @router.delete(
@@ -236,10 +393,6 @@ def delete_rama_ingreso(
 ):
     """
     Elimina una rama de ingreso.
-
-    Reglas:
-    - Si no existe -> 404.
-    - Si hay tipos de ingreso o ingresos asociados, la BD puede impedir el borrado.
     """
     obj = db.get(models.TipoRamasIngreso, rama_id)
     if not obj:
@@ -267,12 +420,22 @@ def list_ramas_proveedores(
 ):
     """
     Devuelve todas las ramas de proveedores ordenadas por nombre.
+
+    Incluye `associated_count` calculado desde relaciones reales:
+    - proveedores
+    - subsegmentos
     """
-    return (
+    items = (
         db.query(models.TipoRamasProveedores)
         .order_by(models.TipoRamasProveedores.nombre.asc())
         .all()
     )
+    count_map = _get_ramas_proveedor_count_map(db)
+
+    return [
+        _serialize_rama_proveedor(item, count_map.get(item.id, 0))
+        for item in items
+    ]
 
 
 @router.post(
@@ -287,11 +450,6 @@ def create_rama_proveedor(
 ):
     """
     Crea una nueva rama de proveedor.
-
-    Reglas:
-    - NOMBRE se guarda en MAYÚSCULAS.
-    - No se puede repetir NOMBRE.
-    - El ID se genera en backend (TRPR-XXXXXX).
     """
     nombre_up = normalize_upper(rama_in.nombre) or ""
 
@@ -311,7 +469,7 @@ def create_rama_proveedor(
     db.add(obj)
     db.commit()
     db.refresh(obj)
-    return obj
+    return _serialize_rama_proveedor(obj, 0)
 
 
 @router.put(
@@ -326,11 +484,6 @@ def update_rama_proveedor(
 ):
     """
     Actualiza una rama de proveedor.
-
-    Reglas:
-    - Si no existe -> 404.
-    - NOMBRE se normaliza a MAYÚSCULAS si se envía.
-    - No se permite duplicar el nombre con otra rama.
     """
     obj = db.get(models.TipoRamasProveedores, rama_id)
     if not obj:
@@ -357,7 +510,9 @@ def update_rama_proveedor(
 
     db.commit()
     db.refresh(obj)
-    return obj
+
+    count_map = _get_ramas_proveedor_count_map(db)
+    return _serialize_rama_proveedor(obj, count_map.get(obj.id, 0))
 
 
 @router.delete(
@@ -371,10 +526,6 @@ def delete_rama_proveedor(
 ):
     """
     Elimina una rama de proveedor.
-
-    Reglas:
-    - Si no existe -> 404.
-    - Si hay proveedores asociados, la BD puede impedir el borrado.
     """
     obj = db.get(models.TipoRamasProveedores, rama_id)
     if not obj:
@@ -402,12 +553,24 @@ def list_ramas_gasto(
 ):
     """
     Devuelve todas las ramas de gasto ordenadas por nombre.
+
+    Incluye `associated_count` calculado desde relaciones reales:
+    - tipos_gasto
+    - gastos
+    - gastos_cotidianos
+    - inversiones
     """
-    return (
+    items = (
         db.query(models.TipoRamasGasto)
         .order_by(models.TipoRamasGasto.nombre.asc())
         .all()
     )
+    count_map = _get_ramas_gasto_count_map(db)
+
+    return [
+        _serialize_rama_gasto(item, count_map.get(item.id, 0))
+        for item in items
+    ]
 
 
 @router.post(
@@ -422,11 +585,6 @@ def create_rama_gasto(
 ):
     """
     Crea una nueva rama de gasto.
-
-    Reglas:
-    - NOMBRE en MAYÚSCULAS.
-    - No se puede repetir NOMBRE.
-    - ID generado en backend (TRAG-XXXXXX).
     """
     nombre_up = normalize_upper(rama_in.nombre) or ""
 
@@ -446,7 +604,7 @@ def create_rama_gasto(
     db.add(obj)
     db.commit()
     db.refresh(obj)
-    return obj
+    return _serialize_rama_gasto(obj, 0)
 
 
 @router.put(
@@ -461,11 +619,6 @@ def update_rama_gasto(
 ):
     """
     Actualiza una rama de gasto.
-
-    Reglas:
-    - Si no existe -> 404.
-    - NOMBRE se normaliza a MAYÚSCULAS si se envía.
-    - No se permite duplicar el nombre con otra rama.
     """
     obj = db.get(models.TipoRamasGasto, rama_id)
     if not obj:
@@ -492,7 +645,9 @@ def update_rama_gasto(
 
     db.commit()
     db.refresh(obj)
-    return obj
+
+    count_map = _get_ramas_gasto_count_map(db)
+    return _serialize_rama_gasto(obj, count_map.get(obj.id, 0))
 
 
 @router.delete(
@@ -506,10 +661,6 @@ def delete_rama_gasto(
 ):
     """
     Elimina una rama de gasto.
-
-    Reglas:
-    - Si no existe -> 404.
-    - Si hay tipos de gasto asociados, la BD puede impedir el borrado.
     """
     obj = db.get(models.TipoRamasGasto, rama_id)
     if not obj:

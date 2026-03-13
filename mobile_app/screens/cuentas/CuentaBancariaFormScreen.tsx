@@ -1,4 +1,15 @@
-// mobile_app/screens/cuentas/CuentaBancariaFormScreen.tsx
+/**
+ * Ruta: mobile_app/screens/cuentas/CuentaBancariaFormScreen.tsx
+ * Versión: 2.0.0
+ * Descripción:
+ * Formulario de creación y edición de cuentas bancarias.
+ *
+ * Responsabilidades:
+ * - Crear y editar cuentas bancarias.
+ * - Seleccionar banco desde proveedores filtrados por rama BANCOS.
+ * - Permitir alta encadenada de proveedor banco desde el botón "+".
+ * - Recuperar el proveedor creado y dejarlo seleccionado automáticamente.
+ */
 
 import React, { useEffect, useMemo, useState } from 'react';
 import { View, Text, TextInput, TouchableOpacity, Alert, Switch } from 'react-native';
@@ -10,12 +21,16 @@ import { commonFormStyles } from '../../components/forms/formStyles';
 import { InlineSearchSelect } from '../../components/ui/InlineSearchSelect';
 import { colors } from '../../theme/colors';
 
-import { createCuenta, updateCuenta, deleteCuenta, CuentaBancaria } from '../../services/cuentasApi';
+import {
+  createCuenta,
+  updateCuenta,
+  deleteCuenta,
+  CuentaBancaria,
+} from '../../services/cuentasApi';
 import { listProveedores, Proveedor } from '../../services/proveedoresApi';
 import { parseImporte } from '../../utils/format';
 
 type Props = { navigation: any; route: any };
-const NOOP = () => {};
 
 export const CuentaBancariaFormScreen: React.FC<Props> = ({ navigation, route }) => {
   const styles = commonFormStyles;
@@ -34,21 +49,57 @@ export const CuentaBancariaFormScreen: React.FC<Props> = ({ navigation, route })
   const [bancos, setBancos] = useState<Proveedor[]>([]);
   const [bancoQuery, setBancoQuery] = useState('');
 
-  // Rama de proveedores: BANCOS
+  /**
+   * Rama de proveedores para bancos.
+   * Se mantiene el ID actual del proyecto.
+   */
   const BANCOS_RAMA_ID = 'BAN-TIPORAMAPROVEEDOR-8D1302BD';
 
+  const loadBancos = async () => {
+    try {
+      const onlyBanks = await listProveedores({ rama_id: BANCOS_RAMA_ID });
+      setBancos(onlyBanks ?? []);
+    } catch (e) {
+      console.error('[CuentaBancariaForm] Error cargando bancos', e);
+      Alert.alert('Error', 'No se han podido cargar los bancos (proveedores).');
+    }
+  };
+
   useEffect(() => {
-    const loadBancos = async () => {
-      try {
-        const onlyBanks = await listProveedores({ rama_id: BANCOS_RAMA_ID });
-        setBancos(onlyBanks ?? []);
-      } catch (e) {
-        console.error('[CuentaBancariaForm] Error cargando bancos', e);
-        Alert.alert('Error', 'No se han podido cargar los bancos (proveedores).');
-      }
-    };
     void loadBancos();
   }, []);
+
+  /**
+   * Recupera resultados de formularios hijos.
+   * Caso soportado:
+   * - creación de proveedor banco desde el "+"
+   */
+  useEffect(() => {
+    const auxResult = route?.params?.auxResult;
+    if (!auxResult) return;
+
+    try {
+      navigation.setParams?.({ auxResult: undefined });
+    } catch {
+      // noop
+    }
+
+    if (auxResult?.type === 'proveedor' && auxResult?.item) {
+      const nuevoBanco = auxResult.item as Proveedor;
+
+      setBancos((prev) => {
+        const exists = prev.some((x) => String(x.id) === String(nuevoBanco.id));
+        if (exists) {
+          return prev.map((x) => (String(x.id) === String(nuevoBanco.id) ? nuevoBanco : x));
+        }
+        return [nuevoBanco, ...prev];
+      });
+
+      setBancoId(String(nuevoBanco.id));
+      setBancoQuery('');
+      return;
+    }
+  }, [route?.params?.auxResult, navigation]);
 
   const bancoSelected = useMemo(() => {
     if (!bancoId) return null;
@@ -58,6 +109,7 @@ export const CuentaBancariaFormScreen: React.FC<Props> = ({ navigation, route })
   const anagramaPreview = useMemo(() => {
     const ref = (referencia ?? '').trim().toUpperCase();
     const bankName = String(bancoSelected?.nombre ?? '').trim().toUpperCase();
+
     if (!ref && !bankName) return '';
     if (!ref) return bankName;
     if (!bankName) return ref;
@@ -67,21 +119,52 @@ export const CuentaBancariaFormScreen: React.FC<Props> = ({ navigation, route })
   const bancosFiltrados = useMemo(() => {
     const term = bancoQuery.trim().toLowerCase();
     if (!term) return bancos.slice(0, 50);
+
     return bancos
       .filter((b: any) => String(b.nombre ?? '').toLowerCase().includes(term))
       .slice(0, 50);
   }, [bancos, bancoQuery]);
 
+  const handleAddBancoProveedor = () => {
+    navigation.push('AuxEntityForm', {
+      auxType: 'proveedor',
+      origin: 'config',
+      returnRouteKey: route?.key,
+      defaultRamaId: BANCOS_RAMA_ID,
+    });
+  };
+
   const handleSave = async () => {
-    console.log('[CuentaBancariaForm] handleSave pressed', { mode, bancoId, referencia, liquidezInicialText, activo });
+    console.log('[CuentaBancariaForm] handleSave pressed', {
+      mode,
+      bancoId,
+      referencia,
+      liquidezInicialText,
+      activo,
+    });
 
     const refFinal = referencia.trim().toUpperCase();
-    if (!bancoId) return Alert.alert('Campo requerido', 'Debes seleccionar un banco.');
-    if (!refFinal) return Alert.alert('Campo requerido', 'Debes indicar una referencia.');
+
+    if (!bancoId) {
+      Alert.alert('Campo requerido', 'Debes seleccionar un banco.');
+      return;
+    }
+
+    if (!refFinal) {
+      Alert.alert('Campo requerido', 'Debes indicar una referencia.');
+      return;
+    }
 
     const parsed = parseImporte(liquidezInicialText || '0');
-    if (parsed == null || isNaN(parsed)) return Alert.alert('Valor inválido', 'Liquidez inicial no válida.');
-    if (parsed < 0) return Alert.alert('Valor inválido', 'Liquidez inicial no puede ser negativa.');
+    if (parsed == null || isNaN(parsed)) {
+      Alert.alert('Valor inválido', 'Liquidez inicial no válida.');
+      return;
+    }
+
+    if (parsed < 0) {
+      Alert.alert('Valor inválido', 'Liquidez inicial no puede ser negativa.');
+      return;
+    }
 
     try {
       if (isEdit && editing?.id) {
@@ -172,8 +255,15 @@ export const CuentaBancariaFormScreen: React.FC<Props> = ({ navigation, route })
               }}
               onPress={handleDelete}
             >
-              <Ionicons name="trash-outline" size={18} color="#FFFFFF" style={{ marginRight: 8 }} />
-              <Text style={{ color: '#FFFFFF', fontWeight: '600', fontSize: 15 }}>Eliminar</Text>
+              <Ionicons
+                name="trash-outline"
+                size={18}
+                color="#FFFFFF"
+                style={{ marginRight: 8 }}
+              />
+              <Text style={{ color: '#FFFFFF', fontWeight: '600', fontSize: 15 }}>
+                Eliminar
+              </Text>
             </TouchableOpacity>
           ) : null}
         </View>
@@ -183,8 +273,8 @@ export const CuentaBancariaFormScreen: React.FC<Props> = ({ navigation, route })
         <View style={styles.field}>
           <InlineSearchSelect<Proveedor>
             label="Banco"
-            onAddPress={NOOP}
-            addAccessibilityLabel="Añadir (no aplica)"
+            onAddPress={handleAddBancoProveedor}
+            addAccessibilityLabel="Crear banco"
             disabled={false}
             selected={bancoSelected as any}
             selectedLabel={(p: any) => (p?.nombre ?? '').toUpperCase()}
@@ -224,15 +314,26 @@ export const CuentaBancariaFormScreen: React.FC<Props> = ({ navigation, route })
           />
         </View>
 
-        <View style={[styles.field, { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }]}>
+        <View
+          style={[
+            styles.field,
+            { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
+          ]}
+        >
           <Text style={styles.label}>Activo</Text>
           <Switch value={activo} onValueChange={setActivo} />
         </View>
 
         <View style={styles.field}>
           <Text style={styles.label}>Anagrama (automático)</Text>
-          <TextInput style={[styles.input, styles.inputFilled]} value={anagramaPreview} editable={false} />
-          <Text style={styles.helperText}>Se calcula como "REFERENCIA - NOMBRE DEL BANCO".</Text>
+          <TextInput
+            style={[styles.input, styles.inputFilled]}
+            value={anagramaPreview}
+            editable={false}
+          />
+          <Text style={styles.helperText}>
+            Se calcula como "REFERENCIA - NOMBRE DEL BANCO".
+          </Text>
         </View>
       </FormSection>
     </FormScreen>

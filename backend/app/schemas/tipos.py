@@ -1,22 +1,24 @@
-# backend/app/schemas/tipos.py
-
 """
-Schemas Pydantic para los TIPOS de GapptoMobile v3:
+Ruta: backend/app/schemas/tipos.py
+Versión: 2.0.0
+Descripción:
+Schemas Pydantic para los TIPOS de GapptoMobile v3.
 
+Incluye:
 - TipoGasto
 - TipoIngreso
 - TipoSegmentoGasto
 
 Reglas generales:
-- El nombre SIEMPRE se tratará en MAYÚSCULAS en la lógica del router/service.
-- Los IDs se generan en el backend (no los envía el cliente).
+- El nombre se normaliza en routers/services.
+- Los IDs se generan en backend.
+- Se añade soporte para contadores reales de relaciones:
+    * associated_count
 
-Ajustes v3:
-- TipoIngreso ahora pertenece a una rama de ingreso (rama_id).
-- Esto permite el nuevo flujo funcional:
-    1) elegir rama de ingreso
-    2) mostrar los tipos asociados a esa rama
-    3) guardar el ingreso con rama_id + tipo_id
+Objetivo funcional:
+- Permitir que backend exponga, junto a cada auxiliar,
+  el número real de registros asociados sin perder el resto
+  del contrato de datos actual.
 """
 
 from __future__ import annotations
@@ -69,6 +71,10 @@ class TipoGastoRead(TipoGastoBase):
     Schema de salida para TipoGasto.
     """
     id: str
+    associated_count: int = Field(
+        0,
+        description="Número real de registros asociados al tipo de gasto.",
+    )
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -86,7 +92,7 @@ class TipoIngresoBase(BaseModel):
     - rama_id: FK a TipoRamasIngreso.
 
     Nota funcional:
-    - Ahora cada tipo de ingreso pertenece obligatoriamente a una rama.
+    - Cada tipo de ingreso pertenece obligatoriamente a una rama.
     - Esto permite que la app primero muestre ramas y luego
       filtre los tipos de ingreso por rama.
     """
@@ -122,6 +128,10 @@ class TipoIngresoRead(TipoIngresoBase):
     a qué rama pertenece cada tipo.
     """
     id: str
+    associated_count: int = Field(
+        0,
+        description="Número real de registros asociados al tipo de ingreso.",
+    )
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -160,6 +170,10 @@ class TipoSegmentoGastoRead(TipoSegmentoGastoBase):
     Schema de salida para TipoSegmentoGasto.
     """
     id: str
+    associated_count: int = Field(
+        0,
+        description="Número real de registros asociados al segmento de gasto.",
+    )
 
     model_config = ConfigDict(from_attributes=True)
 

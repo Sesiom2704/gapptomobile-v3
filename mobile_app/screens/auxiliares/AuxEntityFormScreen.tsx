@@ -1,6 +1,6 @@
 /**
  * Ruta: mobile_app/screens/auxiliares/AuxEntityFormScreen.tsx
- * Versión: 2.0.0
+ * Versión: 2.2.1
  * Descripción:
  * Formulario genérico para creación y edición de auxiliares y proveedores.
  *
@@ -10,6 +10,7 @@
  *   * tipo_gasto
  *   * tipo_ingreso
  *   * tipo_ramas_ingreso
+ *   * tipo_ramas_proveedores
  *   * tipo_subsegmento_proveedor
  *   * otros auxiliares simples
  * - Gestión avanzada de proveedor:
@@ -22,13 +23,19 @@
  *
  * Cambios de esta versión:
  * - Corrige el envío de `subsegmento_id` al crear proveedor.
- * - Mantiene compatibilidad con `subsegmento` como texto legacy.
- * - Reorganiza el formulario de proveedor en secciones funcionales:
- *   * Datos básicos
- *   * Ubicación
- *   * Contacto y fiscal
- *   * Operativa
- * - Mantiene componentes visuales existentes del proyecto.
+ * - Añade flujo correcto de creación hija para:
+ *   * Rama proveedor
+ *   * Subsegmento proveedor
+ * - Los formularios hijos se abren con `push`, no con `navigate`,
+ *   evitando reutilización de estado/params del proveedor.
+ * - Al volver:
+ *   * la rama nueva queda seleccionada automáticamente
+ *   * el subsegmento nuevo queda seleccionado automáticamente
+ * - El subsegmento se abre con la rama del proveedor ya precargada.
+ * - Ajusta el bloque "Operativa" para mostrar:
+ *   * Activo
+ *   * Acepta urgencias
+ *   en una misma línea.
  */
 
 import React, { useEffect, useMemo, useState } from 'react';
@@ -141,6 +148,7 @@ export const AuxEntityFormScreen: React.FC<Props> = ({ navigation, route }) => {
   const isProveedor = auxType === 'proveedor';
   const isTipoGasto = auxType === 'tipo_gasto';
   const isTipoIngreso = auxType === 'tipo_ingreso';
+  const isTipoRamaProveedor = auxType === 'tipo_ramas_proveedores';
   const isSubsegmentoProveedor = auxType === 'tipo_subsegmento_proveedor';
 
   const isEditMode = !!(editingProveedor || editingItem);
@@ -170,7 +178,9 @@ export const AuxEntityFormScreen: React.FC<Props> = ({ navigation, route }) => {
   const [ramasIngreso, setRamasIngreso] = useState<Array<{ id: string; nombre: string }>>([]);
   const [busquedaRamaIngreso, setBusquedaRamaIngreso] = useState('');
 
-  const [subsegmentoRamaId, setSubsegmentoRamaId] = useState<string | null>(null);
+  const [subsegmentoRamaId, setSubsegmentoRamaId] = useState<string | null>(
+    route?.params?.defaultRamaId ?? null
+  );
   const [subsegmentoRamasProveedor, setSubsegmentoRamasProveedor] = useState<RamaProveedor[]>([]);
   const [busquedaSubsegmentoRama, setBusquedaSubsegmentoRama] = useState('');
 
@@ -511,6 +521,10 @@ export const AuxEntityFormScreen: React.FC<Props> = ({ navigation, route }) => {
         if (isSubsegmentoProveedor) {
           const rp = await listRamasProveedores();
           setSubsegmentoRamasProveedor(rp ?? []);
+
+          if (route?.params?.defaultRamaId && !editingItem?.rama_id) {
+            setSubsegmentoRamaId(route.params.defaultRamaId);
+          }
         }
       } catch (e) {
         console.error('[AuxEntityForm] Error cargando catálogos auxiliares', e);
@@ -519,7 +533,7 @@ export const AuxEntityFormScreen: React.FC<Props> = ({ navigation, route }) => {
     };
 
     void loadCatalogs();
-  }, [isTipoGasto, isTipoIngreso, isSubsegmentoProveedor]);
+  }, [isTipoGasto, isTipoIngreso, isSubsegmentoProveedor, route?.params?.defaultRamaId, editingItem?.rama_id]);
 
   useEffect(() => {
     if (!isProveedor) return;
@@ -549,7 +563,7 @@ export const AuxEntityFormScreen: React.FC<Props> = ({ navigation, route }) => {
   }, [isProveedor, ramaId, ramaNombre, ramaOptions, ramaBloqueada, busquedaRamaProveedor]);
 
   // ==========================================================
-  // Integración retorno desde LocalidadFormScreen
+  // Integración retorno desde formularios hijos
   // ==========================================================
   useEffect(() => {
     const auxResult = route?.params?.auxResult;
@@ -595,8 +609,54 @@ export const AuxEntityFormScreen: React.FC<Props> = ({ navigation, route }) => {
       });
 
       buildRegionAndPaisOptionsFromLocalidades([loc]);
+      return;
     }
-  }, [route?.params?.auxResult, isProveedor, navigation]);
+
+    if (auxResult?.type === 'tipo_ramas_proveedores' && auxResult?.item) {
+      const nuevaRama = auxResult.item as RamaProveedor;
+
+      setRamaOptions((prev) => {
+        const exists = prev.some((x) => x.id === nuevaRama.id);
+        if (exists) {
+          return prev.map((x) => (x.id === nuevaRama.id ? nuevaRama : x));
+        }
+        return [nuevaRama, ...prev];
+      });
+
+      setRamaId(nuevaRama.id);
+      setRamaNombre(nuevaRama.nombre);
+      setSubsegmentoId(null);
+      setBusquedaRamaProveedor('');
+      setBusquedaSubsegmento('');
+
+      return;
+    }
+
+    if (auxResult?.type === 'tipo_subsegmento_proveedor' && auxResult?.item) {
+      const nuevoSubsegmento = auxResult.item as TipoSubsegmentoProveedorItem;
+
+      setSubsegmentoOptions((prev) => {
+        const exists = prev.some((x) => x.id === nuevoSubsegmento.id);
+        if (exists) {
+          return prev.map((x) => (x.id === nuevoSubsegmento.id ? nuevoSubsegmento : x));
+        }
+        return [nuevoSubsegmento, ...prev];
+      });
+
+      if (nuevoSubsegmento.rama_id) {
+        setRamaId(nuevoSubsegmento.rama_id);
+        const ramaEncontrada = ramaOptions.find((r) => r.id === nuevoSubsegmento.rama_id);
+        if (ramaEncontrada?.nombre) {
+          setRamaNombre(ramaEncontrada.nombre);
+        }
+      }
+
+      setSubsegmentoId(nuevoSubsegmento.id);
+      setBusquedaSubsegmento('');
+
+      void ensureSubsegmentosProveedorLoaded(nuevoSubsegmento.rama_id ?? ramaId ?? null);
+    }
+  }, [route?.params?.auxResult, isProveedor, navigation, ramaOptions, ramaId]);
 
   // ==========================================================
   // Filtrados
@@ -727,6 +787,28 @@ export const AuxEntityFormScreen: React.FC<Props> = ({ navigation, route }) => {
 
     await ensureRegionesLoaded();
     await ensurePaisesLoaded();
+  };
+
+  const handleNuevaRamaProveedor = () => {
+    navigation.push('AuxEntityForm', {
+      auxType: 'tipo_ramas_proveedores',
+      origin,
+      returnRouteKey: route?.key,
+    });
+  };
+
+  const handleNuevoSubsegmentoProveedor = () => {
+    if (!ramaId) {
+      Alert.alert('Campo requerido', 'Debes seleccionar antes una rama de proveedor.');
+      return;
+    }
+
+    navigation.push('AuxEntityForm', {
+      auxType: 'tipo_subsegmento_proveedor',
+      origin,
+      returnRouteKey: route?.key,
+      defaultRamaId: ramaId,
+    });
   };
 
   const handleSelectLocalidad = (loc: LocalidadWithContext) => {
@@ -1002,7 +1084,7 @@ export const AuxEntityFormScreen: React.FC<Props> = ({ navigation, route }) => {
       if (isSubsegmentoProveedor) {
         payload = {
           nombre: nombreFinal,
-          rama_id: subsegmentoRamaId,
+          rama_id: subsegmentoRamaId ?? route?.params?.defaultRamaId ?? null,
         };
       }
 
@@ -1472,6 +1554,10 @@ export const AuxEntityFormScreen: React.FC<Props> = ({ navigation, route }) => {
       ? isEditMode
         ? 'Editar tipo de ingreso'
         : 'Nuevo tipo de ingreso'
+      : auxType === 'tipo_ramas_proveedores'
+      ? isEditMode
+        ? 'Editar rama de proveedor'
+        : 'Nueva rama de proveedor'
       : auxType === 'tipo_subsegmento_proveedor'
       ? isEditMode
         ? 'Editar subsegmento de proveedor'
@@ -1549,6 +1635,8 @@ export const AuxEntityFormScreen: React.FC<Props> = ({ navigation, route }) => {
                 ? 'Configuración tipo de ingreso'
                 : isSubsegmentoProveedor
                 ? 'Configuración subsegmento de proveedor'
+                : isTipoRamaProveedor
+                ? 'Configuración rama de proveedor'
                 : 'Configuración'
             }
           >
@@ -1671,8 +1759,8 @@ export const AuxEntityFormScreen: React.FC<Props> = ({ navigation, route }) => {
             <View style={styles.field}>
               <InlineSearchSelect<RamaProveedor>
                 label="Rama proveedor"
-                onAddPress={NOOP}
-                addAccessibilityLabel="Añadir (no aplica)"
+                onAddPress={handleNuevaRamaProveedor}
+                addAccessibilityLabel="Crear rama proveedor"
                 disabled={ramaBloqueada}
                 selected={selectedRama}
                 selectedLabel={(r) => r.nombre}
@@ -1703,8 +1791,8 @@ export const AuxEntityFormScreen: React.FC<Props> = ({ navigation, route }) => {
             <View style={styles.field}>
               <InlineSearchSelect<TipoSubsegmentoProveedorItem>
                 label="Subsegmento proveedor"
-                onAddPress={NOOP}
-                addAccessibilityLabel="Añadir (no aplica)"
+                onAddPress={handleNuevoSubsegmentoProveedor}
+                addAccessibilityLabel="Crear subsegmento proveedor"
                 disabled={!ramaId}
                 selected={selectedSubsegmento}
                 selectedLabel={(x) => x.nombre}
@@ -1930,46 +2018,48 @@ export const AuxEntityFormScreen: React.FC<Props> = ({ navigation, route }) => {
           </FormSection>
 
           <FormSection title="Operativa">
-            <View style={styles.field}>
-              <Text style={styles.label}>Activo</Text>
-              <View style={ui.booleanRow}>
-                <View style={ui.booleanItem}>
-                  <PillButton
-                    label="Sí"
-                    selected={activo === true}
-                    onPress={() => setActivo(true)}
-                    size="sm"
-                  />
-                </View>
-                <View style={ui.booleanItem}>
-                  <PillButton
-                    label="No"
-                    selected={activo === false}
-                    onPress={() => setActivo(false)}
-                    size="sm"
-                  />
+            <View style={ui.inlineFieldsRow}>
+              <View style={[styles.field, ui.inlineFieldHalf]}>
+                <Text style={styles.label}>Activo</Text>
+                <View style={ui.booleanRow}>
+                  <View style={ui.booleanItem}>
+                    <PillButton
+                      label="Sí"
+                      selected={activo === true}
+                      onPress={() => setActivo(true)}
+                      size="sm"
+                    />
+                  </View>
+                  <View style={ui.booleanItem}>
+                    <PillButton
+                      label="No"
+                      selected={activo === false}
+                      onPress={() => setActivo(false)}
+                      size="sm"
+                    />
+                  </View>
                 </View>
               </View>
-            </View>
 
-            <View style={styles.field}>
-              <Text style={styles.label}>Acepta urgencias</Text>
-              <View style={ui.booleanRow}>
-                <View style={ui.booleanItem}>
-                  <PillButton
-                    label="Sí"
-                    selected={aceptaUrgencias === true}
-                    onPress={() => setAceptaUrgencias(true)}
-                    size="sm"
-                  />
-                </View>
-                <View style={ui.booleanItem}>
-                  <PillButton
-                    label="No"
-                    selected={aceptaUrgencias === false}
-                    onPress={() => setAceptaUrgencias(false)}
-                    size="sm"
-                  />
+              <View style={[styles.field, ui.inlineFieldHalf]}>
+                <Text style={styles.label}>Acepta urgencias</Text>
+                <View style={ui.booleanRow}>
+                  <View style={ui.booleanItem}>
+                    <PillButton
+                      label="Sí"
+                      selected={aceptaUrgencias === true}
+                      onPress={() => setAceptaUrgencias(true)}
+                      size="sm"
+                    />
+                  </View>
+                  <View style={ui.booleanItem}>
+                    <PillButton
+                      label="No"
+                      selected={aceptaUrgencias === false}
+                      onPress={() => setAceptaUrgencias(false)}
+                      size="sm"
+                    />
+                  </View>
                 </View>
               </View>
             </View>
@@ -2015,6 +2105,24 @@ const ui = StyleSheet.create({
     paddingTop: 12,
     paddingBottom: 12,
   },
+
+  /**
+   * Contenedor en línea para mostrar dos campos del bloque Operativa
+   * en horizontal, manteniendo intacta la lógica de cada uno.
+   */
+  inlineFieldsRow: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: spacing.md,
+  },
+
+  /**
+   * Cada bloque ocupa la mitad disponible.
+   */
+  inlineFieldHalf: {
+    flex: 1,
+  },
+
   booleanRow: {
     flexDirection: 'row',
     gap: spacing.sm,

@@ -1,3 +1,20 @@
+/**
+ * Ruta: mobile_app/screens/dia/DayToDayKpisScreen.tsx
+ * Versión: 2.0.0
+ * Descripción:
+ * Pantalla de KPIs Día a Día para profundizar en el análisis de gastos cotidianos.
+ *
+ * Responsabilidades:
+ * - Mostrar totales mensuales y su reparto entre pagado por mí e invitado.
+ * - Mostrar insights automáticos sobre comportamiento de gasto.
+ * - Mostrar ranking por contenedores y permitir seleccionar uno.
+ * - Mostrar ranking por proveedores según filtros activos.
+ * - Limitar el ranking de proveedores a 5 elementos por grupo y permitir desplegar todos.
+ * - Mostrar subcategorías por contenedor cuando aplica.
+ * - Mostrar resúmenes, concentración y series temporales.
+ * - Mantener navegación hacia listados y análisis relacionados.
+ */
+
 // mobile_app/screens/dia/DayToDayKpisScreen.tsx
 // -----------------------------------------------------------------------------
 // KPIs Día a Día (pantalla “profundización”)
@@ -16,6 +33,9 @@
 // - Añadir “Ranking por proveedores” debajo de “Ranking por contenedores”
 //   y, si hay componentes (OCIO), mostrar ranking por componente (Transporte/Hospedaje/Actividades) usando tipo_id.
 //
+// AJUSTE NUEVO:
+// - Limitar el ranking por proveedores a 5 elementos por grupo.
+// - Añadir botón “Ver todos / Ver menos” para desplegar o colapsar todos.
 // -----------------------------------------------------------------------------
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
@@ -311,7 +331,7 @@ function readSplit(obj: any): Split {
     safeNum(obj?.pagado) ||
     safeNum(obj?.importe_pagado) ||
     safeNum(obj?.gastado_pagado) ||
-    safeNum(obj?.gastado_mes) || // fallback antiguo (dependía de pago)
+    safeNum(obj?.gastado_mes) ||
     safeNum(obj?.importe_pagado_por_mi) ||
     0;
 
@@ -362,6 +382,13 @@ export const DayToDayKpisScreen: React.FC = () => {
 
   // Ranking desplegable
   const [rankingExpanded, setRankingExpanded] = useState(false);
+
+  /**
+   * Nuevo estado para ranking de proveedores.
+   * false = mostrar solo top 5 por grupo
+   * true  = mostrar todos los proveedores del grupo
+   */
+  const [providerRankingExpanded, setProviderRankingExpanded] = useState(false);
 
   // Data
   const [data, setData] = useState<DayToDayAnalysisResponse | null>(null);
@@ -420,6 +447,14 @@ export const DayToDayKpisScreen: React.FC = () => {
   useEffect(() => {
     setSelectedSubtipoId(null);
   }, [selectedCategoryKey]);
+
+  /**
+   * Al cambiar el contexto de análisis, colapsamos el ranking de proveedores.
+   * Esto evita que el usuario se quede expandido en un contexto anterior.
+   */
+  useEffect(() => {
+    setProviderRankingExpanded(false);
+  }, [selectedView, selectedCategoryKey, selectedSubtipoId, pagoFiltro, selectedMonth]);
 
   // --------------------
   // Carga de datos
@@ -675,10 +710,7 @@ export const DayToDayKpisScreen: React.FC = () => {
   }, [insightsArr]);
 
   const isSupermarketLowContribution = Boolean(supermercadoInsight);
-  const supermarketPaidRatio = safeNum(supermercadoInsight?.meta?.paid_pct ?? 0); // ya viene en %
-  // (opcional por si quieres mostrar importes)
-  // const supermarketPaid = safeNum(supermercadoInsight?.meta?.paid ?? 0);
-  // const supermarketTotal = safeNum(supermercadoInsight?.meta?.total ?? 0);
+  const supermarketPaidRatio = safeNum(supermercadoInsight?.meta?.paid_pct ?? 0);
 
   // --------------------
   // Ranking por proveedores (debajo del ranking por contenedores)
@@ -754,6 +786,14 @@ export const DayToDayKpisScreen: React.FC = () => {
 
     return groups;
   }, [selectedView, selectedSubtipoId, effectiveSelectedCategory?.key, providersInContext]);
+
+  /**
+   * Indica si existe al menos un grupo con más de 5 proveedores.
+   * Solo entonces tiene sentido mostrar el botón "Ver todos".
+   */
+  const hasMoreThanFiveProviders = useMemo(() => {
+    return (providerGroups || []).some((g: any) => (g?.items?.length ?? 0) > 5);
+  }, [providerGroups]);
 
   // --------------------
   // Render
@@ -1100,60 +1140,85 @@ export const DayToDayKpisScreen: React.FC = () => {
                 </View>
               </View>
 
-              {/* ✅ NUEVO: Ranking por proveedores (debajo de contenedores) */}
+              {/* ✅ Ranking por proveedores */}
               <View style={panelStyles.section}>
                 <SectionHeader
                   title="Ranking por proveedores"
                   onInfo={() =>
                     info.open(
                       'Ranking por proveedores',
-                      'Top proveedores del mes según filtros (pago, contenedor y/o subtipo). Si el contenedor tiene componentes (p.ej. OCIO), se muestra el ranking por componente: Transporte/Hospedaje/Actividades.'
+                      'Top proveedores del mes según filtros (pago, contenedor y/o subtipo). Por defecto se muestran 5 proveedores por grupo. Si el contenedor tiene componentes (p.ej. OCIO), se muestra el ranking por componente: Transporte/Hospedaje/Actividades.'
                     )
                   }
                 />
 
                 <View style={panelStyles.card}>
-                  {(providerGroups || []).map((g) => (
-                    <View key={g.key} style={{ marginBottom: 10 }}>
-                      <Text style={styles.providerGroupTitle}>{g.title}</Text>
+                  <View style={styles.rankHeaderRow}>
+                    <Text style={analysisStyles.cardSubtitle}>
+                      {providerRankingExpanded ? 'Todos los proveedores' : 'Top 5 proveedores'}
+                    </Text>
 
-                      {!g.items || g.items.length === 0 ? (
-                        <Text style={analysisStyles.emptyText}>Sin proveedores para este componente.</Text>
-                      ) : (
-                        g.items.slice(0, 12).map((p: any, idx: number) => (
-                          <TouchableOpacity
-                            key={`${g.key}-${p.nombre}-${idx}`}
-                            style={styles.providerRow}
-                            activeOpacity={0.85}
-                            onPress={() =>
-                              navigation.navigate('GastosList', {
-                                initialFiltro: 'cotidiano',
-                                fromDiaADia: true,
-                                initialSearchText: p.nombre,
-                              } as any)
-                            }
-                          >
-                            <View style={styles.providerLeft}>
-                              <View style={styles.providerAvatar}>
-                                <Text style={styles.providerAvatarText}>
-                                  {(String(p.nombre || '??').slice(0, 2)).toUpperCase()}
-                                </Text>
+                    {hasMoreThanFiveProviders ? (
+                      <TouchableOpacity
+                        activeOpacity={0.85}
+                        onPress={() => setProviderRankingExpanded((prev) => !prev)}
+                        style={styles.rankExpandBtn}
+                      >
+                        <Text style={styles.rankExpandText}>{providerRankingExpanded ? 'Ver menos' : 'Ver todos'}</Text>
+                        <Ionicons
+                          name={providerRankingExpanded ? 'chevron-up' : 'chevron-down'}
+                          size={16}
+                          color={colors.textSecondary}
+                        />
+                      </TouchableOpacity>
+                    ) : null}
+                  </View>
+
+                  {(providerGroups || []).map((g) => {
+                    const itemsToRender = providerRankingExpanded ? g.items : g.items.slice(0, 5);
+
+                    return (
+                      <View key={g.key} style={{ marginBottom: 10 }}>
+                        <Text style={styles.providerGroupTitle}>{g.title}</Text>
+
+                        {!g.items || g.items.length === 0 ? (
+                          <Text style={analysisStyles.emptyText}>Sin proveedores para este componente.</Text>
+                        ) : (
+                          itemsToRender.map((p: any, idx: number) => (
+                            <TouchableOpacity
+                              key={`${g.key}-${p.nombre}-${idx}`}
+                              style={styles.providerRow}
+                              activeOpacity={0.85}
+                              onPress={() =>
+                                navigation.navigate('GastosList', {
+                                  initialFiltro: 'cotidiano',
+                                  fromDiaADia: true,
+                                  initialSearchText: p.nombre,
+                                } as any)
+                              }
+                            >
+                              <View style={styles.providerLeft}>
+                                <View style={styles.providerAvatar}>
+                                  <Text style={styles.providerAvatarText}>
+                                    {(String(p.nombre || '??').slice(0, 2)).toUpperCase()}
+                                  </Text>
+                                </View>
+
+                                <View>
+                                  <Text style={styles.providerName}>{p.nombre}</Text>
+                                  <Text style={styles.providerSub}>{safeNum(p.num_compras)} compras</Text>
+                                </View>
                               </View>
 
-                              <View>
-                                <Text style={styles.providerName}>{p.nombre}</Text>
-                                <Text style={styles.providerSub}>{safeNum(p.num_compras)} compras</Text>
+                              <View style={styles.providerRight}>
+                                <Text style={styles.providerAmount}>{fmtCurrency(safeNum(p.importe))}</Text>
                               </View>
-                            </View>
-
-                            <View style={styles.providerRight}>
-                              <Text style={styles.providerAmount}>{fmtCurrency(safeNum(p.importe))}</Text>
-                            </View>
-                          </TouchableOpacity>
-                        ))
-                      )}
-                    </View>
-                  ))}
+                            </TouchableOpacity>
+                          ))
+                        )}
+                      </View>
+                    );
+                  })}
                 </View>
               </View>
 

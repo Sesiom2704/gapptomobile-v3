@@ -1,6 +1,6 @@
 """
 Ruta: backend/app/schemas/ramas.py
-Versión: 1.2.0
+Versión: 2.0.0
 Descripción:
 Schemas Pydantic para las tablas auxiliares de ramas y subsegmentos
 de GapptoMobile v3.
@@ -15,6 +15,7 @@ Reglas:
 - El nombre se normaliza en routers/services, no en el schema.
 - Los IDs se generan en backend.
 - Los schemas de update permiten modificación parcial.
+- Se añade soporte para contadores reales de registros asociados.
 """
 
 from __future__ import annotations
@@ -54,6 +55,10 @@ class TipoRamaIngresoRead(TipoRamaIngresoBase):
     Respuesta de lectura de rama de ingreso.
     """
     id: str
+    associated_count: int = Field(
+        0,
+        description="Número real de registros asociados a la rama de ingreso.",
+    )
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -88,6 +93,10 @@ class TipoRamaGastoRead(TipoRamaGastoBase):
     Respuesta de lectura de rama de gasto.
     """
     id: str
+    associated_count: int = Field(
+        0,
+        description="Número real de registros asociados a la rama de gasto.",
+    )
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -122,6 +131,10 @@ class TipoRamaProveedorRead(TipoRamaProveedorBase):
     Respuesta de lectura de rama de proveedor.
     """
     id: str
+    associated_count: int = Field(
+        0,
+        description="Número real de registros asociados a la rama de proveedor.",
+    )
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -170,6 +183,10 @@ class TipoSubsegmentoProveedorRead(TipoSubsegmentoProveedorBase):
     Respuesta de lectura de subsegmento de proveedor.
     """
     id: str
+    associated_count: int = Field(
+        0,
+        description="Número real de proveedores asociados al subsegmento.",
+    )
 
     model_config = ConfigDict(from_attributes=True)
 

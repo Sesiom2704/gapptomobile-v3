@@ -1,4 +1,15 @@
-// mobile_app/screens/cuentasbancarias/CuentasBancariasListScreen.tsx
+/**
+ * Ruta: mobile_app/screens/cuentasbancarias/CuentasBancariasListScreen.tsx
+ * Versión: 2.0.0
+ * Descripción:
+ * Pantalla de listado de cuentas bancarias.
+ *
+ * Responsabilidades:
+ * - Mostrar las cuentas bancarias del usuario.
+ * - Permitir búsqueda.
+ * - Navegar a creación/edición.
+ * - Mostrar liquidez, estado y contador real de registros asociados.
+ */
 
 import React, { useCallback, useMemo, useState } from 'react';
 import { View, Text, ScrollView, TouchableOpacity, TextInput } from 'react-native';
@@ -12,6 +23,11 @@ import { EuroformatEuro } from '../../utils/format';
 import { listCuentas, CuentaBancaria } from '../../services/cuentasApi';
 
 type Props = { navigation: any };
+
+function countLabel(count?: number | null, singular = 'registro', plural = 'registros') {
+  const safe = Number(count ?? 0);
+  return `${safe} ${safe === 1 ? singular : plural} asociados`;
+}
 
 export const CuentasBancariasListScreen: React.FC<Props> = ({ navigation }) => {
   const [items, setItems] = useState<CuentaBancaria[]>([]);
@@ -31,7 +47,6 @@ export const CuentasBancariasListScreen: React.FC<Props> = ({ navigation }) => {
     }
   }, []);
 
-  // Refresca SIEMPRE al entrar/volver a esta pantalla
   useFocusEffect(
     useCallback(() => {
       console.log('[CuentasBancariasList] focus -> reload');
@@ -51,6 +66,7 @@ export const CuentasBancariasListScreen: React.FC<Props> = ({ navigation }) => {
   }, [items, search]);
 
   const handleAdd = () => navigation.navigate('CuentaBancariaForm', { mode: 'create' });
+
   const handleEdit = (item: CuentaBancaria) =>
     navigation.navigate('CuentaBancariaForm', { mode: 'edit', item });
 
@@ -112,10 +128,8 @@ export const CuentasBancariasListScreen: React.FC<Props> = ({ navigation }) => {
                 activeOpacity={0.9}
               >
                 <View style={panelStyles.menuTextContainer}>
-                  {/* “Nombre” funcional: ANAGRAMA */}
                   <Text style={panelStyles.menuTitle}>{(c.anagrama ?? '').toUpperCase()}</Text>
 
-                  {/* Subtítulo: referencia */}
                   {c.referencia ? (
                     <Text style={panelStyles.menuSubtitle}>
                       {(c.referencia ?? '').toUpperCase()}
@@ -126,9 +140,12 @@ export const CuentasBancariasListScreen: React.FC<Props> = ({ navigation }) => {
                     Liquidez: {EuroformatEuro(c.liquidez ?? 0, 'signed')}
                   </Text>
 
-                  {/* Estado activo */}
                   <Text style={panelStyles.menuSubtitle}>
                     Estado: {c.activo ? 'ACTIVO' : 'INACTIVO'}
+                  </Text>
+
+                  <Text style={panelStyles.menuSubtitle}>
+                    {countLabel(c.associatedCount)}
                   </Text>
                 </View>
 

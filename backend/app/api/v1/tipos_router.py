@@ -1,33 +1,36 @@
-# backend/app/api/v1/tipos_router.py
-
 """
+Ruta: backend/app/api/v1/tipos_router.py
+Versión: 2.0.0
+Descripción:
 API v1 - TIPOS
 - TipoGasto
 - TipoIngreso
 - TipoSegmentoGasto
 
-Basado en la lógica de la v2, manteniendo:
+Responsabilidades:
+- CRUD de tipos auxiliares.
+- Normalización de nombres a MAYÚSCULAS.
+- Validación de duplicados en create/update.
+- Exposición de contadores reales de registros asociados.
 
-- NOMBRE siempre en MAYÚSCULAS.
-- Unicidad por NOMBRE en creación.
-- CRUD simple para cada entidad.
-
-Mejoras v3:
-- IDs generados en backend (TGAS-/TING-/TSEG-).
-- Compatibilidad Pydantic v1/v2 en updates.
-- Control de duplicados también al actualizar.
-- NUEVO:
-    * TipoIngreso ahora pertenece a una rama de ingreso (rama_id).
-    * Se puede filtrar el listado de tipos de ingreso por rama_id.
-    * Se valida que la rama de ingreso exista al crear/editar.
+Cambios de esta versión:
+- Se añade `associated_count` en listados de:
+    * TipoGasto
+    * TipoIngreso
+    * TipoSegmentoGasto
+- Los contadores se calculan desde relaciones reales del dominio:
+    * TipoGasto: gastos + gastos_cotidianos + inversiones
+    * TipoIngreso: ingresos
+    * TipoSegmentoGasto: gastos
 """
 
 from __future__ import annotations
 
-from typing import List, Optional, Any
+from typing import List, Optional, Any, Dict
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session
+from sqlalchemy import func
 
 from backend.app.db.session import get_db
 from backend.app.db import models
@@ -128,6 +131,122 @@ def _get_rama_ingreso_or_404(db: Session, rama_id: str) -> models.TipoRamasIngre
     return obj
 
 
+def _build_count_map(query_rows: list[tuple[str, int]]) -> Dict[str, int]:
+    """
+    Convierte filas agregadas SQL [(fk_id, count), ...] a dict.
+    """
+    out: Dict[str, int] = {}
+    for fk_id, qty in query_rows:
+        key = str(fk_id or "").strip()
+        if not key:
+            continue
+        out[key] = int(qty or 0)
+    return out
+
+
+def _merge_count_maps(*maps: Dict[str, int]) -> Dict[str, int]:
+    """
+    Suma múltiples mapas de contadores por la misma clave.
+    """
+    merged: Dict[str, int] = {}
+
+    for mp in maps:
+        for key, value in mp.items():
+            merged[key] = merged.get(key, 0) + int(value or 0)
+
+    return merged
+
+
+def _serialize_tipo_gasto(item: models.TipoGasto, associated_count: int) -> dict:
+    return {
+        "id": item.id,
+        "nombre": item.nombre,
+        "rama_id": item.rama_id,
+        "segmento_id": item.segmento_id,
+        "associated_count": int(associated_count or 0),
+    }
+
+
+def _serialize_tipo_ingreso(item: models.TipoIngreso, associated_count: int) -> dict:
+    return {
+        "id": item.id,
+        "nombre": item.nombre,
+        "rama_id": item.rama_id,
+        "associated_count": int(associated_count or 0),
+    }
+
+
+def _serialize_tipo_segmento(item: models.TipoSegmentoGasto, associated_count: int) -> dict:
+    return {
+        "id": item.id,
+        "nombre": item.nombre,
+        "associated_count": int(associated_count or 0),
+    }
+
+
+def _get_tipo_gasto_count_map(db: Session) -> Dict[str, int]:
+    """
+    Cuenta referencias reales por tipo de gasto:
+    - gastos
+    - gastos_cotidianos
+    - inversiones
+    """
+    gastos_rows = (
+        db.query(models.Gasto.tipo_id, func.count(models.Gasto.id))
+        .filter(models.Gasto.tipo_id.isnot(None))
+        .group_by(models.Gasto.tipo_id)
+        .all()
+    )
+
+    cotidianos_rows = (
+        db.query(models.GastoCotidiano.tipo_id, func.count(models.GastoCotidiano.id))
+        .filter(models.GastoCotidiano.tipo_id.isnot(None))
+        .group_by(models.GastoCotidiano.tipo_id)
+        .all()
+    )
+
+    inversiones_rows = (
+        db.query(models.Inversion.tipo_gasto_id, func.count(models.Inversion.id))
+        .filter(models.Inversion.tipo_gasto_id.isnot(None))
+        .group_by(models.Inversion.tipo_gasto_id)
+        .all()
+    )
+
+    return _merge_count_maps(
+        _build_count_map(gastos_rows),
+        _build_count_map(cotidianos_rows),
+        _build_count_map(inversiones_rows),
+    )
+
+
+def _get_tipo_ingreso_count_map(db: Session) -> Dict[str, int]:
+    """
+    Cuenta referencias reales por tipo de ingreso:
+    - ingresos
+    """
+    rows = (
+        db.query(models.Ingreso.tipo_id, func.count(models.Ingreso.id))
+        .filter(models.Ingreso.tipo_id.isnot(None))
+        .group_by(models.Ingreso.tipo_id)
+        .all()
+    )
+    return _build_count_map(rows)
+
+
+def _get_segmento_gasto_count_map(db: Session) -> Dict[str, int]:
+    """
+    Cuenta referencias reales por segmento de gasto:
+    - gastos
+    """
+    rows = (
+        db.query(models.Gasto.segmento_id, func.count(models.Gasto.id))
+        .filter(models.Gasto.segmento_id.isnot(None))
+        .group_by(models.Gasto.segmento_id)
+        .all()
+    )
+    return _build_count_map(rows)
+
+
 # ==========================
 # CRUD TipoGasto
 # ==========================
@@ -154,6 +273,11 @@ def list_tipos_gasto(
     Filtros opcionales:
     - segmento_id
     - rama_id
+
+    Incluye `associated_count` calculado desde relaciones reales:
+    - gastos
+    - gastos_cotidianos
+    - inversiones
     """
     q = db.query(models.TipoGasto)
 
@@ -163,7 +287,13 @@ def list_tipos_gasto(
     if rama_id:
         q = q.filter(models.TipoGasto.rama_id == normalize_upper(rama_id))
 
-    return q.order_by(models.TipoGasto.nombre.asc()).all()
+    items = q.order_by(models.TipoGasto.nombre.asc()).all()
+    count_map = _get_tipo_gasto_count_map(db)
+
+    return [
+        _serialize_tipo_gasto(item, count_map.get(item.id, 0))
+        for item in items
+    ]
 
 
 @router.post(
@@ -204,7 +334,7 @@ def create_tipo_gasto(
     db.add(obj)
     db.commit()
     db.refresh(obj)
-    return obj
+    return _serialize_tipo_gasto(obj, 0)
 
 
 @router.put(
@@ -256,7 +386,9 @@ def update_tipo_gasto(
 
     db.commit()
     db.refresh(obj)
-    return obj
+
+    count_map = _get_tipo_gasto_count_map(db)
+    return _serialize_tipo_gasto(obj, count_map.get(obj.id, 0))
 
 
 @router.delete(
@@ -305,11 +437,11 @@ def list_tipos_ingreso(
     """
     Devuelve la lista de tipos de ingreso.
 
-    Comportamiento nuevo:
+    Comportamiento:
     - Si se informa rama_id, devuelve solo los tipos asociados a esa rama.
-    - Esto permite alimentar la UI:
-        1) seleccionar rama
-        2) cargar tipos de esa rama
+
+    Incluye `associated_count` calculado desde relaciones reales:
+    - ingresos
     """
     q = db.query(models.TipoIngreso)
 
@@ -317,7 +449,13 @@ def list_tipos_ingreso(
         rama_id = normalize_upper(rama_id)
         q = q.filter(models.TipoIngreso.rama_id == rama_id)
 
-    return q.order_by(models.TipoIngreso.nombre.asc()).all()
+    items = q.order_by(models.TipoIngreso.nombre.asc()).all()
+    count_map = _get_tipo_ingreso_count_map(db)
+
+    return [
+        _serialize_tipo_ingreso(item, count_map.get(item.id, 0))
+        for item in items
+    ]
 
 
 @router.post(
@@ -368,7 +506,7 @@ def create_tipo_ingreso(
     db.add(obj)
     db.commit()
     db.refresh(obj)
-    return obj
+    return _serialize_tipo_ingreso(obj, 0)
 
 
 @router.put(
@@ -418,7 +556,9 @@ def update_tipo_ingreso(
 
     db.commit()
     db.refresh(obj)
-    return obj
+
+    count_map = _get_tipo_ingreso_count_map(db)
+    return _serialize_tipo_ingreso(obj, count_map.get(obj.id, 0))
 
 
 @router.delete(
@@ -462,12 +602,21 @@ def list_tipos_segmento(
 ):
     """
     Devuelve la lista completa de segmentos de gasto.
+
+    Incluye `associated_count` calculado desde relaciones reales:
+    - gastos
     """
-    return (
+    items = (
         db.query(models.TipoSegmentoGasto)
         .order_by(models.TipoSegmentoGasto.nombre.asc())
         .all()
     )
+    count_map = _get_segmento_gasto_count_map(db)
+
+    return [
+        _serialize_tipo_segmento(item, count_map.get(item.id, 0))
+        for item in items
+    ]
 
 
 @router.post(
@@ -506,7 +655,7 @@ def create_tipo_segmento(
     db.add(obj)
     db.commit()
     db.refresh(obj)
-    return obj
+    return _serialize_tipo_segmento(obj, 0)
 
 
 @router.put(
@@ -551,7 +700,9 @@ def update_tipo_segmento(
 
     db.commit()
     db.refresh(obj)
-    return obj
+
+    count_map = _get_segmento_gasto_count_map(db)
+    return _serialize_tipo_segmento(obj, count_map.get(obj.id, 0))
 
 
 @router.delete(
