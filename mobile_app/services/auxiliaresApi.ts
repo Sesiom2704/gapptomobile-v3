@@ -1,20 +1,25 @@
-// mobile_app/services/auxiliaresApi.ts
-
 /**
  * Ruta: mobile_app/services/auxiliaresApi.ts
- * Versión: 1.3.0
+ * Versión: 1.2.0
  * Descripción:
- * Servicio centralizado para catálogos auxiliares.
+ * Servicio centralizado para tablas auxiliares de GapptoMobile v3.
  *
  * Responsabilidades:
- * - Resolver la URL real de cada entidad auxiliar.
- * - Listar, crear, actualizar y eliminar registros auxiliares.
- * - Añadir soporte para el nuevo catálogo:
- *     * tipo_subsegmento_proveedor
+ * - Resolver el endpoint correcto según la entidad auxiliar.
+ * - Exponer operaciones CRUD homogéneas:
+ *   * listAux
+ *   * createAux
+ *   * updateAux
+ *   * deleteAux
  *
- * Notas:
- * - Se mantiene compatibilidad con el resto de pantallas existentes.
- * - El tipado sigue siendo flexible para no romper formularios legacy.
+ * Ajustes incluidos:
+ * - Soporte para la nueva entidad:
+ *     * tipo_subsegmento_proveedor
+ * - Tipado específico para:
+ *     * TipoGastoItem
+ *     * TipoIngresoItem
+ *     * TipoSubsegmentoProveedorItem
+ * - Logging robusto de errores Axios.
  */
 
 import axios from 'axios';
@@ -44,12 +49,12 @@ export type TipoIngresoItem = AuxItemBase & {
 };
 
 export type TipoSubsegmentoProveedorItem = AuxItemBase & {
-  rama_id?: string | null;
+  rama_id: string | null;
 };
 
-// ---------------------------------------------------------------------------
+// ============================================================
 // Mapeo entidad -> endpoint backend
-// ---------------------------------------------------------------------------
+// ============================================================
 function endpointFor(entity: AuxEntity): string {
   switch (entity) {
     case 'tipo_ingreso':
@@ -78,30 +83,9 @@ function endpointFor(entity: AuxEntity): string {
   }
 }
 
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-function logAxiosError(prefix: string, entity: AuxEntity, url: string, err: unknown) {
-  if (axios.isAxiosError(err)) {
-    console.error(
-      prefix,
-      entity,
-      err.message,
-      'url=',
-      url,
-      'status=',
-      err.response?.status,
-      'data=',
-      JSON.stringify(err.response?.data ?? null)
-    );
-  } else {
-    console.error(prefix, entity, err);
-  }
-}
-
-// ---------------------------------------------------------------------------
+// ============================================================
 // List
-// ---------------------------------------------------------------------------
+// ============================================================
 export async function listAux<T = any>(
   entity: AuxEntity,
   params?: Record<string, any>
@@ -112,14 +96,29 @@ export async function listAux<T = any>(
     const resp = await api.get<T[]>(url, { params });
     return resp.data ?? [];
   } catch (err) {
-    logAxiosError('[auxiliaresApi] Error listAux', entity, url, err);
+    if (axios.isAxiosError(err)) {
+      console.error(
+        '[auxiliaresApi] Error listAux',
+        entity,
+        'url=',
+        url,
+        'message=',
+        err.message,
+        'status=',
+        err.response?.status,
+        'data=',
+        JSON.stringify(err.response?.data ?? null)
+      );
+    } else {
+      console.error('[auxiliaresApi] Error listAux', entity, err);
+    }
     throw err;
   }
 }
 
-// ---------------------------------------------------------------------------
+// ============================================================
 // Create
-// ---------------------------------------------------------------------------
+// ============================================================
 export async function createAux<T = any>(
   entity: AuxEntity,
   payload: any
@@ -130,40 +129,94 @@ export async function createAux<T = any>(
     const resp = await api.post<T>(url, payload);
     return resp.data as T;
   } catch (err) {
-    logAxiosError('[auxiliaresApi] Error createAux', entity, url, err);
+    if (axios.isAxiosError(err)) {
+      console.error(
+        '[auxiliaresApi] Error createAux',
+        entity,
+        'url=',
+        url,
+        'message=',
+        err.message,
+        'status=',
+        err.response?.status,
+        'data=',
+        JSON.stringify(err.response?.data ?? null)
+      );
+    } else {
+      console.error('[auxiliaresApi] Error createAux', entity, err);
+    }
     throw err;
   }
 }
 
-// ---------------------------------------------------------------------------
+// ============================================================
 // Update
-// ---------------------------------------------------------------------------
+// ============================================================
 export async function updateAux<T = any>(
   entity: AuxEntity,
   id: string,
   payload: any
 ): Promise<T> {
-  const url = `${endpointFor(entity)}/${id}`;
+  const url = `${endpointFor(entity)}/${encodeURIComponent(id)}`;
 
   try {
     const resp = await api.put<T>(url, payload);
     return resp.data as T;
   } catch (err) {
-    logAxiosError('[auxiliaresApi] Error updateAux', entity, url, err);
+    if (axios.isAxiosError(err)) {
+      console.error(
+        '[auxiliaresApi] Error updateAux',
+        entity,
+        'url=',
+        url,
+        'message=',
+        err.message,
+        'status=',
+        err.response?.status,
+        'data=',
+        JSON.stringify(err.response?.data ?? null)
+      );
+    } else {
+      console.error('[auxiliaresApi] Error updateAux', entity, err);
+    }
     throw err;
   }
 }
 
-// ---------------------------------------------------------------------------
+// ============================================================
 // Delete
-// ---------------------------------------------------------------------------
+// ============================================================
 export async function deleteAux(entity: AuxEntity, id: string): Promise<void> {
-  const url = `${endpointFor(entity)}/${id}`;
+  const url = `${endpointFor(entity)}/${encodeURIComponent(id)}`;
 
   try {
     await api.delete(url);
   } catch (err) {
-    logAxiosError('[auxiliaresApi] Error deleteAux', entity, url, err);
+    if (axios.isAxiosError(err)) {
+      console.error(
+        '[auxiliaresApi] Error deleteAux',
+        entity,
+        'url=',
+        url,
+        'message=',
+        err.message,
+        'status=',
+        err.response?.status,
+        'data=',
+        JSON.stringify(err.response?.data ?? null)
+      );
+    } else {
+      console.error('[auxiliaresApi] Error deleteAux', entity, err);
+    }
     throw err;
   }
 }
+
+const auxiliaresApi = {
+  listAux,
+  createAux,
+  updateAux,
+  deleteAux,
+};
+
+export default auxiliaresApi;

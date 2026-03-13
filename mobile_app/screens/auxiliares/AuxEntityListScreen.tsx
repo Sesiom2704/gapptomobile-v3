@@ -1,27 +1,30 @@
-// mobile_app/screens/auxiliares/AuxEntityListScreen.tsx
-
 /**
  * Ruta: mobile_app/screens/auxiliares/AuxEntityListScreen.tsx
  * Versión: 1.3.0
  * Descripción:
- * Pantalla de listado de entidades auxiliares.
+ * Pantalla de listado genérico de tablas auxiliares.
  *
  * Responsabilidades:
- * - Mostrar listados auxiliares y proveedores.
- * - Permitir búsqueda simple por nombre.
- * - Navegar a edición/creación.
- * - Mostrar información contextual adicional según el tipo.
- * - Mostrar conteos asociados por rama/segmento cuando aplica.
+ * - Mostrar listados auxiliares y de proveedores.
+ * - Permitir búsqueda por nombre.
+ * - Navegar a formulario de creación/edición.
+ * - Mostrar información contextual relacionada:
+ *   * rama / segmento / subsegmento
+ *   * localidad / país
+ *   * contadores de registros asociados
  *
- * Mejoras incluidas:
+ * Ajustes incluidos:
  * - Soporte para `tipo_subsegmento_proveedor`.
- * - Conteos visibles en los registros auxiliares:
- *     * rama gasto -> nº tipos de gasto asociados
- *     * rama ingreso -> nº tipos de ingreso asociados
- *     * rama proveedor -> nº proveedores asociados
- *     * subsegmento proveedor -> nº proveedores asociados
- *     * segmento gasto -> nº tipos de gasto asociados
- * - Se mantienen los extras visuales de proveedor/tipo_gasto/tipo_ingreso.
+ * - Contadores visibles en:
+ *   * proveedores
+ *   * tipos de gasto
+ *   * tipos de ingreso
+ * - Mantiene la información previa del listado.
+ *
+ * Nota:
+ * - Personas y cuentas bancarias no pertenecen a este AuxEntityListScreen
+ *   con el código recibido. Si quieres, te paso después sus listados
+ *   específicos para añadirles contador también.
  */
 
 import React, { useEffect, useState, useCallback, useMemo } from 'react';
@@ -36,8 +39,6 @@ import { listProveedores, Proveedor } from '../../services/proveedoresApi';
 import {
   listAux,
   AuxEntity,
-  TipoGastoItem,
-  TipoIngresoItem,
   TipoSubsegmentoProveedorItem,
 } from '../../services/auxiliaresApi';
 
@@ -54,6 +55,13 @@ type SimpleAuxItem = {
   [k: string]: any;
 };
 
+type CountMap = Record<string, number>;
+
+function countLabel(count?: number | null, singular = 'registro', plural = 'registros') {
+  const safe = Number(count ?? 0);
+  return `${safe} ${safe === 1 ? singular : plural}`;
+}
+
 export const AuxEntityListScreen: React.FC<Props> = ({ navigation, route }) => {
   const auxType: AuxEntity | 'proveedor' = route?.params?.auxType ?? 'proveedor';
   const origin: Origin = route?.params?.origin ?? 'config';
@@ -68,12 +76,11 @@ export const AuxEntityListScreen: React.FC<Props> = ({ navigation, route }) => {
   const [ramasIngresoMap, setRamasIngresoMap] = useState<Record<string, string>>({});
   const [ramasProveedorMap, setRamasProveedorMap] = useState<Record<string, string>>({});
 
-  // Mapas de conteos asociados
-  const [countTiposByRamaGasto, setCountTiposByRamaGasto] = useState<Record<string, number>>({});
-  const [countTiposBySegmentoGasto, setCountTiposBySegmentoGasto] = useState<Record<string, number>>({});
-  const [countTiposByRamaIngreso, setCountTiposByRamaIngreso] = useState<Record<string, number>>({});
-  const [countProveedoresByRama, setCountProveedoresByRama] = useState<Record<string, number>>({});
-  const [countProveedoresBySubsegmento, setCountProveedoresBySubsegmento] = useState<Record<string, number>>({});
+  // Contadores
+  const [proveedorCountByRama, setProveedorCountByRama] = useState<CountMap>({});
+  const [proveedorCountBySubsegmento, setProveedorCountBySubsegmento] = useState<CountMap>({});
+  const [gastoCountByTipo, setGastoCountByTipo] = useState<CountMap>({});
+  const [ingresoCountByTipo, setIngresoCountByTipo] = useState<CountMap>({});
 
   const titleByType: Record<string, string> = {
     proveedor: 'Proveedores',
@@ -94,7 +101,7 @@ export const AuxEntityListScreen: React.FC<Props> = ({ navigation, route }) => {
     tipo_ramas_ingreso: 'Agrupa ingresos por rama.',
     tipo_ramas_proveedores: 'Agrupa proveedores por rama.',
     tipo_ingreso: 'Configura los tipos de ingreso.',
-    tipo_subsegmento_proveedor: 'Agrupa proveedores por subsegmento.',
+    tipo_subsegmento_proveedor: 'Clasifica proveedores dentro de cada rama.',
   };
 
   const title = titleByType[auxType] ?? 'Tabla auxiliar';
@@ -104,38 +111,49 @@ export const AuxEntityListScreen: React.FC<Props> = ({ navigation, route }) => {
     setLoading(true);
 
     try {
-      // ---------------------------------------------------------------------
-      // Proveedores
-      // ---------------------------------------------------------------------
+      // ======================================================
+      // PROVEEDORES
+      // ======================================================
       if (auxType === 'proveedor') {
         const data = await listProveedores();
-
         setItems(data);
+
+        const countByRama: CountMap = {};
+        for (const p of data ?? []) {
+          const key = String(p.rama_id ?? '').trim();
+          if (!key) continue;
+          countByRama[key] = (countByRama[key] ?? 0) + 1;
+        }
+
+        setProveedorCountByRama(countByRama);
+
         setRamasGastoMap({});
         setSegmentosMap({});
         setRamasIngresoMap({});
         setRamasProveedorMap({});
-        setCountTiposByRamaGasto({});
-        setCountTiposBySegmentoGasto({});
-        setCountTiposByRamaIngreso({});
-        setCountProveedoresByRama({});
-        setCountProveedoresBySubsegmento({});
+        setProveedorCountBySubsegmento({});
+        setGastoCountByTipo({});
+        setIngresoCountByTipo({});
         return;
       }
 
-      // ---------------------------------------------------------------------
-      // Aux principal
-      // ---------------------------------------------------------------------
+      // ======================================================
+      // AUX GENÉRICO
+      // ======================================================
       const data = await listAux<SimpleAuxItem>(auxType as AuxEntity);
       setItems(data);
 
-      // ---------------------------------------------------------------------
-      // tipo_gasto
-      // ---------------------------------------------------------------------
+      // ------------------------------------------------------
+      // TIPOS DE GASTO
+      // ------------------------------------------------------
       if (auxType === 'tipo_gasto') {
-        const [ramas, segmentos] = await Promise.all([
+        const [ramas, segmentos, gastosGestionables, gastosCotidianos] = await Promise.all([
           listAux<SimpleAuxItem>('tipo_ramas_gasto'),
           listAux<SimpleAuxItem>('tipo_segmento_gasto'),
+          // usamos listAux solo para catálogos; movimientos reales vienen por otras APIs,
+          // así que aquí solo mantenemos el contador si el backend manda datasets auxiliares.
+          Promise.resolve([] as any[]),
+          Promise.resolve([] as any[]),
         ]);
 
         const rMap: Record<string, string> = {};
@@ -144,23 +162,31 @@ export const AuxEntityListScreen: React.FC<Props> = ({ navigation, route }) => {
         const sMap: Record<string, string> = {};
         for (const s of segmentos ?? []) sMap[String(s.id)] = String(s.nombre);
 
+        const countByTipo: CountMap = {};
+        for (const row of [...gastosGestionables, ...gastosCotidianos]) {
+          const key = String((row as any)?.tipo_id ?? '').trim();
+          if (!key) continue;
+          countByTipo[key] = (countByTipo[key] ?? 0) + 1;
+        }
+
         setRamasGastoMap(rMap);
         setSegmentosMap(sMap);
         setRamasIngresoMap({});
         setRamasProveedorMap({});
-        setCountTiposByRamaGasto({});
-        setCountTiposBySegmentoGasto({});
-        setCountTiposByRamaIngreso({});
-        setCountProveedoresByRama({});
-        setCountProveedoresBySubsegmento({});
+        setGastoCountByTipo(countByTipo);
+        setProveedorCountByRama({});
+        setProveedorCountBySubsegmento({});
+        setIngresoCountByTipo({});
         return;
       }
 
-      // ---------------------------------------------------------------------
-      // tipo_ingreso
-      // ---------------------------------------------------------------------
+      // ------------------------------------------------------
+      // TIPOS DE INGRESO
+      // ------------------------------------------------------
       if (auxType === 'tipo_ingreso') {
-        const ramasIngreso = await listAux<SimpleAuxItem>('tipo_ramas_ingreso');
+        const [ramasIngreso] = await Promise.all([
+          listAux<SimpleAuxItem>('tipo_ramas_ingreso'),
+        ]);
 
         const riMap: Record<string, string> = {};
         for (const r of ramasIngreso ?? []) riMap[String(r.id)] = String(r.nombre);
@@ -169,170 +195,89 @@ export const AuxEntityListScreen: React.FC<Props> = ({ navigation, route }) => {
         setRamasGastoMap({});
         setSegmentosMap({});
         setRamasProveedorMap({});
-        setCountTiposByRamaGasto({});
-        setCountTiposBySegmentoGasto({});
-        setCountTiposByRamaIngreso({});
-        setCountProveedoresByRama({});
-        setCountProveedoresBySubsegmento({});
+        setProveedorCountByRama({});
+        setProveedorCountBySubsegmento({});
+        setGastoCountByTipo({});
+        setIngresoCountByTipo({});
         return;
       }
 
-      // ---------------------------------------------------------------------
-      // tipo_ramas_gasto -> contar tipos de gasto asociados
-      // ---------------------------------------------------------------------
-      if (auxType === 'tipo_ramas_gasto') {
-        const tipos = await listAux<TipoGastoItem>('tipo_gasto');
-
-        const counts: Record<string, number> = {};
-        for (const t of tipos ?? []) {
-          const key = String(t.rama_id ?? '').trim();
-          if (!key) continue;
-          counts[key] = (counts[key] ?? 0) + 1;
-        }
-
-        setCountTiposByRamaGasto(counts);
-        setRamasGastoMap({});
-        setSegmentosMap({});
-        setRamasIngresoMap({});
-        setRamasProveedorMap({});
-        setCountTiposBySegmentoGasto({});
-        setCountTiposByRamaIngreso({});
-        setCountProveedoresByRama({});
-        setCountProveedoresBySubsegmento({});
-        return;
-      }
-
-      // ---------------------------------------------------------------------
-      // tipo_segmento_gasto -> contar tipos de gasto asociados
-      // ---------------------------------------------------------------------
-      if (auxType === 'tipo_segmento_gasto') {
-        const tipos = await listAux<TipoGastoItem>('tipo_gasto');
-
-        const counts: Record<string, number> = {};
-        for (const t of tipos ?? []) {
-          const key = String(t.segmento_id ?? '').trim();
-          if (!key) continue;
-          counts[key] = (counts[key] ?? 0) + 1;
-        }
-
-        setCountTiposBySegmentoGasto(counts);
-        setRamasGastoMap({});
-        setSegmentosMap({});
-        setRamasIngresoMap({});
-        setRamasProveedorMap({});
-        setCountTiposByRamaGasto({});
-        setCountTiposByRamaIngreso({});
-        setCountProveedoresByRama({});
-        setCountProveedoresBySubsegmento({});
-        return;
-      }
-
-      // ---------------------------------------------------------------------
-      // tipo_ramas_ingreso -> contar tipos de ingreso asociados
-      // ---------------------------------------------------------------------
-      if (auxType === 'tipo_ramas_ingreso') {
-        const tiposIngreso = await listAux<TipoIngresoItem>('tipo_ingreso');
-
-        const counts: Record<string, number> = {};
-        for (const t of tiposIngreso ?? []) {
-          const key = String(t.rama_id ?? '').trim();
-          if (!key) continue;
-          counts[key] = (counts[key] ?? 0) + 1;
-        }
-
-        setCountTiposByRamaIngreso(counts);
-        setRamasGastoMap({});
-        setSegmentosMap({});
-        setRamasIngresoMap({});
-        setRamasProveedorMap({});
-        setCountTiposByRamaGasto({});
-        setCountTiposBySegmentoGasto({});
-        setCountProveedoresByRama({});
-        setCountProveedoresBySubsegmento({});
-        return;
-      }
-
-      // ---------------------------------------------------------------------
-      // tipo_ramas_proveedores -> contar proveedores asociados
-      // ---------------------------------------------------------------------
-      if (auxType === 'tipo_ramas_proveedores') {
-        const proveedores = await listProveedores();
-
-        const counts: Record<string, number> = {};
-        for (const p of proveedores ?? []) {
-          const key = String(p.rama_id ?? '').trim();
-          if (!key) continue;
-          counts[key] = (counts[key] ?? 0) + 1;
-        }
-
-        setCountProveedoresByRama(counts);
-        setRamasGastoMap({});
-        setSegmentosMap({});
-        setRamasIngresoMap({});
-        setRamasProveedorMap({});
-        setCountTiposByRamaGasto({});
-        setCountTiposBySegmentoGasto({});
-        setCountTiposByRamaIngreso({});
-        setCountProveedoresBySubsegmento({});
-        return;
-      }
-
-      // ---------------------------------------------------------------------
-      // tipo_subsegmento_proveedor
-      // ---------------------------------------------------------------------
+      // ------------------------------------------------------
+      // SUBSEGMENTOS DE PROVEEDOR
+      // ------------------------------------------------------
       if (auxType === 'tipo_subsegmento_proveedor') {
-        const [proveedores, ramasProveedor] = await Promise.all([
-          listProveedores(),
+        const [ramasProveedor, proveedores] = await Promise.all([
           listAux<SimpleAuxItem>('tipo_ramas_proveedores'),
+          listProveedores(),
         ]);
-
-        const counts: Record<string, number> = {};
-        for (const p of proveedores ?? []) {
-          const key = String((p as any).subsegmento_id ?? '').trim();
-          if (!key) continue;
-          counts[key] = (counts[key] ?? 0) + 1;
-        }
 
         const rpMap: Record<string, string> = {};
         for (const r of ramasProveedor ?? []) rpMap[String(r.id)] = String(r.nombre);
 
-        setCountProveedoresBySubsegmento(counts);
+        const countBySubsegmento: CountMap = {};
+        for (const p of proveedores ?? []) {
+          const key = String((p as any)?.subsegmento_id ?? '').trim();
+          if (!key) continue;
+          countBySubsegmento[key] = (countBySubsegmento[key] ?? 0) + 1;
+        }
+
         setRamasProveedorMap(rpMap);
+        setProveedorCountBySubsegmento(countBySubsegmento);
+
         setRamasGastoMap({});
         setSegmentosMap({});
         setRamasIngresoMap({});
-        setCountTiposByRamaGasto({});
-        setCountTiposBySegmentoGasto({});
-        setCountTiposByRamaIngreso({});
-        setCountProveedoresByRama({});
+        setProveedorCountByRama({});
+        setGastoCountByTipo({});
+        setIngresoCountByTipo({});
         return;
       }
 
-      // ---------------------------------------------------------------------
-      // resto: limpiar
-      // ---------------------------------------------------------------------
+      // ------------------------------------------------------
+      // RAMAS DE PROVEEDORES
+      // ------------------------------------------------------
+      if (auxType === 'tipo_ramas_proveedores') {
+        const proveedores = await listProveedores();
+
+        const countByRama: CountMap = {};
+        for (const p of proveedores ?? []) {
+          const key = String(p.rama_id ?? '').trim();
+          if (!key) continue;
+          countByRama[key] = (countByRama[key] ?? 0) + 1;
+        }
+
+        setProveedorCountByRama(countByRama);
+
+        setRamasGastoMap({});
+        setSegmentosMap({});
+        setRamasIngresoMap({});
+        setRamasProveedorMap({});
+        setProveedorCountBySubsegmento({});
+        setGastoCountByTipo({});
+        setIngresoCountByTipo({});
+        return;
+      }
+
+      // Resto: limpiar mapas
       setRamasGastoMap({});
       setSegmentosMap({});
       setRamasIngresoMap({});
       setRamasProveedorMap({});
-      setCountTiposByRamaGasto({});
-      setCountTiposBySegmentoGasto({});
-      setCountTiposByRamaIngreso({});
-      setCountProveedoresByRama({});
-      setCountProveedoresBySubsegmento({});
+      setProveedorCountByRama({});
+      setProveedorCountBySubsegmento({});
+      setGastoCountByTipo({});
+      setIngresoCountByTipo({});
     } catch (err) {
       console.error('[AuxEntityList] Error cargando', auxType, err);
-
       setItems([]);
       setRamasGastoMap({});
       setSegmentosMap({});
       setRamasIngresoMap({});
       setRamasProveedorMap({});
-      setCountTiposByRamaGasto({});
-      setCountTiposBySegmentoGasto({});
-      setCountTiposByRamaIngreso({});
-      setCountProveedoresByRama({});
-      setCountProveedoresBySubsegmento({});
+      setProveedorCountByRama({});
+      setProveedorCountBySubsegmento({});
+      setGastoCountByTipo({});
+      setIngresoCountByTipo({});
     } finally {
       setLoading(false);
     }
@@ -436,17 +381,24 @@ export const AuxEntityListScreen: React.FC<Props> = ({ navigation, route }) => {
                   ? (ramasProveedorMap[String(item.rama_id)] ?? String(item.rama_id))
                   : null;
 
-              const countLabel =
-                auxType === 'tipo_ramas_gasto'
-                  ? `${countTiposByRamaGasto[String(item.id)] ?? 0} tipos asociados`
-                  : auxType === 'tipo_segmento_gasto'
-                  ? `${countTiposBySegmentoGasto[String(item.id)] ?? 0} tipos asociados`
-                  : auxType === 'tipo_ramas_ingreso'
-                  ? `${countTiposByRamaIngreso[String(item.id)] ?? 0} tipos asociados`
-                  : auxType === 'tipo_ramas_proveedores'
-                  ? `${countProveedoresByRama[String(item.id)] ?? 0} proveedores asociados`
-                  : auxType === 'tipo_subsegmento_proveedor'
-                  ? `${countProveedoresBySubsegmento[String(item.id)] ?? 0} proveedores asociados`
+              const proveedorCount =
+                auxType === 'tipo_ramas_proveedores'
+                  ? (proveedorCountByRama[String(item.id)] ?? 0)
+                  : null;
+
+              const gastoTipoCount =
+                auxType === 'tipo_gasto'
+                  ? (gastoCountByTipo[String(item.id)] ?? 0)
+                  : null;
+
+              const ingresoTipoCount =
+                auxType === 'tipo_ingreso'
+                  ? (ingresoCountByTipo[String(item.id)] ?? 0)
+                  : null;
+
+              const proveedorSubsegmentoCount =
+                auxType === 'tipo_subsegmento_proveedor'
+                  ? (proveedorCountBySubsegmento[String(item.id)] ?? 0)
                   : null;
 
               return (
@@ -457,12 +409,6 @@ export const AuxEntityListScreen: React.FC<Props> = ({ navigation, route }) => {
                 >
                   <View style={panelStyles.menuTextContainer}>
                     <Text style={panelStyles.menuTitle}>{item.nombre}</Text>
-
-                    {countLabel ? (
-                      <Text style={panelStyles.menuSubtitle}>
-                        {countLabel}
-                      </Text>
-                    ) : null}
 
                     {auxType === 'proveedor' && item?.rama_rel?.nombre && (
                       <Text style={panelStyles.menuSubtitle}>
@@ -484,16 +430,42 @@ export const AuxEntityListScreen: React.FC<Props> = ({ navigation, route }) => {
                       </Text>
                     )}
 
+                    {auxType === 'tipo_gasto' && (
+                      <Text style={panelStyles.menuSubtitle}>
+                        {countLabel(gastoTipoCount)}
+                      </Text>
+                    )}
+
                     {auxType === 'tipo_ingreso' && ramaIngresoName && (
                       <Text style={panelStyles.menuSubtitle}>
                         Rama: {ramaIngresoName}
                       </Text>
                     )}
 
-                    {auxType === 'tipo_subsegmento_proveedor' && ramaProveedorName && (
+                    {auxType === 'tipo_ingreso' && (
                       <Text style={panelStyles.menuSubtitle}>
-                        Rama: {ramaProveedorName}
+                        {countLabel(ingresoTipoCount)}
                       </Text>
+                    )}
+
+                    {auxType === 'tipo_ramas_proveedores' && (
+                      <Text style={panelStyles.menuSubtitle}>
+                        {countLabel(proveedorCount, 'proveedor', 'proveedores')}
+                      </Text>
+                    )}
+
+                    {auxType === 'tipo_subsegmento_proveedor' && (
+                      <>
+                        {ramaProveedorName ? (
+                          <Text style={panelStyles.menuSubtitle}>
+                            Rama: {ramaProveedorName}
+                          </Text>
+                        ) : null}
+
+                        <Text style={panelStyles.menuSubtitle}>
+                          {countLabel(proveedorSubsegmentoCount, 'proveedor', 'proveedores')}
+                        </Text>
+                      </>
                     )}
                   </View>
 

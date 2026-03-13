@@ -1,45 +1,32 @@
-// mobile_app/screens/auxiliares/AuxEntityFormScreen.tsx
-
 /**
  * Ruta: mobile_app/screens/auxiliares/AuxEntityFormScreen.tsx
  * Versión: 1.4.0
  * Descripción:
- * Formulario unificado para creación y edición de entidades auxiliares.
+ * Formulario genérico para creación y edición de auxiliares y proveedores.
  *
  * Responsabilidades:
- * - Soportar creación/edición de auxiliares genéricos:
+ * - Alta/edición de:
+ *   * proveedor
  *   * tipo_gasto
  *   * tipo_ingreso
  *   * tipo_ramas_ingreso
- *   * tipo_ramas_gasto
- *   * tipo_ramas_proveedores
- *   * tipo_segmento_gasto
  *   * tipo_subsegmento_proveedor
- * - Soportar creación/edición completa de proveedores.
- * - Mantener retorno robusto al formulario origen mediante auxResult.
- * - Mantener confirmación de salida si hay cambios sin guardar.
+ *   * otros auxiliares simples
+ * - Gestión avanzada de proveedor:
+ *   * rama
+ *   * subsegmento
+ *   * ubicación
+ *   * datos fiscales y de contacto
+ *   * flags operativos
+ * - Confirmación al salir si hay cambios sin guardar.
  *
- * Mejoras incluidas:
- * - Proveedor ampliado con todos los campos editables del ORM:
- *   * cif
- *   * telefono
- *   * email
- *   * subsegmento_id
- *   * direccion
- *   * codigo_postal
- *   * persona_contacto
- *   * activo
- *   * observaciones
- *   * acepta_urgencias
- *   * ambito_servicio
- * - Soporte para el nuevo auxiliar `tipo_subsegmento_proveedor`.
- * - Validación razonable de CIF español.
- * - Validación de formato de email.
- * - Uso exclusivo de estilos/componentes compatibles con tu proyecto actual.
- *
- * Nota:
- * - El backend sigue siendo la fuente de verdad final de validaciones de negocio.
- * - Este formulario aplica validaciones UX previas para mejorar la experiencia.
+ * Ajustes incluidos:
+ * - Soporte completo de subsegmentos de proveedor.
+ * - Corrección del error:
+ *     "No se han podido cargar los subsegmentos del proveedor"
+ *   siempre que exista el router backend:
+ *     /api/v1/subsegmentos/proveedores
+ * - Mantiene el flujo de retorno hacia pantallas origen.
  */
 
 import React, { useEffect, useMemo, useState } from 'react';
@@ -51,7 +38,6 @@ import axios from 'axios';
 import FormScreen from '../../components/forms/FormScreen';
 import { FormSection } from '../../components/forms/FormSection';
 import { commonFormStyles } from '../../components/forms/formStyles';
-
 import { InlineSearchSelect } from '../../components/ui/InlineSearchSelect';
 import { SelectedInlineValue } from '../../components/ui/SelectedInlineValue';
 import { PillButton } from '../../components/ui/PillButton';
@@ -85,6 +71,7 @@ import {
   deleteAux,
   listAux,
   AuxEntity,
+  TipoSubsegmentoProveedorItem,
 } from '../../services/auxiliaresApi';
 
 type Props = {
@@ -115,97 +102,30 @@ type SimpleAuxItem = {
 type DirtySnapshot = {
   mode: 'proveedor' | 'aux';
 
-  // Común
   nombre: string;
 
-  // Proveedor
   ramaId: string;
+  subsegmentoId: string;
   localidad: string;
   comunidad: string;
   pais: string;
   cif: string;
   telefono: string;
   email: string;
-  subsegmentoId: string;
   direccion: string;
   codigoPostal: string;
   personaContacto: string;
   observaciones: string;
   ambitoServicio: string;
-  activo: string;
   aceptaUrgencias: string;
+  activo: string;
 
-  // Auxiliares
   ramaGastoId: string;
   segmentoGastoId: string;
   ramaIngresoId: string;
-  ramaProveedorId: string;
 };
 
 const NOOP = () => {};
-
-function normalize(v: any): string {
-  return String(v ?? '').trim();
-}
-
-function normalizeEmail(v: string): string {
-  return v.trim().toLowerCase();
-}
-
-function isValidEmail(email: string): boolean {
-  const v = email.trim();
-  if (!v) return true;
-  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v);
-}
-
-/**
- * Validación razonable de CIF español.
- * Acepta formatos tipo:
- * - B12345678
- * - A58818501
- * - Q5000001I
- */
-function isValidSpanishCif(cif: string): boolean {
-  const raw = cif.trim().toUpperCase();
-  if (!raw) return true;
-
-  const clean = raw.replace(/[\s-]/g, '');
-  if (!/^[ABCDEFGHJKLMNPQRSUVW]\d{7}[0-9A-J]$/.test(clean)) {
-    return false;
-  }
-
-  const letter = clean[0];
-  const body = clean.slice(1, 8);
-  const control = clean[8];
-
-  let sumEven = 0;
-  let sumOdd = 0;
-
-  for (let i = 0; i < body.length; i += 1) {
-    const digit = Number(body[i]);
-
-    // Posiciones 1,3,5,7 del cuerpo (índices 0,2,4,6): multiplicar por 2 y sumar dígitos
-    if (i % 2 === 0) {
-      const prod = digit * 2;
-      sumOdd += Math.floor(prod / 10) + (prod % 10);
-    } else {
-      sumEven += digit;
-    }
-  }
-
-  const total = sumEven + sumOdd;
-  const unit = total % 10;
-  const numericControl = unit === 0 ? 0 : 10 - unit;
-  const alphaControl = 'JABCDEFGHI'[numericControl];
-
-  const mustBeLetter = ['P', 'Q', 'R', 'S', 'N', 'W'].includes(letter);
-  const mustBeNumber = ['A', 'B', 'E', 'H'].includes(letter);
-
-  if (mustBeLetter) return control === alphaControl;
-  if (mustBeNumber) return control === String(numericControl);
-
-  return control === String(numericControl) || control === alphaControl;
-}
 
 export const AuxEntityFormScreen: React.FC<Props> = ({ navigation, route }) => {
   const styles = commonFormStyles;
@@ -219,35 +139,28 @@ export const AuxEntityFormScreen: React.FC<Props> = ({ navigation, route }) => {
   const isProveedor = auxType === 'proveedor';
   const isTipoGasto = auxType === 'tipo_gasto';
   const isTipoIngreso = auxType === 'tipo_ingreso';
-  const isRamaIngreso = auxType === 'tipo_ramas_ingreso';
-  const isRamaGasto = auxType === 'tipo_ramas_gasto';
-  const isRamaProveedor = auxType === 'tipo_ramas_proveedores';
-  const isSegmentoGasto = auxType === 'tipo_segmento_gasto';
   const isSubsegmentoProveedor = auxType === 'tipo_subsegmento_proveedor';
 
   const isEditMode = !!(editingProveedor || editingItem);
 
-  // Compat legacy
   const returnTo: string | undefined = route?.params?.returnTo;
   const returnKey: string | undefined = route?.params?.returnKey;
   const returnRouteKey: string | undefined = route?.params?.returnRouteKey;
 
-  // ===========================================================================
-  // ESTADO COMÚN
-  // ===========================================================================
+  // ==========================================================
+  // Estado común
+  // ==========================================================
   const [nombre, setNombre] = useState('');
 
-  // ===========================================================================
-  // ESTADO AUXILIARES
-  // ===========================================================================
+  // ==========================================================
+  // AUX NO PROVEEDOR
+  // ==========================================================
   const [ramaGastoId, setRamaGastoId] = useState<string | null>(null);
   const [segmentoGastoId, setSegmentoGastoId] = useState<string | null>(
     route?.params?.defaultSegmentoId ?? null
   );
-
   const [ramasGasto, setRamasGasto] = useState<Array<{ id: string; nombre: string }>>([]);
   const [segmentosGasto, setSegmentosGasto] = useState<Array<{ id: string; nombre: string }>>([]);
-
   const [busquedaRamaGasto, setBusquedaRamaGasto] = useState('');
   const [busquedaSegmentoGasto, setBusquedaSegmentoGasto] = useState('');
 
@@ -255,14 +168,19 @@ export const AuxEntityFormScreen: React.FC<Props> = ({ navigation, route }) => {
   const [ramasIngreso, setRamasIngreso] = useState<Array<{ id: string; nombre: string }>>([]);
   const [busquedaRamaIngreso, setBusquedaRamaIngreso] = useState('');
 
-  const [ramaProveedorAuxId, setRamaProveedorAuxId] = useState<string | null>(null);
-  const [busquedaRamaProveedorAux, setBusquedaRamaProveedorAux] = useState('');
+  const [subsegmentoRamaId, setSubsegmentoRamaId] = useState<string | null>(null);
+  const [subsegmentoRamasProveedor, setSubsegmentoRamasProveedor] = useState<RamaProveedor[]>([]);
+  const [busquedaSubsegmentoRama, setBusquedaSubsegmentoRama] = useState('');
 
-  // ===========================================================================
-  // ESTADO PROVEEDOR
-  // ===========================================================================
+  // ==========================================================
+  // PROVEEDOR
+  // ==========================================================
   const [ramaId, setRamaId] = useState<string | null>(route?.params?.defaultRamaId ?? null);
   const [ramaNombre, setRamaNombre] = useState<string | null>(null);
+
+  const [subsegmentoId, setSubsegmentoId] = useState<string | null>(null);
+  const [subsegmentoOptions, setSubsegmentoOptions] = useState<TipoSubsegmentoProveedorItem[]>([]);
+  const [busquedaSubsegmento, setBusquedaSubsegmento] = useState('');
 
   const [localidad, setLocalidad] = useState('');
   const [comunidad, setComunidad] = useState('');
@@ -274,19 +192,15 @@ export const AuxEntityFormScreen: React.FC<Props> = ({ navigation, route }) => {
   const [cif, setCif] = useState('');
   const [telefono, setTelefono] = useState('');
   const [email, setEmail] = useState('');
-  const [subsegmentoId, setSubsegmentoId] = useState<string | null>(null);
   const [direccion, setDireccion] = useState('');
   const [codigoPostal, setCodigoPostal] = useState('');
   const [personaContacto, setPersonaContacto] = useState('');
-  const [activo, setActivo] = useState<boolean>(true);
   const [observaciones, setObservaciones] = useState('');
-  const [aceptaUrgencias, setAceptaUrgencias] = useState<boolean>(false);
   const [ambitoServicio, setAmbitoServicio] = useState('');
+  const [aceptaUrgencias, setAceptaUrgencias] = useState<boolean>(false);
+  const [activo, setActivo] = useState<boolean>(true);
 
-  const [subsegmentoOptions, setSubsegmentoOptions] = useState<Array<{ id: string; nombre: string; rama_id?: string | null }>>([]);
-  const [busquedaSubsegmento, setBusquedaSubsegmento] = useState('');
-
-  // Fallback inline ubicaciones
+  // Fallback inline ubicación
   const [creatingLocalidad, setCreatingLocalidad] = useState(false);
   const [creatingRegion, setCreatingRegion] = useState(false);
   const [creatingPais, setCreatingPais] = useState(false);
@@ -295,17 +209,17 @@ export const AuxEntityFormScreen: React.FC<Props> = ({ navigation, route }) => {
   const [newRegionText, setNewRegionText] = useState('');
   const [newPaisText, setNewPaisText] = useState('');
 
-  // Catálogos proveedor/ubicación
+  // Catálogos proveedor
   const [ramaOptions, setRamaOptions] = useState<RamaProveedor[]>([]);
   const [localidadOptions, setLocalidadOptions] = useState<LocalidadWithContext[]>([]);
   const [regionOptions, setRegionOptions] = useState<RegionOption[]>([]);
   const [paisOptions, setPaisOptions] = useState<PaisOption[]>([]);
 
   const [loadingRamas, setLoadingRamas] = useState(false);
+  const [loadingSubsegmentos, setLoadingSubsegmentos] = useState(false);
   const [loadingLocalidades, setLoadingLocalidades] = useState(false);
   const [loadingRegiones, setLoadingRegiones] = useState(false);
   const [loadingPaises, setLoadingPaises] = useState(false);
-  const [loadingSubsegmentos, setLoadingSubsegmentos] = useState(false);
 
   const [busquedaRamaProveedor, setBusquedaRamaProveedor] = useState('');
   const [busquedaLocalidad, setBusquedaLocalidad] = useState('');
@@ -314,12 +228,11 @@ export const AuxEntityFormScreen: React.FC<Props> = ({ navigation, route }) => {
 
   const ramaBloqueada = origin === 'cotidianos' && !!ramaId;
 
-  // ===========================================================================
-  // HELPERS NAVEGACIÓN RETORNO
-  // ===========================================================================
+  // ==========================================================
+  // Navegación de retorno
+  // ==========================================================
   const findOwningNavigatorByRouteKey = (nav: any, targetRouteKey: string) => {
     let current = nav;
-
     while (current) {
       try {
         const state = current.getState?.();
@@ -327,12 +240,10 @@ export const AuxEntityFormScreen: React.FC<Props> = ({ navigation, route }) => {
         const found = routes.some((r: any) => r?.key === targetRouteKey);
         if (found) return current;
       } catch {
-        // no-op
+        // noop
       }
-
       current = current.getParent?.() ?? null;
     }
-
     return null;
   };
 
@@ -351,23 +262,17 @@ export const AuxEntityFormScreen: React.FC<Props> = ({ navigation, route }) => {
       mode: result.mode,
     };
 
-    console.log('[AuxEntityForm][sendResult] sending auxResult=', auxResult);
-    console.log('[AuxEntityForm][sendResult] returnRouteKey=', returnRouteKey, 'returnTo=', returnTo);
-
     if (returnRouteKey) {
       const ownerNav = findOwningNavigatorByRouteKey(navigation, returnRouteKey);
-      console.log('[AuxEntityForm][sendResult] ownerNav found=', !!ownerNav);
-
       if (ownerNav) {
         try {
           ownerNav.dispatch({
             ...(CommonActions.setParams({ auxResult }) as any),
             source: returnRouteKey,
           });
-          console.log('[AuxEntityForm][sendResult] dispatched setParams to source=', returnRouteKey);
           return;
-        } catch (e) {
-          console.log('[AuxEntityForm][sendResult] dispatch failed, fallback to returnTo', e);
+        } catch {
+          // fallback abajo
         }
       }
     }
@@ -377,9 +282,8 @@ export const AuxEntityFormScreen: React.FC<Props> = ({ navigation, route }) => {
         const parent = navigation.getParent?.();
         const nav = parent ?? navigation;
         nav.navigate({ name: returnTo, params: { auxResult }, merge: true });
-        console.log('[AuxEntityForm][sendResult] navigated to returnTo with merge=', returnTo);
-      } catch (e) {
-        console.log('[AuxEntityForm][sendResult] returnTo navigation failed', e);
+      } catch {
+        // noop
       }
     }
   };
@@ -394,149 +298,9 @@ export const AuxEntityFormScreen: React.FC<Props> = ({ navigation, route }) => {
     if (navigation.canGoBack?.()) navigation.goBack();
   };
 
-  // ===========================================================================
-  // RETORNO DESDE LocalidadForm
-  // ===========================================================================
-  useEffect(() => {
-    const auxResult = route?.params?.auxResult;
-    if (!auxResult) return;
-
-    try {
-      navigation.setParams?.({ auxResult: undefined });
-    } catch {
-      // no-op
-    }
-
-    if (!isProveedor) return;
-
-    if (auxResult?.type === 'localidad' && auxResult?.item) {
-      const loc: LocalidadWithContext = auxResult.item;
-
-      setLocalidadId(loc.id);
-      setLocalidad(loc.nombre);
-
-      const regionNombre = loc.region?.nombre ?? '';
-      const paisNombre = loc.region?.pais?.nombre ?? '';
-
-      setRegionId(loc.region?.id ?? null);
-      setPaisId(loc.region?.pais?.id ?? null);
-
-      setComunidad(regionNombre);
-      setPais(paisNombre);
-
-      setCreatingLocalidad(false);
-      setNewLocalidadText('');
-      setCreatingRegion(false);
-      setNewRegionText('');
-      setCreatingPais(false);
-      setNewPaisText('');
-
-      setBusquedaLocalidad('');
-      setBusquedaRegion('');
-      setBusquedaPais('');
-
-      setLocalidadOptions((prev) => {
-        const exists = prev.some((x) => x.id === loc.id);
-        if (exists) return prev;
-        return [loc, ...prev].slice(0, 800);
-      });
-
-      buildRegionAndPaisOptionsFromLocalidades([loc]);
-    }
-  }, [route?.params?.auxResult, isProveedor, navigation]);
-
-  // ===========================================================================
-  // INICIALIZACIÓN EN EDICIÓN
-  // ===========================================================================
-  useEffect(() => {
-    if (!isProveedor) return;
-    if (!isEditMode || !editingProveedor) return;
-
-    setNombre(editingProveedor.nombre ?? '');
-    setRamaId(editingProveedor.rama_id ?? null);
-    setRamaNombre(editingProveedor.rama_rel?.nombre ?? null);
-
-    setLocalidad(editingProveedor.localidad ?? '');
-    setComunidad((editingProveedor as any).comunidad ?? '');
-    setPais(editingProveedor.pais ?? '');
-    setLocalidadId((editingProveedor as any).localidad_id ?? null);
-
-    const locRel = (editingProveedor as any).localidad_rel;
-    if (locRel) {
-      setRegionId(locRel.region?.id ?? null);
-      setPaisId(locRel.region?.pais?.id ?? null);
-    }
-
-    setCif((editingProveedor as any).cif ?? '');
-    setTelefono((editingProveedor as any).telefono ?? '');
-    setEmail((editingProveedor as any).email ?? '');
-    setSubsegmentoId((editingProveedor as any).subsegmento_id ?? null);
-    setDireccion((editingProveedor as any).direccion ?? '');
-    setCodigoPostal((editingProveedor as any).codigo_postal ?? '');
-    setPersonaContacto((editingProveedor as any).persona_contacto ?? '');
-    setActivo((editingProveedor as any).activo ?? true);
-    setObservaciones((editingProveedor as any).observaciones ?? '');
-    setAceptaUrgencias((editingProveedor as any).acepta_urgencias ?? false);
-    setAmbitoServicio((editingProveedor as any).ambito_servicio ?? '');
-  }, [isProveedor, isEditMode, editingProveedor]);
-
-  useEffect(() => {
-    if (isProveedor) return;
-    if (!editingItem) return;
-
-    setNombre(editingItem.nombre ?? '');
-
-    if (isTipoGasto) {
-      setRamaGastoId(editingItem.rama_id ?? null);
-      setSegmentoGastoId(editingItem.segmento_id ?? null);
-    }
-
-    if (isTipoIngreso) {
-      setRamaIngresoId(editingItem.rama_id ?? null);
-    }
-
-    if (isSubsegmentoProveedor) {
-      setRamaProveedorAuxId(editingItem.rama_id ?? null);
-    }
-  }, [isProveedor, editingItem, isTipoGasto, isTipoIngreso, isSubsegmentoProveedor]);
-
-  // ===========================================================================
-  // CARGA DE CATÁLOGOS AUXILIARES
-  // ===========================================================================
-  useEffect(() => {
-    const loadCatalogs = async () => {
-      try {
-        if (isTipoGasto) {
-          const [rg, sg] = await Promise.all([
-            listAux<{ id: string; nombre: string }>('tipo_ramas_gasto'),
-            listAux<{ id: string; nombre: string }>('tipo_segmento_gasto'),
-          ]);
-
-          setRamasGasto(rg ?? []);
-          setSegmentosGasto(sg ?? []);
-        }
-
-        if (isTipoIngreso) {
-          const ri = await listAux<{ id: string; nombre: string }>('tipo_ramas_ingreso');
-          setRamasIngreso(ri ?? []);
-        }
-
-        if (isSubsegmentoProveedor) {
-          const rp = await listAux<{ id: string; nombre: string }>('tipo_ramas_proveedores');
-          setRamaOptions(rp as RamaProveedor[]);
-        }
-      } catch (e) {
-        console.error('[AuxEntityForm] Error cargando catálogos auxiliares', e);
-        Alert.alert('Error', 'No se han podido cargar los catálogos necesarios.');
-      }
-    };
-
-    void loadCatalogs();
-  }, [isTipoGasto, isTipoIngreso, isSubsegmentoProveedor]);
-
-  // ===========================================================================
-  // CARGA DE RAMAS / SUBSEGMENTOS / UBICACIONES
-  // ===========================================================================
+  // ==========================================================
+  // Helpers de carga
+  // ==========================================================
   const buildRegionAndPaisOptionsFromLocalidades = (locs: LocalidadWithContext[]) => {
     const regionMap = new Map<number, RegionOption>();
     const paisMap = new Map<number, PaisOption>();
@@ -562,22 +326,21 @@ export const AuxEntityFormScreen: React.FC<Props> = ({ navigation, route }) => {
 
     setRegionOptions((prev) => {
       const merged = new Map<number, RegionOption>();
-      for (const r of prev) merged.set(r.id, r);
-      for (const r of regionMap.values()) merged.set(r.id, r);
+      for (const item of prev) merged.set(item.id, item);
+      for (const item of regionMap.values()) merged.set(item.id, item);
       return Array.from(merged.values()).sort((a, b) => a.nombre.localeCompare(b.nombre));
     });
 
     setPaisOptions((prev) => {
       const merged = new Map<number, PaisOption>();
-      for (const p of prev) merged.set(p.id, p);
-      for (const p of paisMap.values()) merged.set(p.id, p);
+      for (const item of prev) merged.set(item.id, item);
+      for (const item of paisMap.values()) merged.set(item.id, item);
       return Array.from(merged.values()).sort((a, b) => a.nombre.localeCompare(b.nombre));
     });
   };
 
   const ensureRamasProveedorLoaded = async () => {
     if (ramaOptions.length > 0) return;
-
     try {
       setLoadingRamas(true);
       const ramas = await listRamasProveedores();
@@ -590,18 +353,19 @@ export const AuxEntityFormScreen: React.FC<Props> = ({ navigation, route }) => {
     }
   };
 
-  const ensureSubsegmentosLoaded = async () => {
-    if (subsegmentoOptions.length > 0) return;
-
+  const ensureSubsegmentosProveedorLoaded = async (ramaFiltro?: string | null) => {
     try {
       setLoadingSubsegmentos(true);
-      const data = await listAux<{ id: string; nombre: string; rama_id?: string | null }>(
-        'tipo_subsegmento_proveedor'
+
+      const data = await listAux<TipoSubsegmentoProveedorItem>(
+        'tipo_subsegmento_proveedor',
+        ramaFiltro ? { rama_id: ramaFiltro } : undefined
       );
+
       setSubsegmentoOptions(data ?? []);
     } catch (err) {
       console.error('[AuxEntityForm] Error cargando subsegmentos proveedor', err);
-      Alert.alert('Error', 'No se han podido cargar los subsegmentos de proveedor.');
+      Alert.alert('Error', 'No se han podido cargar los subsegmentos del proveedor.');
     } finally {
       setLoadingSubsegmentos(false);
     }
@@ -609,7 +373,6 @@ export const AuxEntityFormScreen: React.FC<Props> = ({ navigation, route }) => {
 
   const ensureLocalidadesLoaded = async () => {
     if (localidadOptions.length > 0) return;
-
     try {
       setLoadingLocalidades(true);
       const locs = await listLocalidades({ limit: 400 });
@@ -625,7 +388,6 @@ export const AuxEntityFormScreen: React.FC<Props> = ({ navigation, route }) => {
 
   const ensureRegionesLoaded = async () => {
     if (regionOptions.length > 0) return;
-
     try {
       setLoadingRegiones(true);
       const data = await listRegiones({ limit: 800 });
@@ -649,7 +411,6 @@ export const AuxEntityFormScreen: React.FC<Props> = ({ navigation, route }) => {
 
   const ensurePaisesLoaded = async () => {
     if (paisOptions.length > 0) return;
-
     try {
       setLoadingPaises(true);
       const data = await listPaises({ limit: 400 });
@@ -666,20 +427,113 @@ export const AuxEntityFormScreen: React.FC<Props> = ({ navigation, route }) => {
     }
   };
 
+  // ==========================================================
+  // Inicialización edición proveedor
+  // ==========================================================
+  useEffect(() => {
+    if (!isProveedor) return;
+    if (!isEditMode || !editingProveedor) return;
+
+    setNombre(editingProveedor.nombre ?? '');
+    setRamaId(editingProveedor.rama_id ?? null);
+    setRamaNombre(editingProveedor.rama_rel?.nombre ?? null);
+
+    setLocalidad(editingProveedor.localidad ?? '');
+    setComunidad(editingProveedor.comunidad ?? '');
+    setPais(editingProveedor.pais ?? '');
+    setLocalidadId((editingProveedor as any).localidad_id ?? null);
+
+    setCif(((editingProveedor as any)?.cif ?? '') as string);
+    setTelefono(((editingProveedor as any)?.telefono ?? '') as string);
+    setEmail(((editingProveedor as any)?.email ?? '') as string);
+    setDireccion(((editingProveedor as any)?.direccion ?? '') as string);
+    setCodigoPostal(((editingProveedor as any)?.codigo_postal ?? '') as string);
+    setPersonaContacto(((editingProveedor as any)?.persona_contacto ?? '') as string);
+    setObservaciones(((editingProveedor as any)?.observaciones ?? '') as string);
+    setAmbitoServicio(((editingProveedor as any)?.ambito_servicio ?? '') as string);
+    setAceptaUrgencias(Boolean((editingProveedor as any)?.acepta_urgencias ?? false));
+    setActivo((editingProveedor as any)?.activo !== false);
+    setSubsegmentoId(((editingProveedor as any)?.subsegmento_id ?? null) as string | null);
+
+    const locRel = (editingProveedor as any).localidad_rel;
+    if (locRel) {
+      setRegionId(locRel.region?.id ?? null);
+      setPaisId(locRel.region?.pais?.id ?? null);
+    }
+  }, [isProveedor, isEditMode, editingProveedor]);
+
+  // ==========================================================
+  // Inicialización edición aux
+  // ==========================================================
+  useEffect(() => {
+    if (isProveedor) return;
+    if (!editingItem) return;
+
+    setNombre(editingItem.nombre ?? '');
+
+    if (isTipoGasto) {
+      setRamaGastoId(editingItem.rama_id ?? null);
+      setSegmentoGastoId(editingItem.segmento_id ?? null);
+    }
+
+    if (isTipoIngreso) {
+      setRamaIngresoId(editingItem.rama_id ?? null);
+    }
+
+    if (isSubsegmentoProveedor) {
+      setSubsegmentoRamaId(editingItem.rama_id ?? null);
+    }
+  }, [isProveedor, editingItem, isTipoGasto, isTipoIngreso, isSubsegmentoProveedor]);
+
+  // ==========================================================
+  // Catálogos auxiliares
+  // ==========================================================
+  useEffect(() => {
+    const loadCatalogs = async () => {
+      try {
+        if (isTipoGasto) {
+          const [rg, sg] = await Promise.all([
+            listAux<{ id: string; nombre: string }>('tipo_ramas_gasto'),
+            listAux<{ id: string; nombre: string }>('tipo_segmento_gasto'),
+          ]);
+
+          setRamasGasto(rg ?? []);
+          setSegmentosGasto(sg ?? []);
+        }
+
+        if (isTipoIngreso) {
+          const ri = await listAux<{ id: string; nombre: string }>('tipo_ramas_ingreso');
+          setRamasIngreso(ri ?? []);
+        }
+
+        if (isSubsegmentoProveedor) {
+          const rp = await listRamasProveedores();
+          setSubsegmentoRamasProveedor(rp ?? []);
+        }
+      } catch (e) {
+        console.error('[AuxEntityForm] Error cargando catálogos auxiliares', e);
+        Alert.alert('Error', 'No se han podido cargar los catálogos necesarios.');
+      }
+    };
+
+    void loadCatalogs();
+  }, [isTipoGasto, isTipoIngreso, isSubsegmentoProveedor]);
+
   useEffect(() => {
     if (!isProveedor) return;
     void ensureRamasProveedorLoaded();
-    void ensureSubsegmentosLoaded();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isProveedor]);
+
+  useEffect(() => {
+    if (!isProveedor) return;
+    void ensureSubsegmentosProveedorLoaded(ramaId ?? null);
+  }, [isProveedor, ramaId]);
 
   useEffect(() => {
     if (!isProveedor) return;
     if (!ramaId) return;
 
-    if (ramaBloqueada && busquedaRamaProveedor !== '') {
-      setBusquedaRamaProveedor('');
-    }
+    if (ramaBloqueada && busquedaRamaProveedor !== '') setBusquedaRamaProveedor('');
 
     if (ramaNombre) return;
 
@@ -690,12 +544,61 @@ export const AuxEntityFormScreen: React.FC<Props> = ({ navigation, route }) => {
     }
 
     void ensureRamasProveedorLoaded();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isProveedor, ramaId, ramaNombre, ramaOptions, ramaBloqueada]);
 
-  // ===========================================================================
-  // FILTRADOS INLINE SEARCH
-  // ===========================================================================
+  // ==========================================================
+  // Integración retorno desde LocalidadFormScreen
+  // ==========================================================
+  useEffect(() => {
+    const auxResult = route?.params?.auxResult;
+    if (!auxResult) return;
+
+    try {
+      navigation.setParams?.({ auxResult: undefined });
+    } catch {
+      // noop
+    }
+
+    if (!isProveedor) return;
+
+    if (auxResult?.type === 'localidad' && auxResult?.item) {
+      const loc: LocalidadWithContext = auxResult.item;
+
+      setLocalidadId(loc.id);
+      setLocalidad(loc.nombre);
+
+      const regionNombre = loc.region?.nombre ?? '';
+      const paisNombre = loc.region?.pais?.nombre ?? '';
+
+      setRegionId(loc.region?.id ?? null);
+      setPaisId(loc.region?.pais?.id ?? null);
+      setComunidad(regionNombre);
+      setPais(paisNombre);
+
+      setCreatingLocalidad(false);
+      setNewLocalidadText('');
+      setCreatingRegion(false);
+      setNewRegionText('');
+      setCreatingPais(false);
+      setNewPaisText('');
+
+      setBusquedaLocalidad('');
+      setBusquedaRegion('');
+      setBusquedaPais('');
+
+      setLocalidadOptions((prev) => {
+        const exists = prev.some((x) => x.id === loc.id);
+        if (exists) return prev;
+        return [loc, ...prev].slice(0, 800);
+      });
+
+      buildRegionAndPaisOptionsFromLocalidades([loc]);
+    }
+  }, [route?.params?.auxResult, isProveedor, navigation]);
+
+  // ==========================================================
+  // Filtrados
+  // ==========================================================
   const ramasProveedorFiltradas = useMemo(() => {
     if (ramaBloqueada && ramaId) {
       return ramaOptions.filter((r) => r.id === ramaId);
@@ -709,10 +612,25 @@ export const AuxEntityFormScreen: React.FC<Props> = ({ navigation, route }) => {
       .slice(0, 50);
   }, [ramaOptions, busquedaRamaProveedor, ramaBloqueada, ramaId]);
 
+  const subsegmentosProveedorFiltrados = useMemo(() => {
+    const term = busquedaSubsegmento.trim().toLowerCase();
+
+    let base = subsegmentoOptions ?? [];
+
+    if (ramaId) {
+      base = base.filter((s) => (s.rama_id ?? null) === ramaId);
+    }
+
+    if (!term) return base.slice(0, 50);
+
+    return base
+      .filter((s) => (s.nombre ?? '').toLowerCase().includes(term))
+      .slice(0, 50);
+  }, [subsegmentoOptions, busquedaSubsegmento, ramaId]);
+
   const localidadesFiltradas = useMemo(() => {
     const term = busquedaLocalidad.trim().toLowerCase();
     if (!term) return localidadOptions;
-
     return localidadOptions.filter((l) => (l.nombre ?? '').toLowerCase().includes(term));
   }, [localidadOptions, busquedaLocalidad]);
 
@@ -731,88 +649,47 @@ export const AuxEntityFormScreen: React.FC<Props> = ({ navigation, route }) => {
   const paisesFiltrados = useMemo(() => {
     const term = busquedaPais.trim().toLowerCase();
     if (!term) return paisOptions;
-
     return paisOptions.filter((p) => (p.nombre ?? '').toLowerCase().includes(term));
   }, [paisOptions, busquedaPais]);
 
   const ramasGastoFiltradas = useMemo(() => {
     const term = busquedaRamaGasto.trim().toLowerCase();
     if (!term) return ramasGasto;
-
     return ramasGasto.filter((r) => (r.nombre ?? '').toLowerCase().includes(term));
   }, [ramasGasto, busquedaRamaGasto]);
 
   const segmentosGastoFiltrados = useMemo(() => {
     const term = busquedaSegmentoGasto.trim().toLowerCase();
     if (!term) return segmentosGasto;
-
     return segmentosGasto.filter((s) => (s.nombre ?? '').toLowerCase().includes(term));
   }, [segmentosGasto, busquedaSegmentoGasto]);
 
   const ramasIngresoFiltradas = useMemo(() => {
     const term = busquedaRamaIngreso.trim().toLowerCase();
     if (!term) return ramasIngreso;
-
     return ramasIngreso.filter((r) => (r.nombre ?? '').toLowerCase().includes(term));
   }, [ramasIngreso, busquedaRamaIngreso]);
 
-  const ramasProveedorAuxFiltradas = useMemo(() => {
-    const term = busquedaRamaProveedorAux.trim().toLowerCase();
-    if (!term) return ramaOptions;
+  const subsegmentoRamasFiltradas = useMemo(() => {
+    const term = busquedaSubsegmentoRama.trim().toLowerCase();
+    if (!term) return subsegmentoRamasProveedor;
+    return subsegmentoRamasProveedor.filter((r) => (r.nombre ?? '').toLowerCase().includes(term));
+  }, [subsegmentoRamasProveedor, busquedaSubsegmentoRama]);
 
-    return ramaOptions.filter((r) => (r.nombre ?? '').toLowerCase().includes(term));
-  }, [ramaOptions, busquedaRamaProveedorAux]);
-
-  const subsegmentosFiltrados = useMemo(() => {
-    const term = busquedaSubsegmento.trim().toLowerCase();
-
-    let base = subsegmentoOptions;
-    if (ramaId) {
-      const sameRama = base.filter((s) => (s.rama_id ?? null) === ramaId);
-      if (sameRama.length > 0) {
-        base = sameRama;
-      }
-    }
-
-    if (!term) return base;
-    return base.filter((s) => (s.nombre ?? '').toLowerCase().includes(term));
-  }, [subsegmentoOptions, busquedaSubsegmento, ramaId]);
-
-  // ===========================================================================
-  // SELECTED MEMOS
-  // ===========================================================================
-  const selectedRama = useMemo(() => {
-    if (!ramaId) return null;
-
-    const found = ramaOptions.find((r) => r.id === ramaId);
-    if (found) return found;
-
-    if (ramaNombre) return ({ id: ramaId, nombre: ramaNombre } as any);
-    return null;
-  }, [ramaId, ramaNombre, ramaOptions]);
-
-  const selectedRamaIngreso = useMemo(() => {
-    if (!ramaIngresoId) return null;
-    return ramasIngreso.find((r) => r.id === ramaIngresoId) ?? null;
-  }, [ramaIngresoId, ramasIngreso]);
-
-  const selectedRamaProveedorAux = useMemo(() => {
-    if (!ramaProveedorAuxId) return null;
-    return ramaOptions.find((r) => r.id === ramaProveedorAuxId) ?? null;
-  }, [ramaProveedorAuxId, ramaOptions]);
-
-  const selectedSubsegmento = useMemo(() => {
-    if (!subsegmentoId) return null;
-    return subsegmentoOptions.find((s) => s.id === subsegmentoId) ?? null;
-  }, [subsegmentoId, subsegmentoOptions]);
-
-  // ===========================================================================
-  // ACTIONS CLEAR
-  // ===========================================================================
+  // ==========================================================
+  // Select / clear
+  // ==========================================================
   const clearRama = () => {
     if (ramaBloqueada) return;
     setRamaId(null);
     setRamaNombre(null);
+    setSubsegmentoId(null);
+    setBusquedaSubsegmento('');
+  };
+
+  const clearSubsegmento = () => {
+    setSubsegmentoId(null);
+    setBusquedaSubsegmento('');
   };
 
   const clearLocalidad = () => {
@@ -830,14 +707,6 @@ export const AuxEntityFormScreen: React.FC<Props> = ({ navigation, route }) => {
     setPais('');
   };
 
-  const clearSubsegmento = () => {
-    setSubsegmentoId(null);
-    setBusquedaSubsegmento('');
-  };
-
-  // ===========================================================================
-  // NUEVA LOCALIDAD / CREACIÓN INLINE
-  // ===========================================================================
   const handleNuevaLocalidad = async () => {
     try {
       navigation.navigate('LocalidadForm', {
@@ -913,6 +782,9 @@ export const AuxEntityFormScreen: React.FC<Props> = ({ navigation, route }) => {
     setBusquedaPais('');
   };
 
+  // ==========================================================
+  // Creación inline ubicación
+  // ==========================================================
   const ensurePaisCreatedIfNeeded = async (): Promise<number | null> => {
     if (paisId) return paisId;
 
@@ -990,6 +862,7 @@ export const AuxEntityFormScreen: React.FC<Props> = ({ navigation, route }) => {
 
     const regionNombre = (creado as any)?.region?.nombre ?? '';
     const paisNombre = (creado as any)?.region?.pais?.nombre ?? '';
+
     setRegionId((creado as any)?.region?.id ?? rid);
     setComunidad(regionNombre);
     setPaisId((creado as any)?.region?.pais?.id ?? paisId ?? null);
@@ -1003,8 +876,8 @@ export const AuxEntityFormScreen: React.FC<Props> = ({ navigation, route }) => {
       if (exists) return prev;
       return [creado, ...prev].slice(0, 800);
     });
-    buildRegionAndPaisOptionsFromLocalidades([creado]);
 
+    buildRegionAndPaisOptionsFromLocalidades([creado]);
     return creado.id;
   };
 
@@ -1014,7 +887,6 @@ export const AuxEntityFormScreen: React.FC<Props> = ({ navigation, route }) => {
       Alert.alert('Campo requerido', 'Debes escribir un país.');
       return;
     }
-
     try {
       await ensurePaisCreatedIfNeeded();
     } catch (err) {
@@ -1029,7 +901,6 @@ export const AuxEntityFormScreen: React.FC<Props> = ({ navigation, route }) => {
       Alert.alert('Campo requerido', 'Debes escribir una comunidad / región.');
       return;
     }
-
     try {
       await ensureRegionCreatedIfNeeded();
     } catch (err) {
@@ -1044,7 +915,6 @@ export const AuxEntityFormScreen: React.FC<Props> = ({ navigation, route }) => {
       Alert.alert('Campo requerido', 'Debes escribir una localidad.');
       return;
     }
-
     try {
       await ensureLocalidadCreatedIfNeeded();
     } catch (err) {
@@ -1053,41 +923,42 @@ export const AuxEntityFormScreen: React.FC<Props> = ({ navigation, route }) => {
     }
   };
 
-  // ===========================================================================
-  // VALIDACIÓN PROVEEDOR
-  // ===========================================================================
-  const validateProveedorBeforeSave = (): boolean => {
-    const nombreFinal = nombre.trim();
+  // ==========================================================
+  // Validaciones
+  // ==========================================================
+  const normalize = (v: any) => String(v ?? '').trim();
 
-    if (!nombreFinal) {
-      Alert.alert('Campo requerido', 'Debes indicar un nombre.');
-      return false;
-    }
-
-    if (!ramaId) {
-      Alert.alert('Campo requerido', 'Debes seleccionar una rama.');
-      return false;
-    }
-
-    if (!isValidSpanishCif(cif)) {
-      Alert.alert('CIF inválido', 'El CIF no tiene un formato válido para España.');
-      return false;
-    }
-
-    if (!isValidEmail(email)) {
-      Alert.alert('Email inválido', 'Revisa el formato del correo electrónico.');
-      return false;
-    }
-
-    return true;
+  const isValidEmail = (value: string): boolean => {
+    const v = value.trim();
+    if (!v) return true;
+    return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v);
   };
 
-  // ===========================================================================
-  // GUARDAR AUX GENÉRICO
-  // ===========================================================================
+  const isValidTelefono = (value: string): boolean => {
+    const digits = value.replace(/\D/g, '');
+    if (!digits) return true;
+    return digits.length >= 9 && digits.length <= 15;
+  };
+
+  const isValidCodigoPostalES = (value: string): boolean => {
+    const v = value.trim();
+    if (!v) return true;
+    return /^(?:0[1-9]|[1-4]\d|5[0-2])\d{3}$/.test(v);
+  };
+
+  const isValidCifEspanaFlexible = (value: string): boolean => {
+    const raw = value.trim().toUpperCase();
+    if (!raw) return true;
+
+    const cleaned = raw.replace(/[\s-]/g, '');
+    return /^[ABCDEFGHJNPQRSUVW]\d{7}[0-9A-J]$/.test(cleaned);
+  };
+
+  // ==========================================================
+  // Guardado auxiliar genérico
+  // ==========================================================
   const handleSaveGenericAux = async () => {
     const nombreFinal = nombre.trim();
-
     if (!nombreFinal) {
       Alert.alert('Campo requerido', 'Debes indicar un nombre.');
       return;
@@ -1127,14 +998,9 @@ export const AuxEntityFormScreen: React.FC<Props> = ({ navigation, route }) => {
       }
 
       if (isSubsegmentoProveedor) {
-        if (!ramaProveedorAuxId) {
-          Alert.alert('Campo requerido', 'Debes seleccionar una rama de proveedor.');
-          return;
-        }
-
         payload = {
           nombre: nombreFinal,
-          rama_id: ramaProveedorAuxId,
+          rama_id: subsegmentoRamaId,
         };
       }
 
@@ -1177,18 +1043,45 @@ export const AuxEntityFormScreen: React.FC<Props> = ({ navigation, route }) => {
     }
   };
 
-  // ===========================================================================
-  // GUARDAR PROVEEDOR
-  // ===========================================================================
+  // ==========================================================
+  // Guardado proveedor
+  // ==========================================================
   const handleSave = async () => {
     if (!isProveedor) {
       await handleSaveGenericAux();
       return;
     }
 
-    if (!validateProveedorBeforeSave()) return;
-
     const nombreFinal = nombre.trim();
+    if (!nombreFinal) {
+      Alert.alert('Campo requerido', 'Debes indicar un nombre.');
+      return;
+    }
+
+    if (!ramaId) {
+      Alert.alert('Campo requerido', 'Debes seleccionar una rama.');
+      return;
+    }
+
+    if (!isValidCifEspanaFlexible(cif)) {
+      Alert.alert('Formato inválido', 'El CIF no tiene un formato español válido.');
+      return;
+    }
+
+    if (!isValidTelefono(telefono)) {
+      Alert.alert('Formato inválido', 'El teléfono no tiene un formato válido.');
+      return;
+    }
+
+    if (!isValidEmail(email)) {
+      Alert.alert('Formato inválido', 'El email no tiene un formato válido.');
+      return;
+    }
+
+    if (!isValidCodigoPostalES(codigoPostal)) {
+      Alert.alert('Formato inválido', 'El código postal debe ser español y tener 5 dígitos.');
+      return;
+    }
 
     try {
       const hasLocalidadText =
@@ -1200,27 +1093,22 @@ export const AuxEntityFormScreen: React.FC<Props> = ({ navigation, route }) => {
 
       const payloadForBackend = {
         nombre: nombreFinal,
-        rama_id: ramaId!,
+        rama_id: ramaId,
         localidad_id: finalLocalidadId,
         localidad: (localidad || null) as string | null,
         comunidad: (comunidad || null) as string | null,
         pais: (pais || null) as string | null,
-
-        cif: (cif.trim() || null) as string | null,
-        telefono: (telefono.trim() || null) as string | null,
-        email: (normalizeEmail(email) || null) as string | null,
-        subsegmento_id: (subsegmentoId || null) as string | null,
-        subsegmento: (
-          selectedSubsegmento?.nombre?.trim() ||
-          null
-        ) as string | null,
-        direccion: (direccion.trim() || null) as string | null,
-        codigo_postal: (codigoPostal.trim() || null) as string | null,
-        persona_contacto: (personaContacto.trim() || null) as string | null,
-        activo,
-        observaciones: (observaciones.trim() || null) as string | null,
+        cif: (cif || null) as string | null,
+        telefono: (telefono || null) as string | null,
+        email: (email || null) as string | null,
+        direccion: (direccion || null) as string | null,
+        codigo_postal: (codigoPostal || null) as string | null,
+        persona_contacto: (personaContacto || null) as string | null,
+        observaciones: (observaciones || null) as string | null,
+        ambito_servicio: (ambitoServicio || null) as string | null,
         acepta_urgencias: aceptaUrgencias,
-        ambito_servicio: (ambitoServicio.trim() || null) as string | null,
+        activo,
+        subsegmento_id: subsegmentoId,
       };
 
       if (isEditMode && editingProveedor) {
@@ -1236,7 +1124,7 @@ export const AuxEntityFormScreen: React.FC<Props> = ({ navigation, route }) => {
 
       const creado = await createProveedorFromAuxForm({
         nombre: nombreFinal,
-        ramaId: ramaId!,
+        ramaId,
         localidadId: finalLocalidadId,
         localidadTexto: payloadForBackend.localidad,
         comunidadTexto: payloadForBackend.comunidad,
@@ -1244,15 +1132,14 @@ export const AuxEntityFormScreen: React.FC<Props> = ({ navigation, route }) => {
         cif: payloadForBackend.cif,
         telefono: payloadForBackend.telefono,
         email: payloadForBackend.email,
-        subsegmentoId: payloadForBackend.subsegmento_id,
-        subsegmento: payloadForBackend.subsegmento,
         direccion: payloadForBackend.direccion,
         codigoPostal: payloadForBackend.codigo_postal,
         personaContacto: payloadForBackend.persona_contacto,
-        activo: payloadForBackend.activo,
         observaciones: payloadForBackend.observaciones,
-        aceptaUrgencias: payloadForBackend.acepta_urgencias,
         ambitoServicio: payloadForBackend.ambito_servicio,
+        aceptaUrgencias: payloadForBackend.acepta_urgencias,
+        activo: payloadForBackend.activo,
+        subsegmento: subsegmentoId,
       });
 
       sendResultAndClose({
@@ -1267,7 +1154,7 @@ export const AuxEntityFormScreen: React.FC<Props> = ({ navigation, route }) => {
         const data = err.response?.data;
         const detail = (data as any)?.detail;
 
-        console.error('[AuxEntityForm] Error al guardar (axios)', {
+        console.error('[AuxEntityForm] Error al guardar proveedor', {
           status,
           data,
           message: err.message,
@@ -1281,21 +1168,21 @@ export const AuxEntityFormScreen: React.FC<Props> = ({ navigation, route }) => {
         if (status === 422) {
           Alert.alert(
             'Datos inválidos',
-            'Revisa los campos requeridos y el formato de CIF/email.'
+            'Revisa los campos requeridos y el formato de CIF, email, teléfono o código postal.'
           );
           return;
         }
       } else {
-        console.error('[AuxEntityForm] Error al guardar (non-axios)', err);
+        console.error('[AuxEntityForm] Error al guardar proveedor (non-axios)', err);
       }
 
       Alert.alert('Error', 'No se ha podido guardar el registro.');
     }
   };
 
-  // ===========================================================================
-  // ELIMINAR
-  // ===========================================================================
+  // ==========================================================
+  // Eliminar
+  // ==========================================================
   const handleDelete = () => {
     if (!isEditMode) return;
 
@@ -1349,9 +1236,9 @@ export const AuxEntityFormScreen: React.FC<Props> = ({ navigation, route }) => {
     );
   };
 
-  // ===========================================================================
-  // DIRTY CHECK
-  // ===========================================================================
+  // ==========================================================
+  // Dirty state
+  // ==========================================================
   const initialSnapshot = useMemo<DirtySnapshot>(() => {
     if (isProveedor) {
       if (editingProveedor) {
@@ -1359,25 +1246,24 @@ export const AuxEntityFormScreen: React.FC<Props> = ({ navigation, route }) => {
           mode: 'proveedor',
           nombre: normalize(editingProveedor.nombre),
           ramaId: normalize(editingProveedor.rama_id),
+          subsegmentoId: normalize((editingProveedor as any)?.subsegmento_id),
           localidad: normalize(editingProveedor.localidad),
-          comunidad: normalize((editingProveedor as any).comunidad),
+          comunidad: normalize(editingProveedor.comunidad),
           pais: normalize(editingProveedor.pais),
-          cif: normalize((editingProveedor as any).cif),
-          telefono: normalize((editingProveedor as any).telefono),
-          email: normalize((editingProveedor as any).email),
-          subsegmentoId: normalize((editingProveedor as any).subsegmento_id),
-          direccion: normalize((editingProveedor as any).direccion),
-          codigoPostal: normalize((editingProveedor as any).codigo_postal),
-          personaContacto: normalize((editingProveedor as any).persona_contacto),
-          observaciones: normalize((editingProveedor as any).observaciones),
-          ambitoServicio: normalize((editingProveedor as any).ambito_servicio),
-          activo: String((editingProveedor as any).activo ?? true),
-          aceptaUrgencias: String((editingProveedor as any).acepta_urgencias ?? false),
+          cif: normalize((editingProveedor as any)?.cif),
+          telefono: normalize((editingProveedor as any)?.telefono),
+          email: normalize((editingProveedor as any)?.email),
+          direccion: normalize((editingProveedor as any)?.direccion),
+          codigoPostal: normalize((editingProveedor as any)?.codigo_postal),
+          personaContacto: normalize((editingProveedor as any)?.persona_contacto),
+          observaciones: normalize((editingProveedor as any)?.observaciones),
+          ambitoServicio: normalize((editingProveedor as any)?.ambito_servicio),
+          aceptaUrgencias: String(Boolean((editingProveedor as any)?.acepta_urgencias ?? false)),
+          activo: String((editingProveedor as any)?.activo !== false),
 
           ramaGastoId: '',
           segmentoGastoId: '',
           ramaIngresoId: '',
-          ramaProveedorId: '',
         };
       }
 
@@ -1385,25 +1271,24 @@ export const AuxEntityFormScreen: React.FC<Props> = ({ navigation, route }) => {
         mode: 'proveedor',
         nombre: '',
         ramaId: ramaBloqueada ? '' : normalize(ramaId),
+        subsegmentoId: '',
         localidad: '',
         comunidad: '',
         pais: '',
         cif: '',
         telefono: '',
         email: '',
-        subsegmentoId: '',
         direccion: '',
         codigoPostal: '',
         personaContacto: '',
         observaciones: '',
         ambitoServicio: '',
-        activo: 'true',
         aceptaUrgencias: 'false',
+        activo: 'true',
 
         ramaGastoId: '',
         segmentoGastoId: '',
         ramaIngresoId: '',
-        ramaProveedorId: '',
       };
     }
 
@@ -1413,25 +1298,24 @@ export const AuxEntityFormScreen: React.FC<Props> = ({ navigation, route }) => {
         nombre: normalize(editingItem.nombre),
 
         ramaId: '',
+        subsegmentoId: '',
         localidad: '',
         comunidad: '',
         pais: '',
         cif: '',
         telefono: '',
         email: '',
-        subsegmentoId: '',
         direccion: '',
         codigoPostal: '',
         personaContacto: '',
         observaciones: '',
         ambitoServicio: '',
-        activo: '',
         aceptaUrgencias: '',
+        activo: '',
 
         ramaGastoId: normalize((editingItem as any).rama_id),
         segmentoGastoId: normalize((editingItem as any).segmento_id),
         ramaIngresoId: normalize((editingItem as any).rama_id),
-        ramaProveedorId: normalize((editingItem as any).rama_id),
       };
     }
 
@@ -1440,25 +1324,24 @@ export const AuxEntityFormScreen: React.FC<Props> = ({ navigation, route }) => {
       nombre: '',
 
       ramaId: '',
+      subsegmentoId: '',
       localidad: '',
       comunidad: '',
       pais: '',
       cif: '',
       telefono: '',
       email: '',
-      subsegmentoId: '',
       direccion: '',
       codigoPostal: '',
       personaContacto: '',
       observaciones: '',
       ambitoServicio: '',
-      activo: '',
       aceptaUrgencias: '',
+      activo: '',
 
       ramaGastoId: '',
       segmentoGastoId: '',
       ramaIngresoId: '',
-      ramaProveedorId: '',
     };
   }, [isProveedor, editingProveedor, editingItem, ramaBloqueada, ramaId]);
 
@@ -1467,39 +1350,39 @@ export const AuxEntityFormScreen: React.FC<Props> = ({ navigation, route }) => {
       const current = {
         nombre: normalize(nombre),
         ramaId: ramaBloqueada ? '' : normalize(ramaId),
+        subsegmentoId: normalize(subsegmentoId),
         localidad: normalize(creatingLocalidad ? newLocalidadText : localidad),
         comunidad: normalize(creatingRegion ? newRegionText : comunidad),
         pais: normalize(creatingPais ? newPaisText : pais),
         cif: normalize(cif),
         telefono: normalize(telefono),
-        email: normalize(normalizeEmail(email)),
-        subsegmentoId: normalize(subsegmentoId),
+        email: normalize(email),
         direccion: normalize(direccion),
         codigoPostal: normalize(codigoPostal),
         personaContacto: normalize(personaContacto),
         observaciones: normalize(observaciones),
         ambitoServicio: normalize(ambitoServicio),
-        activo: String(activo),
-        aceptaUrgencias: String(aceptaUrgencias),
+        aceptaUrgencias: String(Boolean(aceptaUrgencias)),
+        activo: String(Boolean(activo)),
       };
 
       return (
         current.nombre !== initialSnapshot.nombre ||
         current.ramaId !== initialSnapshot.ramaId ||
+        current.subsegmentoId !== initialSnapshot.subsegmentoId ||
         current.localidad !== initialSnapshot.localidad ||
         current.comunidad !== initialSnapshot.comunidad ||
         current.pais !== initialSnapshot.pais ||
         current.cif !== initialSnapshot.cif ||
         current.telefono !== initialSnapshot.telefono ||
         current.email !== initialSnapshot.email ||
-        current.subsegmentoId !== initialSnapshot.subsegmentoId ||
         current.direccion !== initialSnapshot.direccion ||
         current.codigoPostal !== initialSnapshot.codigoPostal ||
         current.personaContacto !== initialSnapshot.personaContacto ||
         current.observaciones !== initialSnapshot.observaciones ||
         current.ambitoServicio !== initialSnapshot.ambitoServicio ||
-        current.activo !== initialSnapshot.activo ||
-        current.aceptaUrgencias !== initialSnapshot.aceptaUrgencias
+        current.aceptaUrgencias !== initialSnapshot.aceptaUrgencias ||
+        current.activo !== initialSnapshot.activo
       );
     }
 
@@ -1508,35 +1391,33 @@ export const AuxEntityFormScreen: React.FC<Props> = ({ navigation, route }) => {
       ramaGastoId: normalize(ramaGastoId),
       segmentoGastoId: normalize(segmentoGastoId),
       ramaIngresoId: normalize(ramaIngresoId),
-      ramaProveedorId: normalize(ramaProveedorAuxId),
     };
 
     return (
       current.nombre !== initialSnapshot.nombre ||
       current.ramaGastoId !== initialSnapshot.ramaGastoId ||
       current.segmentoGastoId !== initialSnapshot.segmentoGastoId ||
-      current.ramaIngresoId !== initialSnapshot.ramaIngresoId ||
-      current.ramaProveedorId !== initialSnapshot.ramaProveedorId
+      current.ramaIngresoId !== initialSnapshot.ramaIngresoId
     );
   }, [
     isProveedor,
     nombre,
     ramaId,
     ramaBloqueada,
+    subsegmentoId,
     localidad,
     comunidad,
     pais,
     cif,
     telefono,
     email,
-    subsegmentoId,
     direccion,
     codigoPostal,
     personaContacto,
     observaciones,
     ambitoServicio,
-    activo,
     aceptaUrgencias,
+    activo,
     creatingLocalidad,
     creatingRegion,
     creatingPais,
@@ -1546,7 +1427,6 @@ export const AuxEntityFormScreen: React.FC<Props> = ({ navigation, route }) => {
     ramaGastoId,
     segmentoGastoId,
     ramaIngresoId,
-    ramaProveedorAuxId,
     initialSnapshot,
   ]);
 
@@ -1566,9 +1446,9 @@ export const AuxEntityFormScreen: React.FC<Props> = ({ navigation, route }) => {
     );
   };
 
-  // ===========================================================================
-  // TÍTULO
-  // ===========================================================================
+  // ==========================================================
+  // Títulos
+  // ==========================================================
   const title =
     auxType === 'proveedor'
       ? isEditMode
@@ -1582,22 +1462,6 @@ export const AuxEntityFormScreen: React.FC<Props> = ({ navigation, route }) => {
       ? isEditMode
         ? 'Editar tipo de ingreso'
         : 'Nuevo tipo de ingreso'
-      : auxType === 'tipo_ramas_ingreso'
-      ? isEditMode
-        ? 'Editar rama de ingreso'
-        : 'Nueva rama de ingreso'
-      : auxType === 'tipo_ramas_gasto'
-      ? isEditMode
-        ? 'Editar rama de gasto'
-        : 'Nueva rama de gasto'
-      : auxType === 'tipo_ramas_proveedores'
-      ? isEditMode
-        ? 'Editar rama de proveedor'
-        : 'Nueva rama de proveedor'
-      : auxType === 'tipo_segmento_gasto'
-      ? isEditMode
-        ? 'Editar segmento de gasto'
-        : 'Nuevo segmento de gasto'
       : auxType === 'tipo_subsegmento_proveedor'
       ? isEditMode
         ? 'Editar subsegmento de proveedor'
@@ -1606,9 +1470,32 @@ export const AuxEntityFormScreen: React.FC<Props> = ({ navigation, route }) => {
       ? 'Editar registro'
       : 'Nuevo registro';
 
-  // ===========================================================================
-  // RENDER
-  // ===========================================================================
+  const selectedRama = useMemo(() => {
+    if (!ramaId) return null;
+    const found = ramaOptions.find((r) => r.id === ramaId);
+    if (found) return found;
+    if (ramaNombre) return ({ id: ramaId, nombre: ramaNombre } as any);
+    return null;
+  }, [ramaId, ramaNombre, ramaOptions]);
+
+  const selectedSubsegmento = useMemo(() => {
+    if (!subsegmentoId) return null;
+    return subsegmentoOptions.find((s) => s.id === subsegmentoId) ?? null;
+  }, [subsegmentoId, subsegmentoOptions]);
+
+  const selectedRamaIngreso = useMemo(() => {
+    if (!ramaIngresoId) return null;
+    return ramasIngreso.find((r) => r.id === ramaIngresoId) ?? null;
+  }, [ramaIngresoId, ramasIngreso]);
+
+  const selectedSubsegmentoRama = useMemo(() => {
+    if (!subsegmentoRamaId) return null;
+    return subsegmentoRamasProveedor.find((r) => r.id === subsegmentoRamaId) ?? null;
+  }, [subsegmentoRamaId, subsegmentoRamasProveedor]);
+
+  // ==========================================================
+  // Render
+  // ==========================================================
   return (
     <FormScreen
       title={title}
@@ -1643,7 +1530,17 @@ export const AuxEntityFormScreen: React.FC<Props> = ({ navigation, route }) => {
       </FormSection>
 
       {!isProveedor ? (
-        <FormSection title="Configuración">
+        <FormSection
+          title={
+            isTipoGasto
+              ? 'Configuración tipo de gasto'
+              : isTipoIngreso
+              ? 'Configuración tipo de ingreso'
+              : isSubsegmentoProveedor
+              ? 'Configuración subsegmento de proveedor'
+              : 'Configuración'
+          }
+        >
           {isTipoGasto ? (
             <>
               <View style={styles.field}>
@@ -1656,7 +1553,7 @@ export const AuxEntityFormScreen: React.FC<Props> = ({ navigation, route }) => {
                   selectedLabel={(x) => x.nombre}
                   onClear={() => setRamaGastoId(null)}
                   query={busquedaRamaGasto}
-                  onChangeQuery={(v) => setBusquedaRamaGasto(v)}
+                  onChangeQuery={setBusquedaRamaGasto}
                   placeholder="Escribe para buscar rama"
                   options={ramasGastoFiltradas}
                   optionKey={(x) => x.id}
@@ -1683,7 +1580,7 @@ export const AuxEntityFormScreen: React.FC<Props> = ({ navigation, route }) => {
                   selectedLabel={(x) => x.nombre}
                   onClear={() => setSegmentoGastoId(null)}
                   query={busquedaSegmentoGasto}
-                  onChangeQuery={(v) => setBusquedaSegmentoGasto(v)}
+                  onChangeQuery={setBusquedaSegmentoGasto}
                   placeholder="Escribe para buscar segmento"
                   options={segmentosGastoFiltrados}
                   optionKey={(x) => x.id}
@@ -1707,7 +1604,7 @@ export const AuxEntityFormScreen: React.FC<Props> = ({ navigation, route }) => {
                 selectedLabel={(x) => x.nombre}
                 onClear={() => setRamaIngresoId(null)}
                 query={busquedaRamaIngreso}
-                onChangeQuery={(v) => setBusquedaRamaIngreso(v)}
+                onChangeQuery={setBusquedaRamaIngreso}
                 placeholder="Escribe para buscar rama de ingreso"
                 options={ramasIngresoFiltradas}
                 optionKey={(x) => x.id}
@@ -1722,24 +1619,24 @@ export const AuxEntityFormScreen: React.FC<Props> = ({ navigation, route }) => {
           ) : isSubsegmentoProveedor ? (
             <View style={styles.field}>
               <InlineSearchSelect<RamaProveedor>
-                label="Rama de proveedor"
+                label="Rama de proveedor (opcional)"
                 onAddPress={NOOP}
                 addAccessibilityLabel="Añadir (no aplica)"
                 disabled={false}
-                selected={selectedRamaProveedorAux}
+                selected={selectedSubsegmentoRama}
                 selectedLabel={(x) => x.nombre}
-                onClear={() => setRamaProveedorAuxId(null)}
-                query={busquedaRamaProveedorAux}
-                onChangeQuery={(v) => setBusquedaRamaProveedorAux(v)}
-                placeholder="Escribe para buscar rama"
-                options={ramasProveedorAuxFiltradas}
+                onClear={() => setSubsegmentoRamaId(null)}
+                query={busquedaSubsegmentoRama}
+                onChangeQuery={setBusquedaSubsegmentoRama}
+                placeholder="Escribe para buscar rama de proveedor"
+                options={subsegmentoRamasFiltradas}
                 optionKey={(x) => x.id}
                 optionLabel={(x) => x.nombre}
                 onSelect={(x) => {
-                  setRamaProveedorAuxId(x.id);
-                  setBusquedaRamaProveedorAux('');
+                  setSubsegmentoRamaId(x.id);
+                  setBusquedaSubsegmentoRama('');
                 }}
-                emptyText="No hay ramas que coincidan con la búsqueda."
+                emptyText="No hay ramas de proveedor que coincidan con la búsqueda."
               />
             </View>
           ) : (
@@ -1772,6 +1669,7 @@ export const AuxEntityFormScreen: React.FC<Props> = ({ navigation, route }) => {
                   if (ramaBloqueada) return;
                   setRamaId(r.id);
                   setRamaNombre(r.nombre);
+                  setSubsegmentoId(null);
                   setBusquedaRamaProveedor('');
                 }}
                 emptyText="No hay ramas que coincidan con la búsqueda."
@@ -1781,57 +1679,21 @@ export const AuxEntityFormScreen: React.FC<Props> = ({ navigation, route }) => {
             </View>
 
             <View style={styles.field}>
-              <Text style={styles.label}>CIF</Text>
-              <TextInput
-                style={[styles.input, cif.trim() !== '' ? styles.inputFilled : null]}
-                placeholder="Ej. B12345678"
-                value={cif}
-                onChangeText={(v) => setCif(v.toUpperCase())}
-                autoCapitalize="characters"
-              />
-            </View>
-
-            <View style={styles.fieldRowTwoCols}>
-              <View style={styles.col}>
-                <Text style={styles.label}>Teléfono</Text>
-                <TextInput
-                  style={[styles.input, telefono.trim() !== '' ? styles.inputFilled : null]}
-                  placeholder="Ej. 600123123"
-                  value={telefono}
-                  onChangeText={setTelefono}
-                  keyboardType="phone-pad"
-                />
-              </View>
-
-              <View style={styles.col}>
-                <Text style={styles.label}>Email</Text>
-                <TextInput
-                  style={[styles.input, email.trim() !== '' ? styles.inputFilled : null]}
-                  placeholder="correo@dominio.com"
-                  value={email}
-                  onChangeText={setEmail}
-                  keyboardType="email-address"
-                  autoCapitalize="none"
-                />
-              </View>
-            </View>
-
-            <View style={styles.field}>
-              <InlineSearchSelect<{ id: string; nombre: string; rama_id?: string | null }>
-                label="Subsegmento"
+              <InlineSearchSelect<TipoSubsegmentoProveedorItem>
+                label="Subsegmento (opcional)"
                 onAddPress={NOOP}
                 addAccessibilityLabel="Añadir (no aplica)"
-                disabled={false}
+                disabled={!ramaId}
                 selected={selectedSubsegmento}
                 selectedLabel={(x) => x.nombre}
                 onClear={clearSubsegmento}
                 query={busquedaSubsegmento}
                 onChangeQuery={(v) => {
                   setBusquedaSubsegmento(v);
-                  void ensureSubsegmentosLoaded();
+                  void ensureSubsegmentosProveedorLoaded(ramaId ?? null);
                 }}
-                placeholder="Escribe para buscar subsegmento"
-                options={subsegmentosFiltrados}
+                placeholder={ramaId ? 'Escribe para buscar subsegmento' : 'Selecciona antes una rama'}
+                options={subsegmentosProveedorFiltrados}
                 optionKey={(x) => x.id}
                 optionLabel={(x) => x.nombre}
                 onSelect={(x) => {
@@ -1844,16 +1706,6 @@ export const AuxEntityFormScreen: React.FC<Props> = ({ navigation, route }) => {
               {loadingSubsegmentos ? (
                 <Text style={styles.helperText}>Cargando subsegmentos...</Text>
               ) : null}
-            </View>
-
-            <View style={styles.field}>
-              <Text style={styles.label}>Persona de contacto</Text>
-              <TextInput
-                style={[styles.input, personaContacto.trim() !== '' ? styles.inputFilled : null]}
-                placeholder="Nombre de contacto"
-                value={personaContacto}
-                onChangeText={setPersonaContacto}
-              />
             </View>
           </FormSection>
 
@@ -1899,7 +1751,7 @@ export const AuxEntityFormScreen: React.FC<Props> = ({ navigation, route }) => {
                     onChangeText={setNewLocalidadText}
                   />
 
-                  <View style={ui.inlineActionsRow}>
+                  <View style={{ flexDirection: 'row', marginTop: spacing.sm, gap: 10 }}>
                     <TouchableOpacity style={ui.inlinePrimaryBtn} onPress={confirmNewLocalidad}>
                       <Text style={ui.inlinePrimaryText}>Crear localidad</Text>
                     </TouchableOpacity>
@@ -1955,45 +1807,6 @@ export const AuxEntityFormScreen: React.FC<Props> = ({ navigation, route }) => {
               />
 
               {loadingRegiones ? <Text style={styles.helperText}>Cargando regiones...</Text> : null}
-
-              {creatingRegion ? (
-                <View style={{ marginTop: spacing.sm }}>
-                  <SelectedInlineValue
-                    value="Creando nueva región (inline)"
-                    leftIconName="layers-outline"
-                    onClear={() => {
-                      setCreatingRegion(false);
-                      setNewRegionText('');
-                    }}
-                  />
-
-                  <TextInput
-                    style={[styles.input, newRegionText.trim() !== '' ? styles.inputFilled : null]}
-                    placeholder="Nombre de la región..."
-                    value={newRegionText}
-                    onChangeText={setNewRegionText}
-                  />
-
-                  <Text style={[styles.helperText, { marginTop: spacing.xs }]}>
-                    Para crear una región necesitas indicar un país.
-                  </Text>
-
-                  <View style={ui.inlineActionsRow}>
-                    <TouchableOpacity style={ui.inlinePrimaryBtn} onPress={confirmNewRegion}>
-                      <Text style={ui.inlinePrimaryText}>Crear región</Text>
-                    </TouchableOpacity>
-                    <TouchableOpacity
-                      style={ui.inlineSecondaryBtn}
-                      onPress={() => {
-                        setCreatingRegion(false);
-                        setNewRegionText('');
-                      }}
-                    >
-                      <Text style={ui.inlineSecondaryText}>Cancelar</Text>
-                    </TouchableOpacity>
-                  </View>
-                </View>
-              ) : null}
             </View>
 
             <View style={styles.field}>
@@ -2024,55 +1837,56 @@ export const AuxEntityFormScreen: React.FC<Props> = ({ navigation, route }) => {
               />
 
               {loadingPaises ? <Text style={styles.helperText}>Cargando países...</Text> : null}
+            </View>
+          </FormSection>
 
-              {creatingPais ? (
-                <View style={{ marginTop: spacing.sm }}>
-                  <SelectedInlineValue
-                    value="Creando nuevo país (inline)"
-                    leftIconName="flag-outline"
-                    onClear={() => {
-                      setCreatingPais(false);
-                      setNewPaisText('');
-                    }}
-                  />
-
-                  <TextInput
-                    style={[styles.input, newPaisText.trim() !== '' ? styles.inputFilled : null]}
-                    placeholder="Nombre del país..."
-                    value={newPaisText}
-                    onChangeText={setNewPaisText}
-                  />
-
-                  <View style={ui.inlineActionsRow}>
-                    <TouchableOpacity style={ui.inlinePrimaryBtn} onPress={confirmNewPais}>
-                      <Text style={ui.inlinePrimaryText}>Crear país</Text>
-                    </TouchableOpacity>
-                    <TouchableOpacity
-                      style={ui.inlineSecondaryBtn}
-                      onPress={() => {
-                        setCreatingPais(false);
-                        setNewPaisText('');
-                      }}
-                    >
-                      <Text style={ui.inlineSecondaryText}>Cancelar</Text>
-                    </TouchableOpacity>
-                  </View>
-                </View>
-              ) : null}
+          <FormSection title="Datos de contacto y operación">
+            <View style={styles.field}>
+              <Text style={styles.label}>CIF (opcional)</Text>
+              <TextInput
+                style={[styles.input, cif.trim() !== '' ? styles.inputFilled : null]}
+                placeholder="Ej. B12345678"
+                value={cif}
+                onChangeText={setCif}
+                autoCapitalize="characters"
+              />
             </View>
 
             <View style={styles.field}>
-              <Text style={styles.label}>Dirección</Text>
+              <Text style={styles.label}>Teléfono (opcional)</Text>
+              <TextInput
+                style={[styles.input, telefono.trim() !== '' ? styles.inputFilled : null]}
+                placeholder="Ej. 600123123"
+                value={telefono}
+                onChangeText={setTelefono}
+                keyboardType="phone-pad"
+              />
+            </View>
+
+            <View style={styles.field}>
+              <Text style={styles.label}>Email (opcional)</Text>
+              <TextInput
+                style={[styles.input, email.trim() !== '' ? styles.inputFilled : null]}
+                placeholder="Ej. contacto@proveedor.com"
+                value={email}
+                onChangeText={setEmail}
+                autoCapitalize="none"
+                keyboardType="email-address"
+              />
+            </View>
+
+            <View style={styles.field}>
+              <Text style={styles.label}>Dirección (opcional)</Text>
               <TextInput
                 style={[styles.input, direccion.trim() !== '' ? styles.inputFilled : null]}
-                placeholder="Dirección completa"
+                placeholder="Dirección..."
                 value={direccion}
                 onChangeText={setDireccion}
               />
             </View>
 
             <View style={styles.field}>
-              <Text style={styles.label}>Código postal</Text>
+              <Text style={styles.label}>Código postal (opcional)</Text>
               <TextInput
                 style={[styles.input, codigoPostal.trim() !== '' ? styles.inputFilled : null]}
                 placeholder="Ej. 28001"
@@ -2081,68 +1895,36 @@ export const AuxEntityFormScreen: React.FC<Props> = ({ navigation, route }) => {
                 keyboardType="number-pad"
               />
             </View>
-          </FormSection>
 
-          <FormSection title="Configuración adicional">
             <View style={styles.field}>
-              <Text style={styles.label}>Ámbito de servicio</Text>
+              <Text style={styles.label}>Persona de contacto (opcional)</Text>
+              <TextInput
+                style={[styles.input, personaContacto.trim() !== '' ? styles.inputFilled : null]}
+                placeholder="Nombre de contacto..."
+                value={personaContacto}
+                onChangeText={setPersonaContacto}
+              />
+            </View>
+
+            <View style={styles.field}>
+              <Text style={styles.label}>Ámbito de servicio (opcional)</Text>
               <TextInput
                 style={[styles.input, ambitoServicio.trim() !== '' ? styles.inputFilled : null]}
-                placeholder="Ej. local, provincial, nacional..."
+                placeholder="Ej. MADRID CAPITAL"
                 value={ambitoServicio}
                 onChangeText={setAmbitoServicio}
               />
             </View>
 
             <View style={styles.field}>
-              <Text style={styles.label}>Estado</Text>
-              <View style={styles.segmentosRow}>
-                <View style={styles.segmentoWrapper}>
-                  <PillButton
-                    label="Activo"
-                    selected={activo}
-                    onPress={() => setActivo(true)}
-                  />
-                </View>
-                <View style={styles.segmentoWrapper}>
-                  <PillButton
-                    label="Inactivo"
-                    selected={!activo}
-                    onPress={() => setActivo(false)}
-                  />
-                </View>
-              </View>
-            </View>
-
-            <View style={styles.field}>
-              <Text style={styles.label}>Acepta urgencias</Text>
-              <View style={styles.segmentosRow}>
-                <View style={styles.segmentoWrapper}>
-                  <PillButton
-                    label="Sí"
-                    selected={aceptaUrgencias}
-                    onPress={() => setAceptaUrgencias(true)}
-                  />
-                </View>
-                <View style={styles.segmentoWrapper}>
-                  <PillButton
-                    label="No"
-                    selected={!aceptaUrgencias}
-                    onPress={() => setAceptaUrgencias(false)}
-                  />
-                </View>
-              </View>
-            </View>
-
-            <View style={styles.field}>
-              <Text style={styles.label}>Observaciones</Text>
+              <Text style={styles.label}>Observaciones (opcional)</Text>
               <TextInput
                 style={[
                   styles.input,
+                  ui.inputMultiline,
                   observaciones.trim() !== '' ? styles.inputFilled : null,
-                  ui.multilineInput,
                 ]}
-                placeholder="Añade observaciones del proveedor..."
+                placeholder="Notas internas..."
                 value={observaciones}
                 onChangeText={setObservaciones}
                 multiline
@@ -2151,9 +1933,49 @@ export const AuxEntityFormScreen: React.FC<Props> = ({ navigation, route }) => {
               />
             </View>
 
-            <Text style={styles.helperText}>
-              Con nombre, rama y localidad es suficiente para el alta mínima. El resto de campos son ampliaciones del perfil del proveedor.
-            </Text>
+            <View style={styles.field}>
+              <Text style={styles.label}>Acepta urgencias</Text>
+              <View style={ui.booleanRow}>
+                <View style={ui.booleanItem}>
+                  <PillButton
+                    label="Sí"
+                    selected={aceptaUrgencias === true}
+                    onPress={() => setAceptaUrgencias(true)}
+                    size="sm"
+                  />
+                </View>
+                <View style={ui.booleanItem}>
+                  <PillButton
+                    label="No"
+                    selected={aceptaUrgencias === false}
+                    onPress={() => setAceptaUrgencias(false)}
+                    size="sm"
+                  />
+                </View>
+              </View>
+            </View>
+
+            <View style={styles.field}>
+              <Text style={styles.label}>Activo</Text>
+              <View style={ui.booleanRow}>
+                <View style={ui.booleanItem}>
+                  <PillButton
+                    label="Sí"
+                    selected={activo === true}
+                    onPress={() => setActivo(true)}
+                    size="sm"
+                  />
+                </View>
+                <View style={ui.booleanItem}>
+                  <PillButton
+                    label="No"
+                    selected={activo === false}
+                    onPress={() => setActivo(false)}
+                    size="sm"
+                  />
+                </View>
+              </View>
+            </View>
           </FormSection>
         </>
       )}
@@ -2164,10 +1986,18 @@ export const AuxEntityFormScreen: React.FC<Props> = ({ navigation, route }) => {
 export default AuxEntityFormScreen;
 
 const ui = StyleSheet.create({
-  inlineActionsRow: {
+  inputMultiline: {
+    minHeight: 96,
+    paddingTop: 12,
+    paddingBottom: 12,
+  },
+  booleanRow: {
     flexDirection: 'row',
-    marginTop: spacing.sm,
-    gap: 10,
+    gap: spacing.sm,
+    flexWrap: 'wrap',
+  },
+  booleanItem: {
+    minWidth: 72,
   },
   inlinePrimaryBtn: {
     flex: 1,
@@ -2208,10 +2038,5 @@ const ui = StyleSheet.create({
     color: '#FFFFFF',
     fontWeight: '600',
     fontSize: 15,
-  },
-  multilineInput: {
-    minHeight: 96,
-    paddingTop: 12,
-    paddingBottom: 12,
   },
 });
