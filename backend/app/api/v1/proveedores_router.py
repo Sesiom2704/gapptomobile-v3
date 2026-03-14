@@ -1,6 +1,6 @@
 """
 Ruta: backend/app/api/v1/proveedores_router.py
-Versión: 1.6.0
+Versión: 1.7.0
 Descripción:
 Router de proveedores para GapptoMobile v3.
 
@@ -16,6 +16,9 @@ Responsabilidades:
   del formulario/listado principal.
 
 Cambios de esta versión:
+- En /proveedores:
+    * se añade `associated_count` por proveedor para que el listado frontend
+      pueda mostrar el número real de registros asociados.
 - En /{prov_id}/relaciones:
     * se filtran las relaciones con count = 0
     * associated_count se calcula sobre las relaciones visibles
@@ -23,11 +26,11 @@ Cambios de esta versión:
 
 from __future__ import annotations
 
-from typing import List, Optional
+from typing import List, Optional, Dict
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session, joinedload
-from sqlalchemy import or_
+from sqlalchemy import or_, func
 
 from backend.app.api.v1.auth_router import require_user
 from backend.app.db.session import get_db
@@ -172,6 +175,130 @@ def _get_proveedor_for_user(
     return obj
 
 
+def _build_count_map(query_rows: list[tuple[str, int]]) -> Dict[str, int]:
+    """
+    Convierte filas agregadas SQL [(fk_id, count), ...] a dict.
+    """
+    out: Dict[str, int] = {}
+    for fk_id, qty in query_rows:
+        key = str(fk_id or "").strip()
+        if not key:
+            continue
+        out[key] = int(qty or 0)
+    return out
+
+
+def _merge_count_maps(*maps: Dict[str, int]) -> Dict[str, int]:
+    """
+    Suma múltiples mapas de contadores por la misma clave.
+    """
+    merged: Dict[str, int] = {}
+    for mp in maps:
+        for key, value in mp.items():
+            merged[key] = merged.get(key, 0) + int(value or 0)
+    return merged
+
+
+def _get_proveedor_associated_count_map(
+    db: Session,
+    current_user: models.User,
+) -> Dict[str, int]:
+    """
+    Calcula el número real de referencias asociadas por proveedor del usuario.
+
+    Relaciones consideradas:
+    - cuentas_bancarias
+    - gastos
+    - gastos_cotidianos
+    - inversiones_como_proveedor
+    - inversiones_como_dealer
+    - incidencias_actuales
+    - asignaciones_incidencia
+    - citas_incidencia
+    """
+    cuentas_rows = (
+        db.query(models.CuentaBancaria.banco_id, func.count(models.CuentaBancaria.id))
+        .filter(models.CuentaBancaria.banco_id.isnot(None))
+        .group_by(models.CuentaBancaria.banco_id)
+        .all()
+    )
+
+    gastos_rows = (
+        db.query(models.Gasto.proveedor_id, func.count(models.Gasto.id))
+        .filter(
+            models.Gasto.proveedor_id.isnot(None),
+            models.Gasto.user_id == current_user.id,
+        )
+        .group_by(models.Gasto.proveedor_id)
+        .all()
+    )
+
+    cotidianos_rows = (
+        db.query(models.GastoCotidiano.proveedor_id, func.count(models.GastoCotidiano.id))
+        .filter(
+            models.GastoCotidiano.proveedor_id.isnot(None),
+            models.GastoCotidiano.user_id == current_user.id,
+        )
+        .group_by(models.GastoCotidiano.proveedor_id)
+        .all()
+    )
+
+    inversiones_proveedor_rows = (
+        db.query(models.Inversion.proveedor_id, func.count(models.Inversion.id))
+        .filter(
+            models.Inversion.proveedor_id.isnot(None),
+            models.Inversion.user_id == current_user.id,
+        )
+        .group_by(models.Inversion.proveedor_id)
+        .all()
+    )
+
+    inversiones_dealer_rows = (
+        db.query(models.Inversion.dealer_id, func.count(models.Inversion.id))
+        .filter(
+            models.Inversion.dealer_id.isnot(None),
+            models.Inversion.user_id == current_user.id,
+        )
+        .group_by(models.Inversion.dealer_id)
+        .all()
+    )
+
+    incidencias_rows = (
+        db.query(models.Incidencia.proveedor_actual_id, func.count(models.Incidencia.id))
+        .filter(
+            models.Incidencia.proveedor_actual_id.isnot(None),
+            models.Incidencia.user_id == current_user.id,
+        )
+        .group_by(models.Incidencia.proveedor_actual_id)
+        .all()
+    )
+
+    asignaciones_rows = (
+        db.query(models.AsignacionIncidencia.proveedor_id, func.count(models.AsignacionIncidencia.id))
+        .filter(models.AsignacionIncidencia.proveedor_id.isnot(None))
+        .group_by(models.AsignacionIncidencia.proveedor_id)
+        .all()
+    )
+
+    citas_rows = (
+        db.query(models.CitaIncidencia.proveedor_id, func.count(models.CitaIncidencia.id))
+        .filter(models.CitaIncidencia.proveedor_id.isnot(None))
+        .group_by(models.CitaIncidencia.proveedor_id)
+        .all()
+    )
+
+    return _merge_count_maps(
+        _build_count_map(cuentas_rows),
+        _build_count_map(gastos_rows),
+        _build_count_map(cotidianos_rows),
+        _build_count_map(inversiones_proveedor_rows),
+        _build_count_map(inversiones_dealer_rows),
+        _build_count_map(incidencias_rows),
+        _build_count_map(asignaciones_rows),
+        _build_count_map(citas_rows),
+    )
+
+
 def _build_proveedor_relation_counts(
     db: Session,
     prov_id: str,
@@ -246,6 +373,7 @@ def list_proveedores(
 ):
     """
     Lista proveedores del usuario autenticado.
+    Incluye associated_count para el listado frontend.
     """
     qry = (
         db.query(models.Proveedor)
@@ -265,8 +393,16 @@ def list_proveedores(
     if subsegmento_id:
         qry = qry.filter(models.Proveedor.subsegmento_id == subsegmento_id)
 
-    qry = qry.order_by(models.Proveedor.nombre.asc(), models.Proveedor.id.asc())
-    return qry.all()
+    items = qry.order_by(models.Proveedor.nombre.asc(), models.Proveedor.id.asc()).all()
+    count_map = _get_proveedor_associated_count_map(db, current_user)
+
+    result: list[ProveedorRead] = []
+    for item in items:
+        serialized = ProveedorRead.model_validate(item).model_dump()
+        serialized["associated_count"] = int(count_map.get(item.id, 0))
+        result.append(ProveedorRead(**serialized))
+
+    return result
 
 
 # =============================================================================

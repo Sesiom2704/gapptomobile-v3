@@ -1,6 +1,6 @@
 """
 Ruta: backend/app/schemas/proveedores.py
-Versión: 1.4.0
+Versión: 1.5.0
 Descripción:
 Schemas Pydantic para PROVEEDORES en GapptoMobile v3.
 
@@ -27,6 +27,7 @@ Objetivos:
     * created_at / updated_at
 - Separar el detalle de relaciones en un schema específico on-demand
   para no penalizar el rendimiento del listado/formulario principal.
+- Añadir soporte para associated_count en listados.
 """
 
 from __future__ import annotations
@@ -199,8 +200,10 @@ class ProveedorRead(BaseModel):
     Representación de salida estable del proveedor.
 
     Nota:
-    - No incluye conteos de relaciones para evitar consultas pesadas
+    - No incluye detalle de relation_counts para evitar consultas pesadas
       en listados y formularios.
+    - Sí incluye associated_count para que el listado pueda mostrar el número
+      real de registros asociados sin hacer llamadas extra.
     """
     id: str
     nombre: str
@@ -228,6 +231,10 @@ class ProveedorRead(BaseModel):
     ambito_servicio: Optional[str] = None
 
     user_id: Optional[int] = None
+    associated_count: int = Field(
+        0,
+        description="Número real de registros asociados al proveedor.",
+    )
 
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
