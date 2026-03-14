@@ -1,8 +1,8 @@
 // mobile_app/screens/personas/PersonasListScreen.tsx
 //
-// Maestro de Personas (v1)
+// Maestro de Personas (v2)
 //
-// Objetivo de esta versión:
+// Objetivo:
 // - Crear un módulo propio de Personas, separado del sistema genérico AuxEntity.
 // - Mantener el patrón visual y UX de AuxEntityListScreen.
 // - Servir como maestro reutilizable para contratos (inquilinos, avalistas, gestores).
@@ -13,14 +13,10 @@
 // - Recarga automática al volver al foco.
 // - Navegación preparada a PersonaForm.
 // - Botón añadir en cabecera.
-//
-// Próximo paso previsto:
-// - Crear PersonaFormScreen.tsx
-// - Añadir entrada en AuxTablesHomeScreen
-// - Conectar selección de personas existentes desde ContratoParticipantesScreen
+// - Muestra `associatedCount` en cada fila para visualizar los registros asociados.
 
 import React, { useEffect, useState, useCallback, useMemo } from 'react';
-import { View, Text, ScrollView, TextInput, TouchableOpacity } from 'react-native';
+import { View, Text, ScrollView, TextInput, TouchableOpacity, StyleSheet } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 
 import { Header } from '../../components/layout/Header';
@@ -104,6 +100,10 @@ export const PersonasListScreen: React.FC<Props> = ({ navigation }) => {
     return parts.length ? parts.join(' · ') : null;
   };
 
+  const getAssociatedCount = (item: PersonaRow): number => {
+    return Number(item?.associatedCount ?? 0);
+  };
+
   return (
     <>
       <Header
@@ -164,6 +164,7 @@ export const PersonasListScreen: React.FC<Props> = ({ navigation }) => {
             filtered.map((item) => {
               const line2 = renderSecondaryLine(item);
               const line3 = item.email?.trim() ? item.email.trim() : null;
+              const associatedCount = getAssociatedCount(item);
 
               return (
                 <TouchableOpacity
@@ -172,7 +173,17 @@ export const PersonasListScreen: React.FC<Props> = ({ navigation }) => {
                   onPress={() => handleEdit(item)}
                 >
                   <View style={panelStyles.menuTextContainer}>
-                    <Text style={panelStyles.menuTitle}>{item.nombre_completo}</Text>
+                    <View style={ui.titleRow}>
+                      <Text style={[panelStyles.menuTitle, ui.titleText]}>
+                        {item.nombre_completo}
+                      </Text>
+
+                      {associatedCount > 0 ? (
+                        <View style={ui.countBadge}>
+                          <Text style={ui.countBadgeText}>{associatedCount}</Text>
+                        </View>
+                      ) : null}
+                    </View>
 
                     {line2 ? (
                       <Text style={panelStyles.menuSubtitle}>{line2}</Text>
@@ -181,6 +192,12 @@ export const PersonasListScreen: React.FC<Props> = ({ navigation }) => {
                     {line3 ? (
                       <Text style={panelStyles.menuSubtitle}>{line3}</Text>
                     ) : null}
+
+                    <Text style={ui.recordsText}>
+                      {associatedCount > 0
+                        ? `${associatedCount} registro${associatedCount === 1 ? '' : 's'} asociado${associatedCount === 1 ? '' : 's'}`
+                        : 'Sin registros asociados'}
+                    </Text>
                   </View>
 
                   <Ionicons
@@ -198,3 +215,34 @@ export const PersonasListScreen: React.FC<Props> = ({ navigation }) => {
 };
 
 export default PersonasListScreen;
+
+const ui = StyleSheet.create({
+  titleRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    marginBottom: 2,
+  },
+  titleText: {
+    flex: 1,
+  },
+  countBadge: {
+    minWidth: 28,
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 999,
+    backgroundColor: colors.primary,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  countBadgeText: {
+    color: '#FFFFFF',
+    fontSize: 12,
+    fontWeight: '700',
+  },
+  recordsText: {
+    marginTop: 4,
+    fontSize: 12,
+    color: colors.textSecondary,
+  },
+});

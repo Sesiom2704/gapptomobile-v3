@@ -1,6 +1,6 @@
 /**
- * Archivo: mobile_app/services/gestionAlquilerApi.ts
- * Versión: 4.0.0
+ * Ruta: mobile_app/services/gestionAlquilerApi.ts
+ * Versión: 4.1.0
  *
  * Servicio API para el módulo Gestión de Alquileres.
  *
@@ -10,6 +10,10 @@
  * - La "eliminación" funcional de contrato se resuelve con:
  *   - inactivatedon = now()
  *   - estado = 'cancelado' (opcional, aplicado por defecto en helper)
+ * - Añade soporte para relaciones de PERSONAS:
+ *   - associatedCount
+ *   - relationCounts
+ *   - getPersonaRelations()
  */
 
 import axios from 'axios';
@@ -19,6 +23,8 @@ const BASE = '/api/v1/gestion-alquiler';
 
 const ENDPOINT_PERSONAS = `${BASE}/personas`;
 const ENDPOINT_PERSONAS_PICKER = `${BASE}/personas/picker`;
+const ENDPOINT_PERSONA_RELACIONES = (personaId: string) =>
+  `${BASE}/personas/${encodeURIComponent(personaId)}/relaciones`;
 
 const ENDPOINT_CONTRATOS = `${BASE}/contratos`;
 const ENDPOINT_PATRIMONIO_RESUMEN_ACTIVO = (patrimonioId: string) =>
@@ -45,6 +51,19 @@ function safeArray<T>(value: T[] | null | undefined): T[] {
   return Array.isArray(value) ? value : [];
 }
 
+export type RelationCountItem = {
+  key: string;
+  label: string;
+  count: number;
+};
+
+export type PersonaRelationsResponse = {
+  id: string;
+  nombre_completo: string;
+  associated_count: number;
+  relation_counts: RelationCountItem[];
+};
+
 export type PersonaRow = {
   id: string;
   nombre_completo: string;
@@ -56,6 +75,8 @@ export type PersonaRow = {
   createon?: string | null;
   modifiedon?: string | null;
   inactivatedon?: string | null;
+  associatedCount?: number;
+  relationCounts?: RelationCountItem[];
 };
 
 export type PersonaPickerRow = {
@@ -232,10 +253,29 @@ export type ListContratosParams = {
   patrimonio_id?: string;
 };
 
-function normalizePersonaRow(r: PersonaRow): PersonaRow {
+function normalizeRelationCountItem(item: any): RelationCountItem {
+  return {
+    key: String(item?.key ?? ''),
+    label: String(item?.label ?? ''),
+    count: Number(item?.count ?? 0),
+  };
+}
+
+function normalizePersonaRow(r: any): PersonaRow {
   return {
     ...r,
-    nombre_completo: r.nombre_completo ?? '',
+    id: String(r?.id ?? ''),
+    nombre_completo: r?.nombre_completo ?? '',
+    associatedCount: Number(r?.associated_count ?? r?.associatedCount ?? 0),
+    relationCounts: Array.isArray(r?.relation_counts)
+      ? r.relation_counts
+          .map(normalizeRelationCountItem)
+          .filter((x: RelationCountItem) => x.count > 0)
+      : Array.isArray(r?.relationCounts)
+      ? r.relationCounts
+          .map(normalizeRelationCountItem)
+          .filter((x: RelationCountItem) => x.count > 0)
+      : undefined,
   };
 }
 
@@ -340,6 +380,27 @@ export async function getPersona(personaId: string): Promise<PersonaRow> {
     return normalizePersonaRow(res.data);
   } catch (err) {
     logAxiosError('[gestionAlquilerApi] Error obteniendo persona', err);
+    throw err;
+  }
+}
+
+export async function getPersonaRelations(personaId: string): Promise<PersonaRelationsResponse> {
+  const url = ENDPOINT_PERSONA_RELACIONES(personaId);
+  try {
+    const res = await api.get<any>(url);
+
+    return {
+      id: String(res.data?.id ?? personaId),
+      nombre_completo: String(res.data?.nombre_completo ?? ''),
+      associated_count: Number(res.data?.associated_count ?? 0),
+      relation_counts: Array.isArray(res.data?.relation_counts)
+        ? res.data.relation_counts
+            .map(normalizeRelationCountItem)
+            .filter((x: RelationCountItem) => x.count > 0)
+        : [],
+    };
+  } catch (err) {
+    logAxiosError('[gestionAlquilerApi] Error obteniendo relaciones de persona', err);
     throw err;
   }
 }
@@ -528,6 +589,7 @@ const gestionAlquilerApi = {
   listPersonas,
   listPersonasPicker,
   getPersona,
+  getPersonaRelations,
   createPersona,
   updatePersona,
   listContratos,

@@ -1,6 +1,6 @@
 /**
  * Ruta: mobile_app/screens/cuentasbancarias/CuentasBancariasListScreen.tsx
- * Versión: 2.0.0
+ * Versión: 2.0.1
  * Descripción:
  * Pantalla de listado de cuentas bancarias.
  *
@@ -9,6 +9,10 @@
  * - Permitir búsqueda.
  * - Navegar a creación/edición.
  * - Mostrar liquidez, estado y contador real de registros asociados.
+ *
+ * Ajustes:
+ * - Se añade export default del componente.
+ * - Se mantiene lectura de associatedCount desde cuentasApi.
  */
 
 import React, { useCallback, useMemo, useState } from 'react';
@@ -42,6 +46,7 @@ export const CuentasBancariasListScreen: React.FC<Props> = ({ navigation }) => {
       setItems(data ?? []);
     } catch (e) {
       console.error('[CuentasBancariasList] Error cargando cuentas', e);
+      setItems([]);
     } finally {
       setLoading(false);
     }
@@ -157,3 +162,5 @@ export const CuentasBancariasListScreen: React.FC<Props> = ({ navigation }) => {
     </>
   );
 };
+
+export default CuentasBancariasListScreen;

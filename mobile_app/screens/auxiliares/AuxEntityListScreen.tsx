@@ -1,6 +1,6 @@
 /**
  * Ruta: mobile_app/screens/auxiliares/AuxEntityListScreen.tsx
- * Versión: 2.0.0
+ * Versión: 2.0.1
  * Descripción:
  * Pantalla de listado genérico de tablas auxiliares.
  *
@@ -18,6 +18,7 @@
  * - Prioriza `associated_count` devuelto por backend.
  * - Mantiene compatibilidad con cálculos frontend solo como fallback.
  * - Mantiene la información contextual previa del listado.
+ * - Añade visualización de `associated_count` en proveedores cuando venga informado.
  */
 
 import React, { useEffect, useState, useCallback, useMemo } from 'react';
@@ -340,6 +341,11 @@ export const AuxEntityListScreen: React.FC<Props> = ({ navigation, route }) => {
                   ? (ramasProveedorMap[String(item.rama_id)] ?? String(item.rama_id))
                   : null;
 
+              const proveedorOwnCount =
+                auxType === 'proveedor'
+                  ? getAssociatedCount(item, 0)
+                  : null;
+
               const proveedorCount =
                 auxType === 'tipo_ramas_proveedores'
                   ? getAssociatedCount(item, proveedorCountByRama[String(item.id)] ?? 0)
@@ -388,6 +394,12 @@ export const AuxEntityListScreen: React.FC<Props> = ({ navigation, route }) => {
                         {item.pais ? ` · ${item.pais}` : ''}
                       </Text>
                     )}
+
+                    {auxType === 'proveedor' && proveedorOwnCount !== null ? (
+                      <Text style={panelStyles.menuSubtitle}>
+                        {countLabel(proveedorOwnCount)}
+                      </Text>
+                    ) : null}
 
                     {auxType === 'tipo_gasto' && (ramaGastoName || segmentoName) && (
                       <Text style={panelStyles.menuSubtitle}>

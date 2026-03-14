@@ -1,6 +1,6 @@
 /**
  * Ruta: mobile_app/screens/auxiliares/AuxEntityFormScreen.tsx
- * Versión: 2.3.2
+ * Versión: 2.3.3
  * Descripción:
  * Formulario genérico para creación y edición de auxiliares y proveedores.
  *
@@ -8,6 +8,9 @@
  * - El botón "Relaciones" se mantiene en el footer.
  * - El bloque con el detalle de relaciones se renderiza al final del formulario.
  * - Se ocultan las relaciones con count = 0.
+ * - El botón de relaciones se muestra cuando existe associated_count > 0,
+ *   aunque el detalle relation_counts no venga embebido todavía.
+ * - La tabla solo se renderiza cuando existe detalle real cargado.
  */
 
 import React, { useEffect, useMemo, useState } from 'react';
@@ -243,7 +246,8 @@ export const AuxEntityFormScreen: React.FC<Props> = ({ navigation, route }) => {
     return 0;
   }, [isProveedor, editingProveedor, editingItem, relationItems]);
 
-  const hasRelationsInfo = isEditMode && relationItems.length > 0;
+  const hasRelationsInfo = isEditMode && associatedCount > 0;
+  const hasRelationDetail = relationItems.length > 0;
 
   const findOwningNavigatorByRouteKey = (nav: any, targetRouteKey: string) => {
     let current = nav;
@@ -515,7 +519,13 @@ export const AuxEntityFormScreen: React.FC<Props> = ({ navigation, route }) => {
     };
 
     void loadCatalogs();
-  }, [isTipoGasto, isTipoIngreso, isSubsegmentoProveedor, route?.params?.defaultRamaId, editingItem?.rama_id]);
+  }, [
+    isTipoGasto,
+    isTipoIngreso,
+    isSubsegmentoProveedor,
+    route?.params?.defaultRamaId,
+    editingItem?.rama_id,
+  ]);
 
   useEffect(() => {
     if (!isProveedor) return;
@@ -1130,9 +1140,7 @@ export const AuxEntityFormScreen: React.FC<Props> = ({ navigation, route }) => {
       const hasLocalidadText =
         (creatingLocalidad ? newLocalidadText : localidad).trim().length > 0;
 
-      const finalLocalidadId = hasLocalidadText
-        ? await ensureLocalidadCreatedIfNeeded()
-        : null;
+      const finalLocalidadId = hasLocalidadText ? await ensureLocalidadCreatedIfNeeded() : null;
 
       const payloadForBackend = {
         nombre: nombreFinal,
@@ -2052,24 +2060,20 @@ export const AuxEntityFormScreen: React.FC<Props> = ({ navigation, route }) => {
         </>
       )}
 
-      {hasRelationsInfo && showRelations ? (
+      {hasRelationsInfo && showRelations && hasRelationDetail ? (
         <FormSection title={`Relaciones (${associatedCount} registros)`}>
-          {relationItems.length > 0 ? (
-            relationItems.map((rel) => (
-              <View key={rel.key} style={ui.relationRow}>
-                <View style={{ flex: 1 }}>
-                  <Text style={ui.relationLabel}>{rel.label}</Text>
-                  <Text style={ui.relationKey}>{rel.key}</Text>
-                </View>
-
-                <View style={ui.relationCountBadge}>
-                  <Text style={ui.relationCountText}>{rel.count}</Text>
-                </View>
+          {relationItems.map((rel) => (
+            <View key={rel.key} style={ui.relationRow}>
+              <View style={{ flex: 1 }}>
+                <Text style={ui.relationLabel}>{rel.label}</Text>
+                <Text style={ui.relationKey}>{rel.key}</Text>
               </View>
-            ))
-          ) : (
-            <Text style={styles.helperText}>No hay detalle de relaciones disponible.</Text>
-          )}
+
+              <View style={ui.relationCountBadge}>
+                <Text style={ui.relationCountText}>{rel.count}</Text>
+              </View>
+            </View>
+          ))}
         </FormSection>
       ) : null}
     </FormScreen>

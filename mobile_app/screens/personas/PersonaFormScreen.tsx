@@ -1,19 +1,12 @@
 // mobile_app/screens/personas/PersonaFormScreen.tsx
 //
-// Formulario de Personas (v1)
+// Formulario de Personas (v2)
 //
 // Objetivo:
-// - Crear un formulario propio para el maestro de personas.
-// - Mantener coherencia con AuxEntityFormScreen y formularios existentes.
-// - Permitir alta, edición y eliminación.
-// - Preparar reutilización futura desde contratos.
-//
-// Incluye:
-// - Confirmación al salir si hay cambios sin guardar.
-// - Guardado real con backend.
-// - Eliminación real en modo edición.
-// - Fecha de nacimiento con DatePicker.
-// - Campos: nombre, dni, teléfono, email, fecha nacimiento, observaciones.
+// - Crear/editar/eliminar personas.
+// - Mostrar relaciones on-demand.
+// - Renderizar el bloque de relaciones al final del formulario.
+// - Ocultar relaciones con count = 0.
 
 import React, { useEffect, useMemo, useState } from 'react';
 import {
@@ -38,7 +31,9 @@ import {
   createPersona,
   updatePersona,
   getPersona,
+  getPersonaRelations,
   type PersonaRow,
+  type RelationCountItem,
 } from '../../services/gestionAlquilerApi';
 import { api } from '../../services/api';
 import { formatFechaCorta } from '../../utils/format';
@@ -122,6 +117,15 @@ const PersonaFormScreen: React.FC<Props> = ({ navigation, route }) => {
   const [showDatePicker, setShowDatePicker] = useState(false);
   const [saving, setSaving] = useState(false);
 
+  const [showRelations, setShowRelations] = useState(false);
+  const [loadingRelations, setLoadingRelations] = useState(false);
+  const [relationCounts, setRelationCounts] = useState<RelationCountItem[]>(
+    Array.isArray(editingPersona?.relationCounts) ? editingPersona!.relationCounts! : []
+  );
+  const [associatedCount, setAssociatedCount] = useState<number>(
+    Number(editingPersona?.associatedCount ?? 0)
+  );
+
   // -------------------------
   // Carga en edición si solo viene personaId
   // -------------------------
@@ -138,6 +142,12 @@ const PersonaFormScreen: React.FC<Props> = ({ navigation, route }) => {
         setEmail(data.email ?? '');
         setFechaNacimiento(data.fecha_nacimiento ?? '');
         setObservaciones(data.observaciones ?? '');
+        setAssociatedCount(Number(data.associatedCount ?? 0));
+        setRelationCounts(
+          Array.isArray(data.relationCounts)
+            ? data.relationCounts.filter((x) => Number(x.count ?? 0) > 0)
+            : []
+        );
       } catch (err) {
         console.error('[PersonaForm] Error cargando persona', err);
         Alert.alert('Error', 'No se ha podido cargar la persona.');
@@ -148,6 +158,46 @@ const PersonaFormScreen: React.FC<Props> = ({ navigation, route }) => {
 
     void load();
   }, [personaId, editingPersona]);
+
+  useEffect(() => {
+    if (!editingPersona) return;
+    setAssociatedCount(Number(editingPersona.associatedCount ?? 0));
+    setRelationCounts(
+      Array.isArray(editingPersona.relationCounts)
+        ? editingPersona.relationCounts.filter((x) => Number(x.count ?? 0) > 0)
+        : []
+    );
+  }, [editingPersona]);
+
+  // -------------------------
+  // Relaciones on-demand
+  // -------------------------
+  const handleToggleRelations = async () => {
+    if (!personaId) return;
+
+    const next = !showRelations;
+    setShowRelations(next);
+
+    if (!next) return;
+
+    if (relationCounts.length > 0 || associatedCount > 0) return;
+
+    try {
+      setLoadingRelations(true);
+      const data = await getPersonaRelations(personaId);
+      const filtered = Array.isArray(data.relation_counts)
+        ? data.relation_counts.filter((x) => Number(x.count ?? 0) > 0)
+        : [];
+
+      setRelationCounts(filtered);
+      setAssociatedCount(Number(data.associated_count ?? 0));
+    } catch (err) {
+      console.error('[PersonaForm] Error cargando relaciones', err);
+      Alert.alert('Error', 'No se han podido cargar las relaciones.');
+    } finally {
+      setLoadingRelations(false);
+    }
+  };
 
   // -------------------------
   // Dirty control
@@ -316,6 +366,13 @@ const PersonaFormScreen: React.FC<Props> = ({ navigation, route }) => {
     ? 'Editar persona'
     : 'Nueva persona';
 
+  const visibleRelationCounts = useMemo(
+    () => relationCounts.filter((x) => Number(x.count ?? 0) > 0),
+    [relationCounts]
+  );
+
+  const hasRelationsInfo = isEditMode && associatedCount > 0;
+
   return (
     <FormScreen
       title={title}
@@ -324,6 +381,20 @@ const PersonaFormScreen: React.FC<Props> = ({ navigation, route }) => {
       footer={
         !readOnly ? (
           <View style={styles.bottomActions}>
+            {hasRelationsInfo ? (
+              <TouchableOpacity style={ui.relationsButton} onPress={handleToggleRelations}>
+                <Ionicons
+                  name={showRelations ? 'layers' : 'layers-outline'}
+                  size={18}
+                  color={colors.textPrimary}
+                  style={{ marginRight: 8 }}
+                />
+                <Text style={ui.relationsButtonText}>
+                  {showRelations ? 'Ocultar relaciones' : `Relaciones (${associatedCount})`}
+                </Text>
+              </TouchableOpacity>
+            ) : null}
+
             <TouchableOpacity style={styles.saveButton} onPress={handleSave} disabled={saving}>
               <Ionicons name="save-outline" size={18} color="#FFFFFF" style={{ marginRight: 8 }} />
               <Text style={styles.saveButtonText}>
@@ -337,6 +408,20 @@ const PersonaFormScreen: React.FC<Props> = ({ navigation, route }) => {
                 <Text style={ui.deleteButtonText}>Eliminar</Text>
               </TouchableOpacity>
             ) : null}
+          </View>
+        ) : hasRelationsInfo ? (
+          <View style={styles.bottomActions}>
+            <TouchableOpacity style={ui.relationsButton} onPress={handleToggleRelations}>
+              <Ionicons
+                name={showRelations ? 'layers' : 'layers-outline'}
+                size={18}
+                color={colors.textPrimary}
+                style={{ marginRight: 8 }}
+              />
+              <Text style={ui.relationsButtonText}>
+                {showRelations ? 'Ocultar relaciones' : `Relaciones (${associatedCount})`}
+              </Text>
+            </TouchableOpacity>
           </View>
         ) : undefined
       }
@@ -433,6 +518,29 @@ const PersonaFormScreen: React.FC<Props> = ({ navigation, route }) => {
           />
         </View>
       </FormSection>
+
+      {showRelations ? (
+        <FormSection title={`Relaciones (${associatedCount} registros)`}>
+          {loadingRelations ? (
+            <Text style={styles.helperText}>Cargando relaciones...</Text>
+          ) : visibleRelationCounts.length > 0 ? (
+            visibleRelationCounts.map((rel) => (
+              <View key={rel.key} style={ui.relationRow}>
+                <View style={{ flex: 1 }}>
+                  <Text style={ui.relationLabel}>{rel.label}</Text>
+                  <Text style={ui.relationKey}>{rel.key}</Text>
+                </View>
+
+                <View style={ui.relationCountBadge}>
+                  <Text style={ui.relationCountText}>{rel.count}</Text>
+                </View>
+              </View>
+            ))
+          ) : (
+            <Text style={styles.helperText}>No hay relaciones con registros asociados.</Text>
+          )}
+        </FormSection>
+      ) : null}
     </FormScreen>
   );
 };
@@ -443,6 +551,54 @@ const ui = StyleSheet.create({
   textArea: {
     minHeight: 120,
     paddingTop: 14,
+  },
+  relationsButton: {
+    marginBottom: 10,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderWidth: 1,
+    borderColor: colors.border,
+    backgroundColor: colors.surface ?? '#FFFFFF',
+    paddingVertical: spacing.md,
+    borderRadius: radius.lg,
+  },
+  relationsButtonText: {
+    color: colors.textPrimary,
+    fontWeight: '600',
+    fontSize: 15,
+  },
+  relationRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.md,
+    paddingVertical: 10,
+    borderBottomWidth: 1,
+    borderBottomColor: colors.border,
+  },
+  relationLabel: {
+    fontSize: 15,
+    fontWeight: '600',
+    color: colors.textPrimary,
+  },
+  relationKey: {
+    marginTop: 2,
+    fontSize: 12,
+    color: colors.textSecondary,
+  },
+  relationCountBadge: {
+    minWidth: 40,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 999,
+    backgroundColor: colors.primary,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  relationCountText: {
+    color: '#FFFFFF',
+    fontWeight: '700',
+    fontSize: 13,
   },
   deleteButton: {
     marginTop: 10,
@@ -458,4 +614,4 @@ const ui = StyleSheet.create({
     fontWeight: '600',
     fontSize: 15,
   },
-}); 
+});

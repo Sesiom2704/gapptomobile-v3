@@ -1,6 +1,6 @@
 """
 Archivo: backend/app/api/v1/gestion_alquiler_router.py
-Versión: 3.2.1
+Versión: 3.3.0
 
 Descripción:
 - API v1 del módulo de gestión de alquileres.
@@ -9,6 +9,7 @@ Descripción:
 - Añade soporte a objeto_alquiler en contratos.
 - Añade endpoint para calcular opciones disponibles de contrato por patrimonio.
 - Bloquea solapes funcionales con contratos activos ya existentes.
+- Añade soporte para conteos reales y relaciones on-demand de PERSONAS.
 
 Reglas nuevas:
 1. contratos.objeto_alquiler es obligatorio.
@@ -20,8 +21,10 @@ Reglas nuevas:
    - habitaciones solo si habitaciones > 1
 3. Si existe un contrato activo incompatible, la opción se devuelve deshabilitada.
 4. ingresos.concepto pasa a:
-   - ALQ SIN_INQ <REFERENCIA> si no hay inquilinos
-   - ALQ <NOMBRE_TRUNCADO_8> <REFERENCIA> si hay inquilinos
+   - ALQ <OBJETO_ALQUILADO> <REFERENCIA_VIVIENDA>
+5. personas:
+   - el listado expone associated_count
+   - el detalle de relaciones se consulta bajo demanda en /personas/{id}/relaciones
 """
 
 from __future__ import annotations
@@ -32,6 +35,7 @@ from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session, joinedload
+from sqlalchemy import func
 
 from backend.app.db.session import get_db
 from backend.app.db import models
@@ -272,18 +276,51 @@ def _is_contrato_no_operativo(contrato: models.Contrato) -> bool:
     contrato_inactivo = contrato.inactivatedon is not None
     return estado in {"finalizado", "cancelado"} or contrato_inactivo
 
+
+# ==========================================================
+# Helpers PERSONAS: conteos y relaciones
+# ==========================================================
+
+def _build_persona_count_map(db: Session, user_id: int) -> dict[str, int]:
+    """
+    Cuenta registros asociados por persona.
+
+    Actualmente:
+    - participaciones en contratos
+    """
+    rows = (
+        db.query(
+            models.ContratoParticipante.persona_id,
+            func.count(models.ContratoParticipante.id),
+        )
+        .filter(
+            models.ContratoParticipante.user_id == user_id,
+            models.ContratoParticipante.persona_id.isnot(None),
+            models.ContratoParticipante.inactivatedon.is_(None),
+        )
+        .group_by(models.ContratoParticipante.persona_id)
+        .all()
+    )
+
+    out: dict[str, int] = {}
+    for persona_id, qty in rows:
+        key = str(persona_id or "").strip()
+        if key:
+            out[key] = int(qty or 0)
+    return out
+
+
 def _build_persona_relation_counts(
     db: Session,
     persona_id: str,
     user_id: int,
 ) -> list[RelationCountItem]:
     """
-    Devuelve el detalle de tablas relacionadas y su número de registros.
-    Solo devuelve relaciones con count > 0.
+    Devuelve el detalle de relaciones reales de una persona.
     """
     relation_defs = [
         (
-            "contratos_participante",
+            "contrato_participantes",
             "Participaciones en contratos",
             db.query(models.ContratoParticipante)
             .filter(
@@ -302,30 +339,7 @@ def _build_persona_relation_counts(
     ]
 
 
-def _get_persona_associated_count(
-    db: Session,
-    persona_id: str,
-    user_id: int,
-) -> int:
-    """
-    Conteo agregado ligero para listados.
-    """
-    return (
-        db.query(models.ContratoParticipante)
-        .filter(
-            models.ContratoParticipante.user_id == user_id,
-            models.ContratoParticipante.persona_id == persona_id,
-            models.ContratoParticipante.inactivatedon.is_(None),
-        )
-        .count()
-    )
-
-
-def _persona_to_schema(
-    db: Session,
-    row: models.Persona,
-    user_id: int,
-) -> PersonaSchema:
+def _persona_to_schema(row: models.Persona, associated_count: int = 0) -> PersonaSchema:
     return PersonaSchema(
         id=row.id,
         user_id=row.user_id,
@@ -338,32 +352,28 @@ def _persona_to_schema(
         createon=row.createon,
         modifiedon=row.modifiedon,
         inactivatedon=row.inactivatedon,
-        associated_count=_get_persona_associated_count(db, row.id, user_id),
+        associated_count=int(associated_count or 0),
     )
+
 
 # ==========================================================
 # Helpers de objeto_alquiler y compatibilidad
 # ==========================================================
 
 def _get_tipo_inmueble_code(patrimonio: models.Patrimonio) -> str:
-    """
-    Extrae el código real de tipo_inmueble tanto si llega como string
-    como si llega como enum SQLAlchemy/Postgres.
-    """
     raw = getattr(patrimonio, "tipo_inmueble", None)
 
     if raw is None:
         return ""
 
-    # Caso enum Python / SQLAlchemy
     if hasattr(raw, "value"):
         return str(raw.value or "").strip().upper()
 
-    # Caso nombre de enum
     if hasattr(raw, "name"):
         return str(raw.name or "").strip().upper()
 
     return str(raw).strip().upper()
+
 
 def _is_habitacion_code(value: str) -> bool:
     return bool(re.match(r"^habitacion_\d+$", value or ""))
@@ -399,7 +409,6 @@ def _build_allowed_objeto_codes_for_patrimonio(patrimonio: models.Patrimonio) ->
 
     options: list[str] = ["completa"]
 
-    # Vivienda solo se muestra cuando hay anexos
     if garaje or trastero:
         options.append("vivienda")
 
@@ -418,12 +427,12 @@ def _build_allowed_objeto_codes_for_patrimonio(patrimonio: models.Patrimonio) ->
     if trastero:
         options.append("vivienda_trastero")
 
-    # Habitaciones solo si hay más de 1
     if habitaciones > 1:
         for i in range(1, habitaciones + 1):
             options.append(f"habitacion_{i}")
 
     return options
+
 
 def _objeto_uses_garaje(code: str) -> bool:
     return code in {"completa", "garaje", "garaje_trastero", "vivienda_garaje"}
@@ -434,13 +443,6 @@ def _objeto_uses_trastero(code: str) -> bool:
 
 
 def _objeto_housing_mode(code: str) -> str:
-    """
-    Devuelve:
-    - 'completa'
-    - 'vivienda'
-    - 'habitacion'
-    - 'none'
-    """
     if code == "completa":
         return "completa"
     if code in {"vivienda", "vivienda_garaje", "vivienda_trastero"}:
@@ -451,16 +453,6 @@ def _objeto_housing_mode(code: str) -> str:
 
 
 def _objeto_conflicts(candidate: str, existing: str) -> bool:
-    """
-    Comprueba incompatibilidad funcional.
-
-    Reglas:
-    - completa bloquea todo y queda bloqueada por todo
-    - vivienda (o vivienda+anexos) bloquea vivienda y habitaciones
-    - habitación solo choca con la misma habitación, con vivienda, o con completa
-    - garaje choca con cualquier opción que use garaje
-    - trastero choca con cualquier opción que use trastero
-    """
     c = candidate
     e = existing
 
@@ -470,21 +462,17 @@ def _objeto_conflicts(candidate: str, existing: str) -> bool:
     c_mode = _objeto_housing_mode(c)
     e_mode = _objeto_housing_mode(e)
 
-    # Vivienda completa vs vivienda / habitaciones
     if c_mode == "vivienda" and e_mode in {"vivienda", "habitacion"}:
         return True
     if e_mode == "vivienda" and c_mode in {"vivienda", "habitacion"}:
         return True
 
-    # Habitación concreta vs misma habitación
     if c_mode == "habitacion" and e_mode == "habitacion":
         return _parse_habitacion_num(c) == _parse_habitacion_num(e)
 
-    # Garaje
     if _objeto_uses_garaje(c) and _objeto_uses_garaje(e):
         return True
 
-    # Trastero
     if _objeto_uses_trastero(c) and _objeto_uses_trastero(e):
         return True
 
@@ -589,17 +577,6 @@ def _ensure_objeto_alquiler_is_valid_for_patrimonio(
 # ==========================================================
 
 def _build_ingreso_concepto_for_contrato(contrato: models.Contrato) -> str:
-    """
-    Construye el concepto del ingreso automático del alquiler.
-
-    Regla:
-    - ALQ <OBJETO_ALQUILADO> <REFERENCIA_VIVIENDA>
-
-    Ejemplos:
-    - ALQ COMPLETA FUENSAN2_JAVA
-    - ALQ GARAJE ALLENDE2_ALCA
-    - ALQ HAB 1 SAAVEDRA2_SAN
-    """
     referencia = (
         getattr(contrato.patrimonio_rel, "referencia", None)
         or contrato.patrimonio_id
@@ -610,6 +587,7 @@ def _build_ingreso_concepto_for_contrato(contrato: models.Contrato) -> str:
     objeto_label = _get_objeto_alquiler_label(objeto_alquiler) or objeto_alquiler
 
     return normalize_upper_ascii(f"ALQ {objeto_label} {referencia}")
+
 
 def _create_ingreso_for_contrato(
     db: Session,
@@ -718,7 +696,12 @@ def listar_personas(
         )
 
     rows = query.order_by(models.Persona.nombre_completo.asc()).all()
-    return [_persona_to_schema(db, r, current_user.id) for r in rows]
+    count_map = _build_persona_count_map(db, current_user.id)
+
+    return [
+        _persona_to_schema(r, count_map.get(r.id, 0))
+        for r in rows
+    ]
 
 
 @router.get(
@@ -756,6 +739,7 @@ def picker_personas(
         for r in rows
     ]
 
+
 @router.get(
     "/personas/{persona_id}",
     response_model=PersonaSchema,
@@ -767,7 +751,9 @@ def get_persona(
     current_user: models.User = Depends(require_user),
 ):
     row = _get_owned_persona(db, persona_id, current_user.id)
-    return _persona_to_schema(db, row, current_user.id)
+    count_map = _build_persona_count_map(db, current_user.id)
+    return _persona_to_schema(row, count_map.get(row.id, 0))
+
 
 @router.get(
     "/personas/{persona_id}/relaciones",
@@ -779,10 +765,6 @@ def get_persona_relaciones(
     db: Session = Depends(get_db),
     current_user: models.User = Depends(require_user),
 ):
-    """
-    Devuelve el detalle de tablas relacionadas y el número de registros asociados
-    a la persona. Solo incluye relaciones con count > 0.
-    """
     row = _get_owned_persona(db, persona_id, current_user.id)
     relation_counts = _build_persona_relation_counts(db, persona_id, current_user.id)
     associated_count = sum(item.count for item in relation_counts)
@@ -794,30 +776,6 @@ def get_persona_relaciones(
         relation_counts=relation_counts,
     )
 
-@router.get(
-    "/personas/{persona_id}/relaciones",
-    response_model=PersonaRelationsRead,
-    summary="Consultar relaciones de una persona",
-)
-def get_persona_relaciones(
-    persona_id: str,
-    db: Session = Depends(get_db),
-    current_user: models.User = Depends(require_user),
-):
-    """
-    Devuelve el detalle de tablas relacionadas y el número de registros asociados
-    a la persona. Solo incluye relaciones con count > 0.
-    """
-    row = _get_owned_persona(db, persona_id, current_user.id)
-    relation_counts = _build_persona_relation_counts(db, persona_id, current_user.id)
-    associated_count = sum(item.count for item in relation_counts)
-
-    return PersonaRelationsRead(
-        id=row.id,
-        nombre_completo=row.nombre_completo,
-        associated_count=associated_count,
-        relation_counts=relation_counts,
-    )
 
 @router.post(
     "/personas",
@@ -843,7 +801,7 @@ def crear_persona(
     db.add(row)
     db.commit()
     db.refresh(row)
-    return _persona_to_schema(db, row, current_user.id)
+    return _persona_to_schema(row, 0)
 
 
 @router.put(
@@ -880,10 +838,10 @@ def actualizar_persona(
     if payload.inactivatedon is not None:
         row.inactivatedon = payload.inactivatedon
 
-    db.add(row)
     db.commit()
     db.refresh(row)
-    return _persona_to_schema(db, row, current_user.id)
+    count_map = _build_persona_count_map(db, current_user.id)
+    return _persona_to_schema(row, count_map.get(row.id, 0))
 
 
 # ==========================================================

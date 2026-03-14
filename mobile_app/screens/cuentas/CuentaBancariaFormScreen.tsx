@@ -1,6 +1,6 @@
 /**
  * Ruta: mobile_app/screens/cuentas/CuentaBancariaFormScreen.tsx
- * Versión: 2.0.0
+ * Versión: 2.1.0
  * Descripción:
  * Formulario de creación y edición de cuentas bancarias.
  *
@@ -9,17 +9,19 @@
  * - Seleccionar banco desde proveedores filtrados por rama BANCOS.
  * - Permitir alta encadenada de proveedor banco desde el botón "+".
  * - Recuperar el proveedor creado y dejarlo seleccionado automáticamente.
+ * - Mostrar botón de relaciones cuando exista associatedCount > 0.
+ * - Renderizar el detalle de relaciones solo si realmente existe relationCounts.
  */
 
 import React, { useEffect, useMemo, useState } from 'react';
-import { View, Text, TextInput, TouchableOpacity, Alert, Switch } from 'react-native';
+import { View, Text, TextInput, TouchableOpacity, Alert, Switch, StyleSheet } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 
 import FormScreen from '../../components/forms/FormScreen';
 import { FormSection } from '../../components/forms/FormSection';
 import { commonFormStyles } from '../../components/forms/formStyles';
 import { InlineSearchSelect } from '../../components/ui/InlineSearchSelect';
-import { colors } from '../../theme/colors';
+import { colors, spacing, radius } from '../../theme';
 
 import {
   createCuenta,
@@ -32,12 +34,20 @@ import { parseImporte } from '../../utils/format';
 
 type Props = { navigation: any; route: any };
 
+type RelationCountItem = {
+  key: string;
+  label: string;
+  count: number;
+};
+
 export const CuentaBancariaFormScreen: React.FC<Props> = ({ navigation, route }) => {
   const styles = commonFormStyles;
 
   const mode: 'create' | 'edit' = route?.params?.mode ?? 'create';
   const editing: CuentaBancaria | undefined = route?.params?.item;
   const isEdit = mode === 'edit';
+
+  const [showRelations, setShowRelations] = useState(false);
 
   const [referencia, setReferencia] = useState(editing?.referencia ?? '');
   const [liquidezInicialText, setLiquidezInicialText] = useState(
@@ -54,6 +64,31 @@ export const CuentaBancariaFormScreen: React.FC<Props> = ({ navigation, route })
    * Se mantiene el ID actual del proyecto.
    */
   const BANCOS_RAMA_ID = 'BAN-TIPORAMAPROVEEDOR-8D1302BD';
+
+  const relationItems = useMemo<RelationCountItem[]>(() => {
+    const raw = Array.isArray((editing as any)?.relationCounts)
+      ? ((editing as any).relationCounts as RelationCountItem[])
+      : Array.isArray((editing as any)?.relation_counts)
+      ? ((editing as any).relation_counts as RelationCountItem[])
+      : [];
+
+    return raw.filter((rel) => Number(rel?.count ?? 0) > 0);
+  }, [editing]);
+
+  const associatedCount = useMemo<number>(() => {
+    if (relationItems.length > 0) {
+      return relationItems.reduce((acc, item) => acc + Number(item.count ?? 0), 0);
+    }
+
+    return Number(
+      (editing as any)?.associatedCount ??
+        (editing as any)?.associated_count ??
+        0
+    );
+  }, [editing, relationItems]);
+
+  const hasRelationsInfo = isEdit && associatedCount > 0;
+  const hasRelationDetail = relationItems.length > 0;
 
   const loadBancos = async () => {
     try {
@@ -97,7 +132,6 @@ export const CuentaBancariaFormScreen: React.FC<Props> = ({ navigation, route })
 
       setBancoId(String(nuevoBanco.id));
       setBancoQuery('');
-      return;
     }
   }, [route?.params?.auxResult, navigation]);
 
@@ -237,33 +271,37 @@ export const CuentaBancariaFormScreen: React.FC<Props> = ({ navigation, route })
       loading={false}
       footer={
         <View style={styles.bottomActions}>
+          {hasRelationsInfo ? (
+            <TouchableOpacity
+              style={ui.relationsButton}
+              onPress={() => setShowRelations((prev) => !prev)}
+            >
+              <Ionicons
+                name={showRelations ? 'layers' : 'layers-outline'}
+                size={18}
+                color={colors.textPrimary}
+                style={{ marginRight: 8 }}
+              />
+              <Text style={ui.relationsButtonText}>
+                {showRelations ? 'Ocultar relaciones' : `Relaciones (${associatedCount})`}
+              </Text>
+            </TouchableOpacity>
+          ) : null}
+
           <TouchableOpacity style={styles.saveButton} onPress={handleSave}>
             <Ionicons name="save-outline" size={18} color="#FFFFFF" style={{ marginRight: 8 }} />
             <Text style={styles.saveButtonText}>{isEdit ? 'Guardar cambios' : 'Guardar'}</Text>
           </TouchableOpacity>
 
           {isEdit ? (
-            <TouchableOpacity
-              style={{
-                marginTop: 10,
-                flexDirection: 'row',
-                alignItems: 'center',
-                justifyContent: 'center',
-                backgroundColor: colors.danger,
-                paddingVertical: 14,
-                borderRadius: 16,
-              }}
-              onPress={handleDelete}
-            >
+            <TouchableOpacity style={ui.deleteButton} onPress={handleDelete}>
               <Ionicons
                 name="trash-outline"
                 size={18}
                 color="#FFFFFF"
                 style={{ marginRight: 8 }}
               />
-              <Text style={{ color: '#FFFFFF', fontWeight: '600', fontSize: 15 }}>
-                Eliminar
-              </Text>
+              <Text style={ui.deleteButtonText}>Eliminar</Text>
             </TouchableOpacity>
           ) : null}
         </View>
@@ -336,6 +374,90 @@ export const CuentaBancariaFormScreen: React.FC<Props> = ({ navigation, route })
           </Text>
         </View>
       </FormSection>
+
+      {hasRelationsInfo && showRelations && hasRelationDetail ? (
+        <FormSection title={`Relaciones (${associatedCount} registros)`}>
+          {relationItems.map((rel) => (
+            <View key={rel.key} style={ui.relationRow}>
+              <View style={{ flex: 1 }}>
+                <Text style={ui.relationLabel}>{rel.label}</Text>
+                <Text style={ui.relationKey}>{rel.key}</Text>
+              </View>
+
+              <View style={ui.relationCountBadge}>
+                <Text style={ui.relationCountText}>{rel.count}</Text>
+              </View>
+            </View>
+          ))}
+        </FormSection>
+      ) : null}
     </FormScreen>
   );
 };
+
+export default CuentaBancariaFormScreen;
+
+const ui = StyleSheet.create({
+  relationsButton: {
+    marginBottom: 10,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderWidth: 1,
+    borderColor: colors.border,
+    backgroundColor: colors.surface ?? '#FFFFFF',
+    paddingVertical: spacing.md,
+    borderRadius: radius.lg,
+  },
+  relationsButtonText: {
+    color: colors.textPrimary,
+    fontWeight: '600',
+    fontSize: 15,
+  },
+  relationRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.md,
+    paddingVertical: 10,
+    borderBottomWidth: 1,
+    borderBottomColor: colors.border,
+  },
+  relationLabel: {
+    fontSize: 15,
+    fontWeight: '600',
+    color: colors.textPrimary,
+  },
+  relationKey: {
+    marginTop: 2,
+    fontSize: 12,
+    color: colors.textSecondary,
+  },
+  relationCountBadge: {
+    minWidth: 40,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 999,
+    backgroundColor: colors.primary,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  relationCountText: {
+    color: '#FFFFFF',
+    fontWeight: '700',
+    fontSize: 13,
+  },
+  deleteButton: {
+    marginTop: 10,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: colors.danger,
+    paddingVertical: 14,
+    borderRadius: 16,
+  },
+  deleteButtonText: {
+    color: '#FFFFFF',
+    fontWeight: '600',
+    fontSize: 15,
+  },
+});
