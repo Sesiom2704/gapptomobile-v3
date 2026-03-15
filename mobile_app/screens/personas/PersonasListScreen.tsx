@@ -3,22 +3,14 @@
 // Maestro de Personas (v3)
 //
 // Objetivo:
-// - Crear un módulo propio de Personas, separado del sistema genérico AuxEntity.
-// - Mantener un patrón visual homogéneo con CuentasBancariasListScreen.
-// - Servir como maestro reutilizable para contratos (inquilinos, avalistas, gestores).
-//
-// Cambios incluidos:
-// - Diseño alineado con CuentasBancariasListScreen.
-// - Listado real de personas desde gestionAlquilerApi.
-// - Buscador local por nombre, DNI, teléfono y email.
-// - Recarga automática al volver al foco.
-// - Navegación preparada a PersonaForm.
-// - Botón añadir en cabecera.
-// - Muestra `associatedCount` en cada fila.
+// - Mantener el mismo patrón visual que CuentasBancariasListScreen.
+// - Servir como maestro reutilizable para contratos.
+// - Mostrar el contador real de registros asociados sin badge lateral.
 
-import React, { useEffect, useState, useCallback, useMemo } from 'react';
+import React, { useCallback, useMemo, useState } from 'react';
 import { View, Text, ScrollView, TextInput, TouchableOpacity } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
+import { useFocusEffect } from '@react-navigation/native';
 
 import { Header } from '../../components/layout/Header';
 import { panelStyles } from '../../components/panels/panelStyles';
@@ -31,7 +23,6 @@ import {
 
 type Props = {
   navigation: any;
-  route?: any;
 };
 
 function countLabel(count?: number | null, singular = 'registro', plural = 'registros') {
@@ -57,16 +48,12 @@ export const PersonasListScreen: React.FC<Props> = ({ navigation }) => {
     }
   }, []);
 
-  useEffect(() => {
-    void load();
-  }, [load]);
-
-  useEffect(() => {
-    const unsubscribe = navigation.addListener('focus', () => {
+  useFocusEffect(
+    useCallback(() => {
       void load();
-    });
-    return unsubscribe;
-  }, [navigation, load]);
+      return () => {};
+    }, [load])
+  );
 
   const filtered = useMemo(() => {
     const term = search.trim().toLowerCase();
@@ -95,6 +82,15 @@ export const PersonasListScreen: React.FC<Props> = ({ navigation }) => {
     navigation.navigate('PersonaForm', {
       persona: item,
     });
+  };
+
+  const renderSecondaryLine = (item: PersonaRow): string | null => {
+    const parts: string[] = [];
+
+    if (item.dni?.trim()) parts.push(`DNI: ${item.dni.trim()}`);
+    if (item.telefono?.trim()) parts.push(item.telefono.trim());
+
+    return parts.length ? parts.join(' · ') : null;
   };
 
   return (
@@ -136,9 +132,7 @@ export const PersonasListScreen: React.FC<Props> = ({ navigation }) => {
 
         <ScrollView contentContainerStyle={panelStyles.scrollContent}>
           {loading ? (
-            <Text style={{ textAlign: 'center', marginTop: 16 }}>
-              Cargando...
-            </Text>
+            <Text style={{ textAlign: 'center', marginTop: 16 }}>Cargando...</Text>
           ) : null}
 
           {!loading && filtered.length === 0 ? (
@@ -148,42 +142,44 @@ export const PersonasListScreen: React.FC<Props> = ({ navigation }) => {
           ) : null}
 
           {!loading &&
-            filtered.map((p) => (
-              <TouchableOpacity
-                key={p.id}
-                style={panelStyles.menuCard}
-                onPress={() => handleEdit(p)}
-                activeOpacity={0.9}
-              >
-                <View style={panelStyles.menuTextContainer}>
-                  <Text style={panelStyles.menuTitle}>{p.nombre_completo}</Text>
+            filtered.map((item) => {
+              const line2 = renderSecondaryLine(item);
+              const line3 = item.email?.trim() ? item.email.trim() : null;
+              const associatedCount = Number(item?.associatedCount ?? 0);
 
-                  {p.dni ? (
-                    <Text style={panelStyles.menuSubtitle}>
-                      DNI: {p.dni}
+              return (
+                <TouchableOpacity
+                  key={item.id}
+                  style={panelStyles.menuCard}
+                  onPress={() => handleEdit(item)}
+                  activeOpacity={0.9}
+                >
+                  <View style={panelStyles.menuTextContainer}>
+                    <Text style={panelStyles.menuTitle}>
+                      {(item.nombre_completo ?? '').toUpperCase()}
                     </Text>
-                  ) : null}
 
-                  {p.telefono ? (
+                    {line2 ? (
+                      <Text style={panelStyles.menuSubtitle}>{line2}</Text>
+                    ) : null}
+
+                    {line3 ? (
+                      <Text style={panelStyles.menuSubtitle}>{line3}</Text>
+                    ) : null}
+
                     <Text style={panelStyles.menuSubtitle}>
-                      Teléfono: {p.telefono}
+                      {countLabel(associatedCount)}
                     </Text>
-                  ) : null}
+                  </View>
 
-                  {p.email ? (
-                    <Text style={panelStyles.menuSubtitle}>
-                      {p.email}
-                    </Text>
-                  ) : null}
-
-                  <Text style={panelStyles.menuSubtitle}>
-                    {countLabel(p.associatedCount)}
-                  </Text>
-                </View>
-
-                <Ionicons name="chevron-forward" size={18} color={colors.textSecondary} />
-              </TouchableOpacity>
-            ))}
+                  <Ionicons
+                    name="chevron-forward"
+                    size={18}
+                    color={colors.textSecondary}
+                  />
+                </TouchableOpacity>
+              );
+            })}
         </ScrollView>
       </View>
     </>

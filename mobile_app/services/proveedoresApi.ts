@@ -6,9 +6,9 @@
  *
  * Responsabilidades:
  * - Listar, crear, actualizar y eliminar proveedores.
- * - Consultar relaciones y recuentos asociados de un proveedor bajo demanda.
  * - Tipar correctamente todos los campos expuestos por backend.
  * - Dar soporte al formulario auxiliar de proveedores.
+ * - Exponer associated_count cuando venga en listados backend.
  */
 
 import axios from 'axios';
@@ -43,23 +43,6 @@ export type LocalidadRel = {
 };
 
 // =======================
-// Relaciones detalladas
-// =======================
-
-export type RelationCountItem = {
-  key: string;
-  label: string;
-  count: number;
-};
-
-export type ProveedorRelationsRead = {
-  id: string;
-  nombre: string;
-  associated_count: number;
-  relation_counts: RelationCountItem[];
-};
-
-// =======================
 // Tipos principales
 // =======================
 
@@ -89,10 +72,11 @@ export type ProveedorRead = {
   acepta_urgencias?: boolean | null;
   ambito_servicio?: string | null;
 
+  user_id?: number | null;
+  associated_count?: number | null;
+
   created_at?: string | null;
   updated_at?: string | null;
-
-  user_id?: number | null;
 
   rama_rel?: RamaProveedorRel | null;
   subsegmento_rel?: SubsegmentoProveedorRel | null;
@@ -221,29 +205,6 @@ export async function listProveedores(params?: {
   }
 }
 
-export async function getProveedorRelations(provId: string): Promise<ProveedorRelationsRead> {
-  try {
-    const res = await api.get<ProveedorRelationsRead>(
-      `${BASE}/${encodeURIComponent(provId)}/relaciones`
-    );
-    return {
-      id: String(res.data?.id ?? provId),
-      nombre: String(res.data?.nombre ?? ''),
-      associated_count: Number(res.data?.associated_count ?? 0),
-      relation_counts: Array.isArray(res.data?.relation_counts)
-        ? res.data.relation_counts.map((x) => ({
-            key: String(x.key),
-            label: String(x.label),
-            count: Number(x.count ?? 0),
-          }))
-        : [],
-    };
-  } catch (err) {
-    logAxiosError('[proveedoresApi] Error getProveedorRelations', err, { provId });
-    throw err;
-  }
-}
-
 export async function createProveedor(payload: ProveedorCreate): Promise<ProveedorRead> {
   try {
     const safePayload = compactPayload<ProveedorCreate>({
@@ -290,28 +251,21 @@ export async function updateProveedor(
       rama_id: payload.rama_id != null ? payload.rama_id : undefined,
 
       localidad_id: payload.localidad_id ?? undefined,
-      localidad:
-        payload.localidad !== undefined ? normalizeOptionalText(payload.localidad) : undefined,
-      comunidad:
-        payload.comunidad !== undefined ? normalizeOptionalText(payload.comunidad) : undefined,
+      localidad: payload.localidad !== undefined ? normalizeOptionalText(payload.localidad) : undefined,
+      comunidad: payload.comunidad !== undefined ? normalizeOptionalText(payload.comunidad) : undefined,
       pais: payload.pais !== undefined ? normalizeOptionalText(payload.pais) : undefined,
 
       cif: payload.cif !== undefined ? normalizeOptionalText(payload.cif) : undefined,
-      telefono:
-        payload.telefono !== undefined ? normalizeOptionalText(payload.telefono) : undefined,
+      telefono: payload.telefono !== undefined ? normalizeOptionalText(payload.telefono) : undefined,
       email: payload.email !== undefined ? normalizeOptionalText(payload.email) : undefined,
 
-      subsegmento:
-        payload.subsegmento !== undefined
-          ? normalizeOptionalText(payload.subsegmento)
-          : undefined,
+      subsegmento: payload.subsegmento !== undefined ? normalizeOptionalText(payload.subsegmento) : undefined,
       subsegmento_id:
         payload.subsegmento_id !== undefined
           ? normalizeOptionalText(payload.subsegmento_id)
           : undefined,
 
-      direccion:
-        payload.direccion !== undefined ? normalizeOptionalText(payload.direccion) : undefined,
+      direccion: payload.direccion !== undefined ? normalizeOptionalText(payload.direccion) : undefined,
       codigo_postal:
         payload.codigo_postal !== undefined
           ? normalizeOptionalText(payload.codigo_postal)
@@ -321,7 +275,8 @@ export async function updateProveedor(
           ? normalizeOptionalText(payload.persona_contacto)
           : undefined,
 
-      activo: payload.activo !== undefined ? normalizeOptionalBool(payload.activo) : undefined,
+      activo:
+        payload.activo !== undefined ? normalizeOptionalBool(payload.activo) : undefined,
       observaciones:
         payload.observaciones !== undefined
           ? normalizeOptionalText(payload.observaciones)
@@ -414,13 +369,8 @@ export async function createProveedorFromAuxForm(args: {
   return createProveedor(payload);
 }
 
-// =======================
-// Export default
-// =======================
-
 const proveedoresApi = {
   listProveedores,
-  getProveedorRelations,
   createProveedor,
   createProveedorFromAuxForm,
   updateProveedor,

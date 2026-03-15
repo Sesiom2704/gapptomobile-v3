@@ -1,6 +1,6 @@
 """
 Ruta: backend/app/api/v1/proveedores_router.py
-Versión: 1.7.1
+Versión: 1.7.0
 Descripción:
 Router de proveedores para GapptoMobile v3.
 
@@ -15,13 +15,13 @@ Responsabilidades:
 - Exponer relaciones del proveedor bajo demanda para no penalizar el rendimiento
   del formulario/listado principal.
 
-Ajustes de esta versión:
-- Se mantiene `associated_count` en /proveedores.
-- Se blinda el endpoint de listado:
-    * si falla el cálculo global de contadores, el listado sigue devolviendo proveedores
-      con associated_count = 0
-    * si un proveedor concreto falla al serializar, no tumba todo el listado
-- Se añaden logs de diagnóstico para ubicar el fallo real si reaparece.
+Cambios de esta versión:
+- En /{prov_id}/relaciones:
+    * se filtran las relaciones con count = 0
+    * associated_count se calcula sobre las relaciones visibles
+- En GET /proveedores:
+    * se añade associated_count real por proveedor para que el listado frontend
+      no muestre siempre 0
 """
 
 from __future__ import annotations
@@ -176,9 +176,6 @@ def _get_proveedor_for_user(
 
 
 def _build_count_map(query_rows: list[tuple[str, int]]) -> Dict[str, int]:
-    """
-    Convierte filas agregadas SQL [(fk_id, count), ...] a dict.
-    """
     out: Dict[str, int] = {}
     for fk_id, qty in query_rows:
         key = str(fk_id or "").strip()
@@ -189,9 +186,6 @@ def _build_count_map(query_rows: list[tuple[str, int]]) -> Dict[str, int]:
 
 
 def _merge_count_maps(*maps: Dict[str, int]) -> Dict[str, int]:
-    """
-    Suma múltiples mapas de contadores por la misma clave.
-    """
     merged: Dict[str, int] = {}
     for mp in maps:
         for key, value in mp.items():
@@ -204,22 +198,7 @@ def _get_proveedor_associated_count_map(
     current_user: models.User,
 ) -> Dict[str, int]:
     """
-    Calcula el número real de referencias asociadas por proveedor del usuario.
-
-    Relaciones consideradas:
-    - cuentas_bancarias
-    - gastos
-    - gastos_cotidianos
-    - inversiones_como_proveedor
-    - inversiones_como_dealer
-    - incidencias_actuales
-    - asignaciones_incidencia
-    - citas_incidencia
-
-    Nota:
-    Esta función toca varias tablas. Si alguna tabla/columna del modelo hubiera
-    cambiado, podría lanzar excepción. El endpoint de listado ya se protege
-    contra eso y seguirá devolviendo proveedores con associated_count=0.
+    Calcula associated_count real por proveedor para el listado principal.
     """
     cuentas_rows = (
         db.query(models.CuentaBancaria.banco_id, func.count(models.CuentaBancaria.id))
@@ -270,10 +249,7 @@ def _get_proveedor_associated_count_map(
 
     incidencias_rows = (
         db.query(models.Incidencia.proveedor_actual_id, func.count(models.Incidencia.id))
-        .filter(
-            models.Incidencia.proveedor_actual_id.isnot(None),
-            models.Incidencia.user_id == current_user.id,
-        )
+        .filter(models.Incidencia.proveedor_actual_id.isnot(None))
         .group_by(models.Incidencia.proveedor_actual_id)
         .all()
     )
@@ -378,13 +354,6 @@ def list_proveedores(
 ):
     """
     Lista proveedores del usuario autenticado.
-    Incluye associated_count para el listado frontend.
-
-    Importante:
-    - Si falla el cálculo de contadores, se sigue devolviendo el listado con
-      associated_count=0 para no romper el móvil.
-    - Si un proveedor concreto falla al serializar, se registra y se continúa
-      con el resto.
     """
     qry = (
         db.query(models.Proveedor)
@@ -405,26 +374,13 @@ def list_proveedores(
         qry = qry.filter(models.Proveedor.subsegmento_id == subsegmento_id)
 
     items = qry.order_by(models.Proveedor.nombre.asc(), models.Proveedor.id.asc()).all()
-
-    # Blindaje: un error en conteos no debe dejar la lista vacía.
-    try:
-        count_map = _get_proveedor_associated_count_map(db, current_user)
-    except Exception as e:
-        print(f"[proveedores:list] Error calculando associated_count: {e}")
-        count_map = {}
+    count_map = _get_proveedor_associated_count_map(db, current_user)
 
     result: list[ProveedorRead] = []
-
     for item in items:
-        try:
-            serialized = ProveedorRead.model_validate(item).model_dump()
-            serialized["associated_count"] = int(count_map.get(item.id, 0))
-            result.append(ProveedorRead(**serialized))
-        except Exception as e:
-            print(
-                f"[proveedores:list] Error serializando proveedor "
-                f"id={getattr(item, 'id', None)} nombre={getattr(item, 'nombre', None)}: {e}"
-            )
+        row = ProveedorRead.model_validate(item)
+        row.associated_count = count_map.get(item.id, 0)
+        result.append(row)
 
     return result
 
@@ -595,9 +551,6 @@ def update_proveedor(
         data["comunidad"] = ub["comunidad"]
         data["pais"] = ub["pais"]
         data["localidad_id"] = ub["localidad_id"]
-
-    if "localidad_id" in data and data["localidad_id"] is None:
-        pass
 
     if "subsegmento_id" in data:
         if data["subsegmento_id"]:
