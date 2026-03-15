@@ -1,6 +1,6 @@
 """
 Ruta: backend/app/api/v1/proveedores_router.py
-Versión: 1.7.0
+Versión: 1.7.1
 Descripción:
 Router de proveedores para GapptoMobile v3.
 
@@ -15,13 +15,13 @@ Responsabilidades:
 - Exponer relaciones del proveedor bajo demanda para no penalizar el rendimiento
   del formulario/listado principal.
 
-Cambios de esta versión:
-- En /proveedores:
-    * se añade `associated_count` por proveedor para que el listado frontend
-      pueda mostrar el número real de registros asociados.
-- En /{prov_id}/relaciones:
-    * se filtran las relaciones con count = 0
-    * associated_count se calcula sobre las relaciones visibles
+Ajustes de esta versión:
+- Se mantiene `associated_count` en /proveedores.
+- Se blinda el endpoint de listado:
+    * si falla el cálculo global de contadores, el listado sigue devolviendo proveedores
+      con associated_count = 0
+    * si un proveedor concreto falla al serializar, no tumba todo el listado
+- Se añaden logs de diagnóstico para ubicar el fallo real si reaparece.
 """
 
 from __future__ import annotations
@@ -215,6 +215,11 @@ def _get_proveedor_associated_count_map(
     - incidencias_actuales
     - asignaciones_incidencia
     - citas_incidencia
+
+    Nota:
+    Esta función toca varias tablas. Si alguna tabla/columna del modelo hubiera
+    cambiado, podría lanzar excepción. El endpoint de listado ya se protege
+    contra eso y seguirá devolviendo proveedores con associated_count=0.
     """
     cuentas_rows = (
         db.query(models.CuentaBancaria.banco_id, func.count(models.CuentaBancaria.id))
@@ -365,11 +370,6 @@ def _build_proveedor_relation_counts(
     response_model=List[ProveedorRead],
     summary="Listar proveedores",
 )
-@router.get(
-    "",
-    response_model=List[ProveedorRead],
-    summary="Listar proveedores",
-)
 def list_proveedores(
     rama_id: Optional[str] = Query(None, description="Filtrar por rama_id"),
     subsegmento_id: Optional[str] = Query(None, description="Filtrar por subsegmento_id"),
@@ -379,12 +379,21 @@ def list_proveedores(
     """
     Lista proveedores del usuario autenticado.
     Incluye associated_count para el listado frontend.
+
+    Importante:
+    - Si falla el cálculo de contadores, se sigue devolviendo el listado con
+      associated_count=0 para no romper el móvil.
+    - Si un proveedor concreto falla al serializar, se registra y se continúa
+      con el resto.
     """
     qry = (
         db.query(models.Proveedor)
         .options(
             joinedload(models.Proveedor.rama_rel),
             joinedload(models.Proveedor.subsegmento_rel),
+            joinedload(models.Proveedor.localidad_rel)
+            .joinedload(models.Localidad.region)
+            .joinedload(models.Region.pais),
         )
         .filter(models.Proveedor.user_id == current_user.id)
     )
@@ -396,41 +405,29 @@ def list_proveedores(
         qry = qry.filter(models.Proveedor.subsegmento_id == subsegmento_id)
 
     items = qry.order_by(models.Proveedor.nombre.asc(), models.Proveedor.id.asc()).all()
-    count_map = _get_proveedor_associated_count_map(db, current_user)
+
+    # Blindaje: un error en conteos no debe dejar la lista vacía.
+    try:
+        count_map = _get_proveedor_associated_count_map(db, current_user)
+    except Exception as e:
+        print(f"[proveedores:list] Error calculando associated_count: {e}")
+        count_map = {}
 
     result: list[ProveedorRead] = []
+
     for item in items:
-        result.append(
-            ProveedorRead(
-                id=item.id,
-                nombre=item.nombre,
-                rama_id=item.rama_id,
-                localidad_id=item.localidad_id,
-                localidad=item.localidad,
-                comunidad=item.comunidad,
-                pais=item.pais,
-                cif=item.cif,
-                telefono=item.telefono,
-                email=item.email,
-                subsegmento=item.subsegmento,
-                subsegmento_id=item.subsegmento_id,
-                direccion=item.direccion,
-                codigo_postal=item.codigo_postal,
-                persona_contacto=item.persona_contacto,
-                activo=item.activo,
-                observaciones=item.observaciones,
-                acepta_urgencias=item.acepta_urgencias,
-                ambito_servicio=item.ambito_servicio,
-                user_id=item.user_id,
-                associated_count=int(count_map.get(item.id, 0)),
-                created_at=item.created_at,
-                updated_at=item.updated_at,
-                rama_rel=item.rama_rel,
-                subsegmento_rel=item.subsegmento_rel,
+        try:
+            serialized = ProveedorRead.model_validate(item).model_dump()
+            serialized["associated_count"] = int(count_map.get(item.id, 0))
+            result.append(ProveedorRead(**serialized))
+        except Exception as e:
+            print(
+                f"[proveedores:list] Error serializando proveedor "
+                f"id={getattr(item, 'id', None)} nombre={getattr(item, 'nombre', None)}: {e}"
             )
-        )
 
     return result
+
 
 # =============================================================================
 # GET /proveedores/{prov_id}/relaciones
