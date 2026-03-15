@@ -365,6 +365,11 @@ def _build_proveedor_relation_counts(
     response_model=List[ProveedorRead],
     summary="Listar proveedores",
 )
+@router.get(
+    "",
+    response_model=List[ProveedorRead],
+    summary="Listar proveedores",
+)
 def list_proveedores(
     rama_id: Optional[str] = Query(None, description="Filtrar por rama_id"),
     subsegmento_id: Optional[str] = Query(None, description="Filtrar por subsegmento_id"),
@@ -380,9 +385,6 @@ def list_proveedores(
         .options(
             joinedload(models.Proveedor.rama_rel),
             joinedload(models.Proveedor.subsegmento_rel),
-            joinedload(models.Proveedor.localidad_rel)
-            .joinedload(models.Localidad.region)
-            .joinedload(models.Region.pais),
         )
         .filter(models.Proveedor.user_id == current_user.id)
     )
@@ -398,12 +400,37 @@ def list_proveedores(
 
     result: list[ProveedorRead] = []
     for item in items:
-        serialized = ProveedorRead.model_validate(item).model_dump()
-        serialized["associated_count"] = int(count_map.get(item.id, 0))
-        result.append(ProveedorRead(**serialized))
+        result.append(
+            ProveedorRead(
+                id=item.id,
+                nombre=item.nombre,
+                rama_id=item.rama_id,
+                localidad_id=item.localidad_id,
+                localidad=item.localidad,
+                comunidad=item.comunidad,
+                pais=item.pais,
+                cif=item.cif,
+                telefono=item.telefono,
+                email=item.email,
+                subsegmento=item.subsegmento,
+                subsegmento_id=item.subsegmento_id,
+                direccion=item.direccion,
+                codigo_postal=item.codigo_postal,
+                persona_contacto=item.persona_contacto,
+                activo=item.activo,
+                observaciones=item.observaciones,
+                acepta_urgencias=item.acepta_urgencias,
+                ambito_servicio=item.ambito_servicio,
+                user_id=item.user_id,
+                associated_count=int(count_map.get(item.id, 0)),
+                created_at=item.created_at,
+                updated_at=item.updated_at,
+                rama_rel=item.rama_rel,
+                subsegmento_rel=item.subsegmento_rel,
+            )
+        )
 
     return result
-
 
 # =============================================================================
 # GET /proveedores/{prov_id}/relaciones
