@@ -1,14 +1,19 @@
 /**
- * Archivo: mobile_app/navigation/PropiedadesStack.tsx
- * Versión: 4.0.0
+ * Ruta: mobile_app/navigation/PropiedadesStack.tsx
+ * Versión: 4.2.0
+ * Descripción:
+ * Stack de navegación del módulo de patrimonio / propiedades / contratos / incidencias.
  *
- * Responsabilidad:
- * - Stack de navegación del módulo de patrimonio / propiedades / contratos.
+ * Funcionalidades incluidas:
+ * - Mantiene navegación existente de propiedades.
+ * - Mantiene navegación existente de contratos.
+ * - Añade soporte a detalle de incidencias.
+ * - Elimina la dependencia provisional de gestorPersonaId en navegación.
  *
- * Cambios:
- * - Añade el nuevo screen global de contratos: ContratoList.
- * - Amplía ContratoCreate con parámetros de retorno al screen de origen.
- * - Mantiene operativas las rutas actuales del módulo de alquileres.
+ * Notas de diseño:
+ * - Se reutiliza el stack actual sin reestructurar navegación global.
+ * - La pantalla ContratoList actúa como punto de entrada mixto para contratos e incidencias.
+ * - La autenticación y autorización del módulo incidencias se resuelven por usuario logueado en backend.
  */
 
 import React from 'react';
@@ -24,12 +29,20 @@ import ContratoListScreen from '../screens/Alquiler/ContratoListScreen';
 import ContratoCreateScreen from '../screens/Alquiler/ContratoCreateScreen';
 import ContratoDetalleScreen from '../screens/Alquiler/ContratoDetalleScreen';
 import ContratoParticipantesScreen from '../screens/Alquiler/ContratoParticipantesScreen';
+import IncidenciaDetalleScreen from '../screens/Alquiler/IncidenciaDetalleScreen';
 
 export type PropiedadesStackParamList = {
   PropiedadesRanking: undefined;
+
   PropiedadForm: { patrimonioId?: string } | undefined;
-  PropiedadDetalle: { patrimonioId: string };
-  PropiedadKpis: { patrimonioId: string };
+
+  PropiedadDetalle: {
+    patrimonioId: string;
+  };
+
+  PropiedadKpis: {
+    patrimonioId: string;
+  };
 
   LocalidadForm:
     | {
@@ -40,21 +53,21 @@ export type PropiedadesStackParamList = {
     | undefined;
 
   /**
-   * Listado global de contratos.
+   * Pantalla mixta de contratos + incidencias.
+   * Ya no necesita gestorPersonaId en navegación.
    */
   ContratoList: undefined;
 
   /**
    * Formulario de contrato.
    * - Se reutiliza para alta y edición.
-   * - Si recibe returnToScreen/returnParams, al guardar vuelve al origen.
+   * - Puede volver al screen de origen mediante returnToScreen/returnParams.
    */
   ContratoCreate: {
     patrimonioId: string;
     contrato?: any;
     readOnly?: boolean;
     duplicate?: boolean;
-
     returnToScreen?: keyof PropiedadesStackParamList;
     returnParams?: Record<string, any>;
   };
@@ -69,6 +82,19 @@ export type PropiedadesStackParamList = {
     patrimonioId: string;
     contratoId: string;
     participantes?: any[];
+  };
+
+  /**
+   * Detalle de incidencia.
+   * - incidenciaId es obligatorio.
+   * - contratoId y patrimonioId ayudan a contexto y navegación de retorno.
+   * - incidencia opcional permite pasar snapshot inicial si ya existe en listado.
+   */
+  IncidenciaDetalle: {
+    incidenciaId: string;
+    contratoId?: string;
+    patrimonioId?: string;
+    incidencia?: any;
   };
 };
 
@@ -113,13 +139,10 @@ const PropiedadesStack: React.FC = () => {
         options={{ title: 'Nueva Localidad' }}
       />
 
-      {/* =========================================================
-          MÓDULO GLOBAL DE CONTRATOS
-         ========================================================= */}
       <Stack.Screen
         name="ContratoList"
         component={ContratoListScreen}
-        options={{ title: 'Contratos' }}
+        options={{ title: 'Contratos e incidencias' }}
       />
 
       <Stack.Screen
@@ -138,6 +161,12 @@ const PropiedadesStack: React.FC = () => {
         name="ContratoParticipantes"
         component={ContratoParticipantesScreen}
         options={{ title: 'Participantes' }}
+      />
+
+      <Stack.Screen
+        name="IncidenciaDetalle"
+        component={IncidenciaDetalleScreen}
+        options={{ title: 'Detalle incidencia' }}
       />
     </Stack.Navigator>
   );

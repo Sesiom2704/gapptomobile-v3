@@ -1,7 +1,6 @@
 """
-Archivo: backend/app/repositories/bot/incidencias_repository.py
-Versión: 1.1.0
-
+Ruta: backend/app/repositories/bot/incidencias_repository.py
+Versión: 1.2.0
 Descripción:
 Capa de acceso a datos para incidencias del dominio BOT.
 
@@ -17,7 +16,9 @@ Funcionalidades incluidas:
 - Alta y cierre de asignaciones de incidencia
 - Actualización de responsables actuales y estado de incidencia
 - Alta y consulta de citas de incidencia
+- Actualización de estado/confirmación de citas
 - Listado de proveedores
+- Alta mínima de proveedor para flujo BOT
 
 Notas de diseño:
 - Esta capa no debe contener reglas de negocio complejas.
@@ -81,6 +82,23 @@ class IncidenciasBotRepository:
             .first()
         )
 
+    def get_contrato_participante_by_rol(
+        self,
+        contrato_id: str,
+        persona_id: str,
+        rol: str,
+    ) -> Optional[models.ContratoParticipante]:
+        return (
+            self.db.query(models.ContratoParticipante)
+            .filter(
+                models.ContratoParticipante.contrato_id == contrato_id,
+                models.ContratoParticipante.persona_id == persona_id,
+                models.ContratoParticipante.rol == rol,
+                models.ContratoParticipante.inactivatedon.is_(None),
+            )
+            .first()
+        )
+
     def get_active_gestor_for_contrato(
         self,
         contrato_id: str,
@@ -108,6 +126,18 @@ class IncidenciasBotRepository:
             .filter(models.Proveedor.id == proveedor_id)
             .first()
         )
+
+    def get_proveedor_by_nombre(
+        self,
+        nombre: str,
+        user_id: int | None = None,
+    ) -> Optional[models.Proveedor]:
+        query = self.db.query(models.Proveedor).filter(models.Proveedor.nombre == nombre)
+
+        if user_id is not None:
+            query = query.filter(models.Proveedor.user_id == user_id)
+
+        return query.first()
 
     def list_proveedores(
         self,
@@ -187,7 +217,7 @@ class IncidenciasBotRepository:
         return historial
 
     # ==========================================================
-    # Escritura operativa 4.3A
+    # Escritura operativa 4.3A / 4.3B
     # ==========================================================
 
     def create_cita_incidencia(
@@ -223,6 +253,57 @@ class IncidenciasBotRepository:
             updated_at=now,
         )
         self.db.add(cita)
+        return cita
+
+    def update_cita_estado(
+        self,
+        cita: models.CitaIncidencia,
+        estado_cita: str,
+    ) -> models.CitaIncidencia:
+        cita.estado_cita = estado_cita
+        cita.updated_at = datetime.utcnow()
+        return cita
+
+    def update_cita_estado_inquilino(
+        self,
+        cita: models.CitaIncidencia,
+        estado_inquilino: str,
+    ) -> models.CitaIncidencia:
+        cita.estado_inquilino = estado_inquilino
+        cita.updated_at = datetime.utcnow()
+        return cita
+
+    def update_cita_confirmacion(
+        self,
+        cita: models.CitaIncidencia,
+        *,
+        confirmada_por_persona_id: Optional[str],
+        fecha_confirmacion: Optional[datetime],
+    ) -> models.CitaIncidencia:
+        cita.confirmada_por_persona_id = confirmada_por_persona_id
+        cita.fecha_confirmacion = fecha_confirmacion
+        cita.updated_at = datetime.utcnow()
+        return cita
+
+    def update_cita_fechas(
+        self,
+        cita: models.CitaIncidencia,
+        *,
+        fecha_inicio_programada: datetime,
+        fecha_fin_programada: Optional[datetime],
+    ) -> models.CitaIncidencia:
+        cita.fecha_inicio_programada = fecha_inicio_programada
+        cita.fecha_fin_programada = fecha_fin_programada
+        cita.updated_at = datetime.utcnow()
+        return cita
+
+    def update_cita_motivo_reprogramacion(
+        self,
+        cita: models.CitaIncidencia,
+        motivo_reprogramacion: Optional[str],
+    ) -> models.CitaIncidencia:
+        cita.motivo_reprogramacion = motivo_reprogramacion
+        cita.updated_at = datetime.utcnow()
         return cita
 
     def close_active_assignments_by_tipo(
@@ -286,67 +367,87 @@ class IncidenciasBotRepository:
         incidencia.proveedor_actual_id = proveedor_actual_id
         return incidencia
 
-    def create_cita_incidencia(
+    def create_asignacion_incidencia(
         self,
         *,
-        cita_id: str,
+        asignacion_id: str,
         incidencia_id: str,
-        proveedor_id: Optional[str],
-        fecha_inicio_programada: datetime,
-        fecha_fin_programada: Optional[datetime],
-        estado_inquilino: str,
-        estado_cita: str,
-        propuesta_por_persona_id: Optional[str],
-        confirmada_por_persona_id: Optional[str] = None,
-        fecha_confirmacion: Optional[datetime] = None,
-        motivo_reprogramacion: Optional[str] = None,
-    ) -> models.CitaIncidencia:
-        cita = models.CitaIncidencia(
-            id=cita_id,
+        tipo_asignacion: str,
+        estado: str,
+        gestor_id: Optional[str] = None,
+        supervisor_id: Optional[str] = None,
+        proveedor_id: Optional[str] = None,
+        asignado_por_persona_id: Optional[str] = None,
+        nota: Optional[str] = None,
+    ) -> models.AsignacionIncidencia:
+        now = datetime.utcnow()
+
+        asignacion = models.AsignacionIncidencia(
+            id=asignacion_id,
             incidencia_id=incidencia_id,
+            gestor_id=gestor_id,
+            supervisor_id=supervisor_id,
             proveedor_id=proveedor_id,
-            fecha_inicio_programada=fecha_inicio_programada,
-            fecha_fin_programada=fecha_fin_programada,
-            estado_inquilino=estado_inquilino,
-            estado_cita=estado_cita,
-            propuesta_por_persona_id=propuesta_por_persona_id,
-            confirmada_por_persona_id=confirmada_por_persona_id,
-            fecha_confirmacion=fecha_confirmacion,
-            motivo_reprogramacion=motivo_reprogramacion,
+            tipo_asignacion=tipo_asignacion,
+            estado=estado,
+            asignado_por_persona_id=asignado_por_persona_id,
+            fecha_asignacion=now,
+            fecha_desasignacion=None,
+            nota=nota,
         )
-        self.db.add(cita)
-        return cita
+        self.db.add(asignacion)
+        return asignacion
 
-    def create_asignacion_incidencia(
-            self,
-            *,
-            asignacion_id: str,
-            incidencia_id: str,
-            tipo_asignacion: str,
-            estado: str,
-            gestor_id: Optional[str] = None,
-            supervisor_id: Optional[str] = None,
-            proveedor_id: Optional[str] = None,
-            asignado_por_persona_id: Optional[str] = None,
-            nota: Optional[str] = None,
-        ) -> models.AsignacionIncidencia:
-            now = datetime.utcnow()
+    def create_proveedor_bot(
+        self,
+        *,
+        proveedor_id: str,
+        user_id: int,
+        nombre: str,
+        rama_id: str,
+        localidad_id: int,
+        acepta_urgencias: bool,
+        activo: bool = True,
+        cif: Optional[str] = None,
+        telefono: Optional[str] = None,
+        persona_contacto: Optional[str] = None,
+    ) -> models.Proveedor:
+        now = datetime.utcnow()
 
-            asignacion = models.AsignacionIncidencia(
-                id=asignacion_id,
-                incidencia_id=incidencia_id,
-                gestor_id=gestor_id,
-                supervisor_id=supervisor_id,
-                proveedor_id=proveedor_id,
-                tipo_asignacion=tipo_asignacion,
-                estado=estado,
-                asignado_por_persona_id=asignado_por_persona_id,
-                fecha_asignacion=now,
-                fecha_desasignacion=None,
-                nota=nota,
+        localidad_obj = (
+            self.db.query(models.Localidad)
+            .options(
+                joinedload(models.Localidad.region).joinedload(models.Region.pais)
             )
-            self.db.add(asignacion)
-            return asignacion
+            .filter(models.Localidad.id == localidad_id)
+            .first()
+        )
+
+        if not localidad_obj:
+            raise ValueError("localidad_id inválido")
+
+        region_obj = getattr(localidad_obj, "region", None)
+        pais_obj = getattr(region_obj, "pais", None) if region_obj else None
+
+        proveedor = models.Proveedor(
+            id=proveedor_id,
+            user_id=user_id,
+            nombre=nombre,
+            rama_id=rama_id,
+            localidad_id=localidad_obj.id,
+            localidad=localidad_obj.nombre,
+            comunidad=region_obj.nombre if region_obj else None,
+            pais=pais_obj.nombre if pais_obj else None,
+            activo=activo,
+            acepta_urgencias=acepta_urgencias,
+            cif=cif,
+            telefono=telefono,
+            persona_contacto=persona_contacto,
+            created_at=now,
+            updated_at=now,
+        )
+        self.db.add(proveedor)
+        return proveedor
 
     # ==========================================================
     # Consultas de incidencias

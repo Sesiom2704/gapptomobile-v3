@@ -1,7 +1,6 @@
 """
-Archivo: backend/app/schemas/bot/incidencias.py
-Versión: 1.2.0
-
+Ruta: backend/app/schemas/bot/incidencias.py
+Versión: 1.4.0
 Descripción:
 Schemas Pydantic específicos para incidencias del BOT de alquileres.
 
@@ -15,6 +14,9 @@ Funcionalidades incluidas:
 - Listado de proveedores disponibles
 - Asignación de proveedor a incidencia
 - Programación de visita
+- Respuesta del inquilino a cita activa
+- Alta mínima de proveedor desde BOT
+- Búsqueda de localidades de catálogo para alta de proveedor
 - Resumen de cita asociado a una incidencia
 - Labels legibles para BOT sobre estado y prioridad
 - Estructuras preparadas para BOT_SERVICE
@@ -29,7 +31,7 @@ Notas de diseño:
 from __future__ import annotations
 
 from datetime import datetime
-from typing import List, Optional
+from typing import List, Optional, Literal
 
 from pydantic import BaseModel, Field
 
@@ -171,6 +173,44 @@ class BotIncidenciaScheduleVisitResponse(BaseModel):
     mensaje: str
 
 
+class BotTenantActiveVisitResponse(BaseModel):
+    ok: bool = True
+    incidencia: BotIncidenciaResumen
+    cita: BotCitaIncidenciaResumen
+    mensaje: str
+
+
+class BotTenantVisitResponseRequest(BaseModel):
+    inquilino_persona_id: str = Field(..., description="Persona inquilina que responde a la cita")
+    accion: Literal["confirm", "reject", "reschedule"] = Field(
+        ...,
+        description="Acción del inquilino sobre la cita activa",
+    )
+    fecha_inicio_programada: Optional[datetime] = Field(
+        None,
+        description="Nueva fecha/hora de inicio si se solicita reprogramación",
+    )
+    fecha_fin_programada: Optional[datetime] = Field(
+        None,
+        description="Nueva fecha/hora de fin si se solicita reprogramación",
+    )
+    motivo_reprogramacion: Optional[str] = Field(
+        None,
+        description="Motivo o comentario opcional de reprogramación",
+    )
+    nota: Optional[str] = Field(
+        None,
+        description="Nota funcional opcional para histórico/auditoría",
+    )
+
+
+class BotTenantVisitResponseResponse(BaseModel):
+    ok: bool = True
+    incidencia: BotIncidenciaResumen
+    cita: BotCitaIncidenciaResumen
+    mensaje: str
+
+
 class BotProveedorListItem(BaseModel):
     id: str
     nombre: str
@@ -184,6 +224,58 @@ class BotProveedorListResponse(BaseModel):
     ok: bool = True
     items: List[BotProveedorListItem] = Field(default_factory=list)
 
+
+class BotLocalidadListItem(BaseModel):
+    """
+    Elemento de localidad disponible para selección desde BOT.
+    """
+    id: int
+    nombre: str
+    region_nombre: Optional[str] = None
+    pais_nombre: Optional[str] = None
+
+    def label(self) -> str:
+        parts = [self.nombre]
+        if self.region_nombre:
+            parts.append(self.region_nombre)
+        if self.pais_nombre:
+            parts.append(self.pais_nombre)
+        return " · ".join(parts)
+
+
+class BotLocalidadListResponse(BaseModel):
+    """
+    Respuesta de búsqueda de localidades para catálogo BOT.
+    """
+    ok: bool = True
+    items: List[BotLocalidadListItem] = Field(default_factory=list)
+
+
+class BotProveedorCreateRequest(BaseModel):
+    gestor_persona_id: str = Field(..., description="Persona gestora que crea el proveedor desde BOT")
+    nombre: str = Field(..., min_length=1, description="Nombre del proveedor")
+    localidad_id: int = Field(..., description="ID de localidad del catálogo")
+    acepta_urgencias: bool = Field(..., description="Indica si acepta urgencias")
+    cif: Optional[str] = Field(None, description="CIF opcional")
+    telefono: Optional[str] = Field(None, description="Teléfono opcional")
+    persona_contacto: Optional[str] = Field(None, description="Persona de contacto opcional")
+
+
+class BotProveedorCreateResponse(BaseModel):
+    ok: bool = True
+    proveedor: BotProveedorListItem
+    mensaje: str
+
+class BotLocalidadListItem(BaseModel):
+    id: int
+    nombre: str
+    region_nombre: Optional[str] = None
+    pais_nombre: Optional[str] = None
+
+
+class BotLocalidadListResponse(BaseModel):
+    ok: bool = True
+    items: List[BotLocalidadListItem] = Field(default_factory=list)
 
 class BotMessageResponse(BaseModel):
     ok: bool

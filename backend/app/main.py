@@ -1,6 +1,6 @@
 """
 Archivo: backend/app/main.py
-Versión: 1.2.0
+Versión: 1.3.0
 
 Descripción:
 Punto de entrada principal del backend de GapptoMobile v3.
@@ -13,11 +13,13 @@ Funcionalidades incluidas:
 - Middleware debug de Authorization en gastos-cotidianos
 - Registro de routers de negocio api/v1
 - Registro del nuevo router principal del dominio BOT
+- Registro del nuevo router GAPPTO de gestión de incidencias
 - Registro del router técnico de gestión de BD
 
 Cambios de esta versión:
-- Se registra el router CRUD de subsegmentos de proveedores.
+- Se registra el nuevo router `gestion_incidencias_router`.
 - Se mantiene intacta la estructura previa del bootstrap.
+- No se altera el router BOT existente.
 """
 
 from __future__ import annotations
@@ -33,14 +35,11 @@ except Exception:
     load_dotenv = None  # fallback (si no tienes python-dotenv)
 
 if load_dotenv:
-    # Este fichero está en: backend/app/main.py
-    # backend/.env => parents[1] del directorio "app" = ".../backend"
     BACKEND_ENV = Path(__file__).resolve().parents[1] / ".env"
     if BACKEND_ENV.is_file():
         load_dotenv(BACKEND_ENV)
         print(f"[startup] Loaded env: {BACKEND_ENV}")
     else:
-        # fallback: carga .env “por defecto” si existe en CWD
         load_dotenv()
 
 from fastapi import Depends, FastAPI, Request
@@ -51,9 +50,6 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from backend.app.db.session import engine, get_db
-
-# Bootstrap opcional de Google creds (Sheets)
-# Si no usas Sheets en un entorno, NO debe impedir levantar el backend.
 from backend.app.google_creds_bootstrap import ensure_gcp_creds_file
 
 
@@ -107,14 +103,11 @@ def on_startup() -> None:
     """
     import os
 
-    # --- Diagnóstico rápido de env crítica para gestión BD ---
     print("[startup] DB_URL_NEON set?      ", bool(os.getenv("DB_URL_NEON")))
     print("[startup] DB_URL_SUPABASE set?  ", bool(os.getenv("DB_URL_SUPABASE")))
     print("[startup] GOOGLE_SHEETS_ID set? ", bool(os.getenv("GOOGLE_SHEETS_ID")))
     print("[startup] GOOGLE_APPLICATION_CREDENTIALS =", os.getenv("GOOGLE_APPLICATION_CREDENTIALS"))
 
-    # --- Google creds bootstrap (Sheets) ---
-    # No bloquea el arranque si algo está mal configurado.
     try:
         creds_path = ensure_gcp_creds_file()
         if creds_path:
@@ -124,7 +117,6 @@ def on_startup() -> None:
     except Exception as e:
         print(f"[startup] Error preparando Google creds (no bloqueante): {e}")
 
-    # --- Check BD principal ---
     try:
         with engine.connect() as conn:
             conn.execute(sa_text("SELECT 1"))
@@ -236,6 +228,7 @@ from backend.app.api.v1 import (
     endeudamiento_router,
     gestion_alquiler_router,
     subsegmentos_proveedores_router,
+    gestion_incidencias_router,  # NUEVO
 )
 
 # Router principal BOT en nueva ubicación
@@ -272,13 +265,14 @@ app.include_router(inversiones_router.router, prefix=API_V1)
 app.include_router(endeudamiento_router.router, prefix=API_V1)
 app.include_router(gestion_alquiler_router.router, prefix=API_V1)
 
+# NUEVO: GAPPTO incidencias bajo /api/v1/gestion-incidencias/*
+app.include_router(gestion_incidencias_router.router, prefix=API_V1)
+
 # BOT: base estable /api/v1/bot/*
 app.include_router(bot_router, prefix=API_V1)
 
 # Router técnico BD: /api/db/*
-# OJO: db_router.router ya tiene prefix="/db"
-# Al montarlo con prefix="/api" queda: /api/db/...
 app.include_router(db_router.router, prefix="/api")
 
-# Mantengo tu debug_router (si lo usas)
+# Debug router legado
 app.include_router(debug_router.router)

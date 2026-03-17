@@ -1,38 +1,20 @@
 """
-Archivo: backend/app/services/bot/incidencias_service.py
-Versión: 1.4.0
+Ruta: backend/app/services/bot/incidencias_service.py
+Versión: 1.5.1
 
 Descripción:
 Servicio de negocio para incidencias del BOT de alquileres.
-
-Funcionalidades incluidas:
-- Validación de contrato, patrimonio y persona reportante
-- Validación de rol y coherencia contractual
-- Traducción de prioridades BOT -> valores reales de BD
-- Traducción de estados y prioridades BD -> labels BOT
-- Alta de incidencia
-- Alta de histórico inicial
-- Consulta de incidencia por id o código
-- Listado de incidencias por contrato
-- Listado de incidencias activas para gestión operativa
-- Toma en gestión de incidencia por gestor
-- Listado de proveedores
-- Asignación de proveedor
-- Programación de visita
-
-Notas de diseño:
-- Esta capa concentra la lógica de negocio de la Fase 4.1 y 4.3A.
-- BOT_SERVICE no debe implementar estas reglas; solo consumir resultados.
-- Los estados persistidos siguen el workflow real definido en base de datos.
-- Las prioridades se aceptan en español desde BOT y se traducen a la BD.
 """
 
 from __future__ import annotations
 
+from datetime import datetime
+
 from fastapi import HTTPException, status
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 
+from backend.app.db import models
 from backend.app.repositories.bot.incidencias_repository import IncidenciasBotRepository
 from backend.app.schemas.bot.incidencias import (
     BotCitaIncidenciaResumen,
@@ -48,9 +30,16 @@ from backend.app.schemas.bot.incidencias import (
     BotIncidenciaScheduleVisitRequest,
     BotIncidenciaScheduleVisitResponse,
     BotIncidenciaTakeRequest,
+    BotLocalidadListItem,
+    BotLocalidadListResponse,
+    BotProveedorCreateRequest,
+    BotProveedorCreateResponse,
     BotProveedorListItem,
     BotProveedorListResponse,
     BotResponsableActual,
+    BotTenantActiveVisitResponse,
+    BotTenantVisitResponseRequest,
+    BotTenantVisitResponseResponse,
 )
 from backend.app.utils.bot.ids import (
     generate_asignacion_incidencia_id,
@@ -59,6 +48,9 @@ from backend.app.utils.bot.ids import (
     generate_incidencia_codigo,
     generate_incidencia_id,
 )
+from backend.app.utils.id_utils import generate_proveedor_id
+from backend.app.db import models
+
 
 ALLOWED_ROLES = {"inquilino", "avalista", "gestor"}
 
@@ -141,6 +133,7 @@ ESTADO_INQUILINO_LABELS = {
 }
 
 PROVEEDOR_RAMA_INCIDENCIAS = "servicios_alquileres"
+PROVEEDOR_BOT_USER_ID = 2
 
 CITA_ESTADO_PROPOSED = "proposed"
 CITA_ESTADO_CONFIRMED = "confirmed"
@@ -153,6 +146,10 @@ CITA_INQUILINO_PENDING_CONFIRMATION = "pending_confirmation"
 CITA_INQUILINO_CONFIRMED = "confirmed"
 CITA_INQUILINO_RESCHEDULE_REQUESTED = "reschedule_requested"
 CITA_INQUILINO_REJECTED = "rejected"
+
+TENANT_ACTION_CONFIRM = "confirm"
+TENANT_ACTION_REJECT = "reject"
+TENANT_ACTION_RESCHEDULE = "reschedule"
 
 
 def _http_400(detail: str) -> None:
@@ -238,11 +235,53 @@ def _assert_persona_is_active_gestor_of_contrato(
     return gestor_participante
 
 
+def _assert_persona_is_inquilino_of_contrato(
+    repo: IncidenciasBotRepository,
+    *,
+    contrato_id: str,
+    inquilino_persona_id: str,
+):
+    inquilino_participante = repo.get_contrato_participante_by_rol(
+        contrato_id=contrato_id,
+        persona_id=inquilino_persona_id,
+        rol="inquilino",
+    )
+    if not inquilino_participante:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="La persona indicada no puede responder esta cita como inquilino",
+        )
+    return inquilino_participante
+
+
 def _http_403_or_400_gestor_not_allowed() -> None:
     raise HTTPException(
         status_code=status.HTTP_403_FORBIDDEN,
         detail="La persona indicada no puede gestionar esta incidencia",
     )
+
+
+def _resolve_ubicacion_from_localidad_id(db: Session, localidad_id: int) -> dict:
+    loc = (
+        db.query(models.Localidad)
+        .options(
+            joinedload(models.Localidad.region).joinedload(models.Region.pais)
+        )
+        .filter(models.Localidad.id == localidad_id)
+        .first()
+    )
+    if not loc:
+        _http_400("localidad_id inválido (no existe).")
+
+    region = getattr(loc, "region", None)
+    pais_obj = getattr(region, "pais", None) if region else None
+
+    return {
+        "localidad_id": loc.id,
+        "localidad": getattr(loc, "nombre", None),
+        "comunidad": getattr(region, "nombre", None) if region else None,
+        "pais": getattr(pais_obj, "nombre", None) if pais_obj else None,
+    }
 
 
 def create_incidencia_bot(
@@ -546,20 +585,8 @@ def take_incidencia_bot(
         repo.commit()
         repo.refresh(incidencia)
 
-
-        print(
-            "[TAKE_INCIDENCIA][DEBUG]",
-            {
-                "incidencia_id": incidencia.id,
-                "contrato_id": incidencia.contrato_id,
-                "gestor_persona_id": payload.gestor_persona_id,
-                "estado_anterior": estado_anterior,
-                "estado_nuevo": "under_review",
-            }
-        )
     except IntegrityError as e:
         repo.rollback()
-        print("[TAKE_INCIDENCIA][INTEGRITY_ERROR]", str(e.orig))
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Error de integridad al tomar la incidencia: {str(e.orig)}",
@@ -597,6 +624,107 @@ def list_proveedores_bot(db: Session) -> BotProveedorListResponse:
 
     return BotProveedorListResponse(ok=True, items=items)
 
+def search_localidades_bot(
+    db: Session,
+    search: str,
+    limit: int = 10,
+) -> BotLocalidadListResponse:
+    search_normalized = (search or "").strip()
+    if len(search_normalized) < 2:
+        _http_400("Debes indicar al menos 2 caracteres para buscar la localidad")
+
+    rows = (
+        db.query(models.Localidad)
+        .join(models.Region, models.Region.id == models.Localidad.region_id)
+        .join(models.Pais, models.Pais.id == models.Region.pais_id)
+        .filter(models.Localidad.nombre.ilike(f"%{search_normalized}%"))
+        .order_by(models.Localidad.nombre.asc())
+        .limit(limit)
+        .all()
+    )
+
+    items = []
+    for loc in rows:
+        region = getattr(loc, "region", None) or getattr(loc, "region_rel", None)
+        pais = None
+        if region is not None:
+            pais = getattr(region, "pais", None) or getattr(region, "pais_rel", None)
+
+        items.append(
+            BotLocalidadListItem(
+                id=loc.id,
+                nombre=loc.nombre,
+                region_nombre=getattr(region, "nombre", None),
+                pais_nombre=getattr(pais, "nombre", None),
+            )
+        )
+
+    return BotLocalidadListResponse(ok=True, items=items)
+
+def create_proveedor_bot(
+    db: Session,
+    payload: BotProveedorCreateRequest,
+) -> BotProveedorCreateResponse:
+    repo = IncidenciasBotRepository(db)
+
+    gestor = repo.get_persona_by_id(payload.gestor_persona_id)
+    if not gestor:
+        _http_404("Gestor no encontrado")
+
+    nombre_normalizado = (payload.nombre or "").strip()
+
+    if not nombre_normalizado:
+        _http_400("El nombre del proveedor es obligatorio")
+
+    if not payload.localidad_id or payload.localidad_id <= 0:
+        _http_400("La localidad del proveedor es obligatoria")
+
+    existing = repo.get_proveedor_by_nombre(
+        nombre=nombre_normalizado,
+        user_id=PROVEEDOR_BOT_USER_ID,
+    )
+    if existing:
+        _http_400("Ya existe un proveedor con ese nombre para el contexto BOT")
+
+    try:
+        proveedor = repo.create_proveedor_bot(
+            proveedor_id=generate_proveedor_id(db),
+            user_id=PROVEEDOR_BOT_USER_ID,
+            nombre=nombre_normalizado,
+            rama_id=PROVEEDOR_RAMA_INCIDENCIAS,
+            localidad_id=payload.localidad_id,
+            acepta_urgencias=payload.acepta_urgencias,
+            activo=True,
+            cif=(payload.cif or "").strip() or None,
+            telefono=(payload.telefono or "").strip() or None,
+            persona_contacto=(payload.persona_contacto or "").strip() or None,
+        )
+
+        repo.commit()
+        repo.refresh(proveedor)
+
+    except IntegrityError as e:
+        repo.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Error de integridad al crear proveedor: {str(e.orig)}",
+        )
+    except Exception:
+        repo.rollback()
+        raise
+
+    return BotProveedorCreateResponse(
+        ok=True,
+        proveedor=BotProveedorListItem(
+            id=proveedor.id,
+            nombre=proveedor.nombre,
+            telefono=proveedor.telefono,
+            email=proveedor.email,
+            localidad=proveedor.localidad,
+            activo=bool(proveedor.activo),
+        ),
+        mensaje="Proveedor creado correctamente",
+    )
 
 def assign_provider_bot(
     db: Session,
@@ -752,25 +880,12 @@ def schedule_visit_bot(
             nota=payload.nota or "Visita programada",
         )
 
-        print(
-            "[SCHEDULE_VISIT][DEBUG]",
-            {
-                "incidencia_id": incidencia.id,
-                "proveedor_id": payload.proveedor_id,
-                "fecha_inicio_programada": payload.fecha_inicio_programada.isoformat(),
-                "fecha_fin_programada": payload.fecha_fin_programada.isoformat() if payload.fecha_fin_programada else None,
-                "estado_cita": "scheduled",
-                "estado_inquilino": "notified",
-            }
-        )
-
         repo.commit()
         repo.refresh(incidencia)
         repo.refresh(cita)
 
     except IntegrityError as e:
         repo.rollback()
-        print("[SCHEDULE_VISIT][INTEGRITY_ERROR]", str(e.orig))
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Error de integridad al programar visita: {str(e.orig)}",
@@ -787,3 +902,197 @@ def schedule_visit_bot(
         cita=_build_cita_resumen(cita),
         mensaje="Visita programada correctamente",
     )
+
+
+def get_active_visit_for_tenant_bot(
+    db: Session,
+    incidencia_id: str,
+    inquilino_persona_id: str,
+) -> BotTenantActiveVisitResponse:
+    repo = IncidenciasBotRepository(db)
+
+    incidencia = repo.get_incidencia_by_id(incidencia_id)
+    if not incidencia:
+        _http_404("Incidencia no encontrada")
+
+    inquilino = repo.get_persona_by_id(inquilino_persona_id)
+    if not inquilino:
+        _http_404("Inquilino no encontrado")
+
+    _assert_persona_is_inquilino_of_contrato(
+        repo,
+        contrato_id=incidencia.contrato_id,
+        inquilino_persona_id=inquilino_persona_id,
+    )
+
+    cita = repo.get_active_cita_by_incidencia(incidencia.id)
+    if not cita:
+        _http_404("La incidencia no tiene una cita activa para gestionar")
+
+    return BotTenantActiveVisitResponse(
+        ok=True,
+        incidencia=_build_incidencia_resumen(incidencia),
+        cita=_build_cita_resumen(cita),
+        mensaje="Cita activa recuperada correctamente",
+    )
+
+
+def tenant_visit_response_bot(
+    db: Session,
+    incidencia_id: str,
+    payload: BotTenantVisitResponseRequest,
+) -> BotTenantVisitResponseResponse:
+    repo = IncidenciasBotRepository(db)
+
+    incidencia = repo.get_incidencia_by_id(incidencia_id)
+    if not incidencia:
+        _http_404("Incidencia no encontrada")
+
+    inquilino = repo.get_persona_by_id(payload.inquilino_persona_id)
+    if not inquilino:
+        _http_404("Inquilino no encontrado")
+
+    _assert_persona_is_inquilino_of_contrato(
+        repo,
+        contrato_id=incidencia.contrato_id,
+        inquilino_persona_id=payload.inquilino_persona_id,
+    )
+
+    cita_activa = repo.get_active_cita_by_incidencia(incidencia.id)
+    if not cita_activa:
+        _http_404("La incidencia no tiene una cita activa para responder")
+
+    now = datetime.utcnow()
+    accion = (payload.accion or "").strip().lower()
+    estado_anterior = incidencia.estado
+
+    try:
+        if accion == TENANT_ACTION_CONFIRM:
+            repo.update_cita_estado(cita_activa, CITA_ESTADO_CONFIRMED)
+            repo.update_cita_estado_inquilino(cita_activa, CITA_INQUILINO_CONFIRMED)
+            repo.update_cita_confirmacion(
+                cita_activa,
+                confirmada_por_persona_id=payload.inquilino_persona_id,
+                fecha_confirmacion=now,
+            )
+            repo.update_incidencia_estado(incidencia, "scheduled")
+
+            repo.create_historial_estado(
+                historial_id=generate_historial_estado_id(),
+                incidencia_id=incidencia.id,
+                estado_anterior=estado_anterior,
+                estado_nuevo="scheduled",
+                persona_cambia_id=payload.inquilino_persona_id,
+                rol_cambia="inquilino",
+                nota=payload.nota or "Cita confirmada por el inquilino",
+            )
+
+            repo.commit()
+            repo.refresh(incidencia)
+            repo.refresh(cita_activa)
+
+            return BotTenantVisitResponseResponse(
+                ok=True,
+                incidencia=_build_incidencia_resumen(incidencia),
+                cita=_build_cita_resumen(cita_activa),
+                mensaje="La cita ha quedado confirmada correctamente",
+            )
+
+        if accion == TENANT_ACTION_REJECT:
+            repo.update_cita_estado(cita_activa, CITA_ESTADO_CANCELLED)
+            repo.update_cita_estado_inquilino(cita_activa, CITA_INQUILINO_REJECTED)
+            repo.update_cita_confirmacion(
+                cita_activa,
+                confirmada_por_persona_id=payload.inquilino_persona_id,
+                fecha_confirmacion=now,
+            )
+            repo.update_incidencia_estado(incidencia, "under_review")
+
+            repo.create_historial_estado(
+                historial_id=generate_historial_estado_id(),
+                incidencia_id=incidencia.id,
+                estado_anterior=estado_anterior,
+                estado_nuevo="under_review",
+                persona_cambia_id=payload.inquilino_persona_id,
+                rol_cambia="inquilino",
+                nota=payload.nota or "Cita rechazada por el inquilino",
+            )
+
+            repo.commit()
+            repo.refresh(incidencia)
+            repo.refresh(cita_activa)
+
+            return BotTenantVisitResponseResponse(
+                ok=True,
+                incidencia=_build_incidencia_resumen(incidencia),
+                cita=_build_cita_resumen(cita_activa),
+                mensaje="La cita ha quedado rechazada correctamente",
+            )
+
+        if accion == TENANT_ACTION_RESCHEDULE:
+            if not payload.fecha_inicio_programada:
+                _http_400("Debes indicar una nueva fecha/hora de inicio para reprogramar")
+
+            if payload.fecha_fin_programada and payload.fecha_fin_programada < payload.fecha_inicio_programada:
+                _http_400("La fecha fin no puede ser anterior a la fecha inicio")
+
+            repo.update_cita_estado(cita_activa, CITA_ESTADO_RESCHEDULED)
+            repo.update_cita_estado_inquilino(cita_activa, CITA_INQUILINO_RESCHEDULE_REQUESTED)
+            repo.update_cita_confirmacion(
+                cita_activa,
+                confirmada_por_persona_id=payload.inquilino_persona_id,
+                fecha_confirmacion=now,
+            )
+            repo.update_cita_motivo_reprogramacion(
+                cita_activa,
+                payload.motivo_reprogramacion,
+            )
+
+            nueva_cita = repo.create_cita_incidencia(
+                cita_id=generate_cita_incidencia_id(),
+                incidencia_id=incidencia.id,
+                proveedor_id=cita_activa.proveedor_id,
+                fecha_inicio_programada=payload.fecha_inicio_programada,
+                fecha_fin_programada=payload.fecha_fin_programada,
+                estado_inquilino=CITA_INQUILINO_PENDING_CONFIRMATION,
+                estado_cita=CITA_ESTADO_PROPOSED,
+                propuesta_por_persona_id=payload.inquilino_persona_id,
+                confirmada_por_persona_id=None,
+                fecha_confirmacion=None,
+                motivo_reprogramacion=payload.motivo_reprogramacion,
+            )
+
+            repo.update_incidencia_estado(incidencia, "scheduled")
+
+            repo.create_historial_estado(
+                historial_id=generate_historial_estado_id(),
+                incidencia_id=incidencia.id,
+                estado_anterior=estado_anterior,
+                estado_nuevo="scheduled",
+                persona_cambia_id=payload.inquilino_persona_id,
+                rol_cambia="inquilino",
+                nota=payload.nota or "Reprogramación solicitada por el inquilino",
+            )
+
+            repo.commit()
+            repo.refresh(incidencia)
+            repo.refresh(nueva_cita)
+
+            return BotTenantVisitResponseResponse(
+                ok=True,
+                incidencia=_build_incidencia_resumen(incidencia),
+                cita=_build_cita_resumen(nueva_cita),
+                mensaje="La reprogramación ha quedado registrada correctamente",
+            )
+
+        _http_400("Acción de inquilino no válida")
+
+    except IntegrityError as e:
+        repo.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Error de integridad al responder la cita: {str(e.orig)}",
+        )
+    except Exception:
+        repo.rollback()
+        raise

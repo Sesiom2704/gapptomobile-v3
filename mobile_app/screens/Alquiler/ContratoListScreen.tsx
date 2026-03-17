@@ -1,32 +1,25 @@
 /**
- * Archivo: mobile_app/screens/Alquiler/ContratoListScreen.tsx
- * Versión: 4.0.0
+ * Ruta: mobile_app/screens/Alquiler/ContratoListScreen.tsx
+ * Versión: 4.1.0
+ * Descripción:
+ * Pantalla mixta de contratos e incidencias del módulo de alquiler.
  *
- * Responsabilidad:
- * - Gestor global de contratos.
- * - Lista contratos activos e inactivos.
- * - Búsqueda por referencia e inquilinos.
- * - Filtros avanzados por estado, propiedad, vigencia y objeto alquilado.
- * - Resumen superior de contratos activos:
- *   - número de contratos activos
- *   - suma de renta mensual activa
+ * Funcionalidades incluidas:
+ * - Mantiene listado global de contratos.
+ * - Añade navegación por pestañas internas: contratos / incidencias.
+ * - Reutiliza buscador avanzado y patrón visual existente.
+ * - Permite listar incidencias activas del gestor.
+ * - Permite listar incidencias vinculadas a un contrato seleccionado.
+ * - Mantiene acciones existentes del contrato.
+ * - Añade navegación al detalle de incidencia.
  *
- * Reglas funcionales:
- * - "Activo" se calcula con la Regla 3:
- *   - estado = activo
- *   - inactivatedon vacío
- *   - fecha_inicio <= hoy
- *   - fecha_fin vacía o futura
- *
- * Menú de acciones:
- * - Editar contrato
- * - Ver detalle
- * - Eliminar contrato (desactivación lógica)
- *
- * Notas:
- * - Eliminar contrato NO hace borrado físico.
- * - Se resuelve con inactivatedon = now() y estado = cancelado.
- * - La edición vuelve al propio listado porque se pasa returnToScreen.
+ * Notas de diseño:
+ * - Se reutilizan Header, ExpenseCard, ActionSheet y listStyles actuales.
+ * - No se rompe la lógica actual de contratos.
+ * - gestorPersonaId se recibe de route.params de forma provisional hasta confirmar el origen real del dato en app.
+ * - La pestaña incidencias permite dos vistas:
+ *   - Activas del gestor
+ *   - Por contrato seleccionado
  */
 
 import React, { useCallback, useMemo, useState } from 'react';
@@ -62,6 +55,14 @@ import {
   type ContratoRow,
 } from '../../services/gestionAlquilerApi';
 
+import {
+  listIncidenciasActivas,
+  listIncidenciasByContrato,
+  getIncidenciaDisplaySubtitle,
+  getIncidenciaEstadoColorToken,
+  type IncidenciaListItem,
+} from '../../services/gestionIncidenciasApi';
+
 type Props = {
   navigation: any;
 };
@@ -84,6 +85,9 @@ type ObjetoFiltro =
   | 'garaje'
   | 'trastero'
   | 'habitaciones';
+
+type TabKey = 'contratos' | 'incidencias';
+type IncidenciaScope = 'activas' | 'contrato';
 
 function normalizeText(value: string | null | undefined): string {
   return String(value ?? '').trim().toLowerCase();
@@ -161,9 +165,11 @@ function formatEstadoContrato(contrato: ContratoRow): string {
   if (e === 'cancelado') return 'Cancelado';
 
   return contrato.estado ? String(contrato.estado) : 'Sin estado';
-}
+} 
 
 export const ContratoListScreen: React.FC<Props> = ({ navigation }) => {
+  const [activeTab, setActiveTab] = useState<TabKey>('contratos');
+
   const [contratos, setContratos] = useState<ContratoRow[]>([]);
   const [loading, setLoading] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
@@ -184,6 +190,13 @@ export const ContratoListScreen: React.FC<Props> = ({ navigation }) => {
   const [showVigenciaFilter, setShowVigenciaFilter] = useState(false);
   const [showPropiedadFilter, setShowPropiedadFilter] = useState(false);
   const [showObjetoFilter, setShowObjetoFilter] = useState(false);
+
+  const [incidencias, setIncidencias] = useState<IncidenciaListItem[]>([]);
+  const [incidenciasLoading, setIncidenciasLoading] = useState(false);
+  const [incidenciasError, setIncidenciasError] = useState<string | null>(null);
+  const [incidenciaScope, setIncidenciaScope] = useState<IncidenciaScope>('activas');
+  const [selectedContratoIncidenciasId, setSelectedContratoIncidenciasId] = useState<string>('todos');
+  const [incidenciaSearchText, setIncidenciaSearchText] = useState('');
 
   const closeBuscador = useCallback(() => {
     Keyboard.dismiss();
@@ -219,15 +232,56 @@ export const ContratoListScreen: React.FC<Props> = ({ navigation }) => {
     }
   }, []);
 
+  const cargarIncidencias = useCallback(async () => {
+    setIncidenciasLoading(true);
+    setIncidenciasError(null);
+
+    try {
+      if (incidenciaScope === 'activas') {
+        const data = await listIncidenciasActivas();
+        setIncidencias(data);
+        return;
+      }
+
+      if (selectedContratoIncidenciasId === 'todos') {
+        setIncidencias([]);
+        return;
+      }
+
+      const data = await listIncidenciasByContrato(selectedContratoIncidenciasId);
+      setIncidencias(data);
+    } catch (err) {
+      console.error('[ContratoList] Error cargando incidencias', err);
+      setIncidenciasError('No se han podido cargar las incidencias. Inténtalo de nuevo.');
+    } finally {
+      setIncidenciasLoading(false);
+      setRefreshing(false);
+    }
+  }, [incidenciaScope, selectedContratoIncidenciasId]);
+
   useFocusEffect(
     useCallback(() => {
       void cargarContratos();
     }, [cargarContratos])
   );
 
+  useFocusEffect(
+    useCallback(() => {
+      if (activeTab === 'incidencias') {
+        void cargarIncidencias();
+      }
+    }, [activeTab, cargarIncidencias])
+  );
+
   const handleRefresh = async () => {
     setRefreshing(true);
-    await cargarContratos();
+
+    if (activeTab === 'contratos') {
+      await cargarContratos();
+      return;
+    }
+
+    await cargarIncidencias();
   };
 
   const handleBack = useCallback(() => {
@@ -284,7 +338,7 @@ export const ContratoListScreen: React.FC<Props> = ({ navigation }) => {
     const amarillo = colors.actionWarning ?? '#eab308';
     const gris = colors.actionNeutral ?? '#4b5563';
 
-    const acciones: ActionSheetAction[] = [
+    return [
       {
         label: 'Editar contrato',
         onPress: () => {
@@ -322,8 +376,6 @@ export const ContratoListScreen: React.FC<Props> = ({ navigation }) => {
         destructive: true,
       },
     ];
-
-    return acciones;
   };
 
   const accionesSheet = getActionsForContrato(selectedContrato);
@@ -409,7 +461,93 @@ export const ContratoListScreen: React.FC<Props> = ({ navigation }) => {
     });
   }, [contratos, searchText, filtroEstado, filtroVigencia, filtroPropiedad, filtroObjeto]);
 
-  const renderBuscador = () => {
+  const incidenciasFiltradas = useMemo(() => {
+    const term = normalizeText(incidenciaSearchText);
+
+    return incidencias.filter((item) => {
+      if (!term) return true;
+
+      const hayMatch =
+        normalizeText(item.codigo).includes(term) ||
+        normalizeText(item.titulo).includes(term) ||
+        normalizeText(item.estado_label).includes(term) ||
+        normalizeText(item.categoria).includes(term) ||
+        normalizeText(item.proveedor_actual_nombre).includes(term) ||
+        normalizeText(item.localidad).includes(term);
+
+      return hayMatch;
+    });
+  }, [incidencias, incidenciaSearchText]);
+
+  const renderTabs = () => {
+    const baseTabStyle = {
+      flex: 1 as const,
+      paddingVertical: 10,
+      borderRadius: 12,
+      alignItems: 'center' as const,
+      justifyContent: 'center' as const,
+      borderWidth: 1,
+      borderColor: colors.border,
+    };
+
+    return (
+      <View style={{ paddingHorizontal: 16, paddingTop: 8 }}>
+        <View
+          style={{
+            flexDirection: 'row',
+            gap: 10,
+            backgroundColor: colors.surface,
+            borderRadius: 16,
+            borderWidth: 1,
+            borderColor: colors.border,
+            padding: 6,
+          }}
+        >
+          <TouchableOpacity
+            style={[
+              baseTabStyle,
+              activeTab === 'contratos'
+                ? { backgroundColor: colors.primarySoft, borderColor: colors.primary }
+                : { backgroundColor: colors.surface },
+            ]}
+            onPress={() => setActiveTab('contratos')}
+          >
+            <Text
+              style={{
+                fontSize: 14,
+                fontWeight: '700',
+                color: activeTab === 'contratos' ? colors.primary : colors.textSecondary,
+              }}
+            >
+              Contratos
+            </Text>
+          </TouchableOpacity>
+
+          <TouchableOpacity
+            style={[
+              baseTabStyle,
+              activeTab === 'incidencias'
+                ? { backgroundColor: colors.primarySoft, borderColor: colors.primary }
+                : { backgroundColor: colors.surface },
+            ]}
+            onPress={() => setActiveTab('incidencias')}
+          >
+            <Text
+              style={{
+                fontSize: 14,
+                fontWeight: '700',
+                color: activeTab === 'incidencias' ? colors.primary : colors.textSecondary,
+              }}
+            >
+              Incidencias
+            </Text>
+          </TouchableOpacity>
+        </View>
+      </View>
+    );
+  };
+
+  const renderBuscadorContratos = () => {
     return (
       <View style={styles.searchPanel}>
         <Text style={styles.searchLabel}>Buscar</Text>
@@ -642,7 +780,109 @@ export const ContratoListScreen: React.FC<Props> = ({ navigation }) => {
     );
   };
 
-  const renderContenido = () => {
+  const renderBuscadorIncidencias = () => {
+    const contratosActivos = contratos.filter(isContratoActivoRegla3);
+
+    return (
+      <View style={styles.searchPanel}>
+        <Text style={styles.searchLabel}>Buscar incidencias</Text>
+
+        <View style={styles.searchRow}>
+          <Ionicons
+            name="search-outline"
+            size={16}
+            color={colors.textSecondary}
+            style={styles.searchIcon}
+          />
+          <TextInput
+            value={incidenciaSearchText}
+            onChangeText={setIncidenciaSearchText}
+            placeholder="Código, título, estado, proveedor…"
+            placeholderTextColor={colors.textMuted}
+            style={styles.searchInput}
+          />
+        </View>
+
+        <View style={{ marginTop: 8 }}>
+          <Text style={styles.searchLabel}>Ámbito</Text>
+
+          <View style={styles.pillsRow}>
+            <View style={styles.pillWrapper}>
+              <FilterPill
+                label="Activas"
+                selected={incidenciaScope === 'activas'}
+                onPress={() => {
+                  setIncidenciaScope('activas');
+                  setSelectedContratoIncidenciasId('todos');
+                }}
+                style={styles.filterPill}
+              />
+            </View>
+
+            <View style={styles.pillWrapper}>
+              <FilterPill
+                label="Por contrato"
+                selected={incidenciaScope === 'contrato'}
+                onPress={() => setIncidenciaScope('contrato')}
+                style={styles.filterPill}
+              />
+            </View>
+          </View>
+        </View>
+
+        {incidenciaScope === 'contrato' && (
+          <View style={{ marginTop: 12 }}>
+            <Text style={styles.searchLabel}>Contrato</Text>
+
+            <View style={styles.pillsRowWrap}>
+              <View style={styles.pillWrapper}>
+                <TwoLineCompactPill
+                  label="Seleccionar"
+                  selected={selectedContratoIncidenciasId === 'todos'}
+                  onPress={() => setSelectedContratoIncidenciasId('todos')}
+                  style={styles.filterPill}
+                />
+              </View>
+
+              {contratosActivos.map((contrato) => {
+                const referencia = getContratoReferenciaLabel(contrato);
+                const selected = selectedContratoIncidenciasId === contrato.id;
+
+                return (
+                  <View style={styles.pillWrapper} key={contrato.id}>
+                    <TwoLineCompactPill
+                      label={referencia}
+                      selected={selected}
+                      onPress={() => setSelectedContratoIncidenciasId(selected ? 'todos' : contrato.id)}
+                      style={styles.filterPill}
+                    />
+                  </View>
+                );
+              })}
+            </View>
+          </View>
+        )}
+
+        <TouchableOpacity
+          onPress={() => void cargarIncidencias()}
+          style={{
+            marginTop: 12,
+            alignSelf: 'flex-start',
+            paddingHorizontal: 14,
+            paddingVertical: 8,
+            borderRadius: 999,
+            backgroundColor: colors.primary,
+          }}
+        >
+          <Text style={{ color: '#FFFFFF', fontWeight: '700', fontSize: 13 }}>
+            Actualizar incidencias
+          </Text>
+        </TouchableOpacity>
+      </View>
+    );
+  };
+
+  const renderContenidoContratos = () => {
     if (loading && contratos.length === 0) {
       return (
         <View style={styles.centered}>
@@ -685,7 +925,9 @@ export const ContratoListScreen: React.FC<Props> = ({ navigation }) => {
           const objeto = getObjetoAlquilerLabel(contrato.objeto_alquiler);
           const estadoLabel = formatEstadoContrato(contrato);
 
-          const category = tenant ? `${tenant} · ${objeto} · ${estadoLabel}` : `${objeto} · ${estadoLabel}`;
+          const category = tenant
+            ? `${tenant} · ${objeto} · ${estadoLabel}`
+            : `${objeto} · ${estadoLabel}`;
 
           const inicio = contrato.fecha_inicio ? formatFechaCorta(contrato.fecha_inicio) : '—';
           const fin = contrato.fecha_fin ? formatFechaCorta(contrato.fecha_fin) : 'Sin fin';
@@ -719,63 +961,226 @@ export const ContratoListScreen: React.FC<Props> = ({ navigation }) => {
     );
   };
 
+  const renderContenidoIncidencias = () => {
+    if (incidenciasLoading && incidencias.length === 0) {
+      return (
+        <View style={styles.centered}>
+          <ActivityIndicator size="small" color={colors.primary} />
+          <Text style={styles.loadingText}>Cargando incidencias…</Text>
+        </View>
+      );
+    }
+
+    if (incidenciasError) {
+      return (
+        <View style={styles.centered}>
+          <Text style={styles.errorText}>{incidenciasError}</Text>
+        </View>
+      );
+    }
+
+    if (incidenciaScope === 'contrato' && selectedContratoIncidenciasId === 'todos') {
+      return (
+        <View style={styles.centered}>
+          <Text style={styles.emptyText}>
+            Selecciona un contrato para ver sus incidencias.
+          </Text>
+        </View>
+      );
+    }
+
+    if (incidenciasFiltradas.length === 0) {
+      return (
+        <View style={styles.centered}>
+          <Text style={styles.emptyText}>No hay incidencias que coincidan con el filtro.</Text>
+        </View>
+      );
+    }
+
+    return (
+      <ScrollView
+        style={styles.list}
+        contentContainerStyle={styles.listContent}
+        showsVerticalScrollIndicator={false}
+        refreshControl={<RefreshControl refreshing={refreshing} onRefresh={handleRefresh} />}
+        onScrollBeginDrag={closeBuscador}
+        onTouchStart={() => {
+          if (buscadorAbierto) closeBuscador();
+        }}
+      >
+        {incidenciasFiltradas.map((item) => {
+          const subtitle = getIncidenciaDisplaySubtitle(item);
+          const fechaLabel = item.fecha_creacion
+            ? `Alta: ${formatFechaCorta(item.fecha_creacion)}`
+            : 'Fecha no informada';
+
+          return (
+            <ExpenseCard
+              key={item.id}
+              title={item.codigo || item.titulo || item.id}
+              category={subtitle || item.titulo || 'Incidencia'}
+              dateLabel={fechaLabel}
+              amountLabel={item.prioridad_label || 'Sin prioridad'}
+              segmentoId="GEST-RESTO"
+              iconNameOverride="construct-outline"
+              backgroundColor={colors.surface}
+              onPress={() =>
+                navigation.navigate('IncidenciaDetalle', {
+                  incidenciaId: item.id,
+                  contratoId: item.contrato_id,
+                  patrimonioId: item.patrimonio_id,
+                  incidencia: item,
+                })
+              }
+              onOptionsPress={() =>
+                navigation.navigate('IncidenciaDetalle', {
+                  incidenciaId: item.id,
+                  contratoId: item.contrato_id,
+                  patrimonioId: item.patrimonio_id,
+                  incidencia: item,
+                })
+              }
+            />
+          );
+        })}
+      </ScrollView>
+    );
+  };
+
   return (
     <>
       <Header
-        title="Contratos"
-        subtitle="Gestión global de contratos de alquiler."
+        title="Contratos e incidencias"
+        subtitle="Gestión global de contratos e incidencias de alquiler."
         showBack
         onBackPress={handleBack}
       />
 
       <View style={styles.screen}>
-        <View style={{ paddingHorizontal: 16, paddingTop: 8 }}>
-          <View
-            style={{
-              flexDirection: 'row',
-              gap: 10,
-            }}
-          >
-            <View
-              style={{
-                flex: 1,
-                backgroundColor: colors.surface,
-                borderRadius: 14,
-                borderWidth: 1,
-                borderColor: colors.border,
-                padding: 12,
-              }}
-            >
-              <Text style={{ fontSize: 11, color: colors.textSecondary, fontWeight: '700' }}>
-                Contratos activos
-              </Text>
-              <Text style={{ marginTop: 4, fontSize: 18, fontWeight: '900', color: colors.textPrimary }}>
-                {resumenActivos.cantidad}
-              </Text>
-            </View>
+        {renderTabs()}
 
+        {activeTab === 'contratos' && (
+          <View style={{ paddingHorizontal: 16, paddingTop: 8 }}>
             <View
               style={{
-                flex: 1,
-                backgroundColor: colors.surface,
-                borderRadius: 14,
-                borderWidth: 1,
-                borderColor: colors.border,
-                padding: 12,
+                flexDirection: 'row',
+                gap: 10,
               }}
             >
-              <Text style={{ fontSize: 11, color: colors.textSecondary, fontWeight: '700' }}>
-                Ingreso mensual activo
-              </Text>
-              <Text
-                numberOfLines={1}
-                style={{ marginTop: 4, fontSize: 16, fontWeight: '900', color: colors.textPrimary }}
+              <View
+                style={{
+                  flex: 1,
+                  backgroundColor: colors.surface,
+                  borderRadius: 14,
+                  borderWidth: 1,
+                  borderColor: colors.border,
+                  padding: 12,
+                }}
               >
-                {EuroformatEuro(resumenActivos.rentaMensual)}
-              </Text>
+                <Text style={{ fontSize: 11, color: colors.textSecondary, fontWeight: '700' }}>
+                  Contratos activos
+                </Text>
+                <Text
+                  style={{
+                    marginTop: 4,
+                    fontSize: 18,
+                    fontWeight: '900',
+                    color: colors.textPrimary,
+                  }}
+                >
+                  {resumenActivos.cantidad}
+                </Text>
+              </View>
+
+              <View
+                style={{
+                  flex: 1,
+                  backgroundColor: colors.surface,
+                  borderRadius: 14,
+                  borderWidth: 1,
+                  borderColor: colors.border,
+                  padding: 12,
+                }}
+              >
+                <Text style={{ fontSize: 11, color: colors.textSecondary, fontWeight: '700' }}>
+                  Ingreso mensual activo
+                </Text>
+                <Text
+                  numberOfLines={1}
+                  style={{
+                    marginTop: 4,
+                    fontSize: 16,
+                    fontWeight: '900',
+                    color: colors.textPrimary,
+                  }}
+                >
+                  {EuroformatEuro(resumenActivos.rentaMensual)}
+                </Text>
+              </View>
             </View>
           </View>
-        </View>
+        )}
+
+        {activeTab === 'incidencias' && (
+          <View style={{ paddingHorizontal: 16, paddingTop: 8 }}>
+            <View
+              style={{
+                flexDirection: 'row',
+                gap: 10,
+              }}
+            >
+              <View
+                style={{
+                  flex: 1,
+                  backgroundColor: colors.surface,
+                  borderRadius: 14,
+                  borderWidth: 1,
+                  borderColor: colors.border,
+                  padding: 12,
+                }}
+              >
+                <Text style={{ fontSize: 11, color: colors.textSecondary, fontWeight: '700' }}>
+                  Ámbito
+                </Text>
+                <Text
+                  style={{
+                    marginTop: 4,
+                    fontSize: 16,
+                    fontWeight: '900',
+                    color: colors.textPrimary,
+                  }}
+                >
+                  {incidenciaScope === 'activas' ? 'Activas' : 'Por contrato'}
+                </Text>
+              </View>
+
+              <View
+                style={{
+                  flex: 1,
+                  backgroundColor: colors.surface,
+                  borderRadius: 14,
+                  borderWidth: 1,
+                  borderColor: colors.border,
+                  padding: 12,
+                }}
+              >
+                <Text style={{ fontSize: 11, color: colors.textSecondary, fontWeight: '700' }}>
+                  Cargadas
+                </Text>
+                <Text
+                  style={{
+                    marginTop: 4,
+                    fontSize: 18,
+                    fontWeight: '900',
+                    color: colors.textPrimary,
+                  }}
+                >
+                  {incidenciasFiltradas.length}
+                </Text>
+              </View>
+            </View>
+          </View>
+        )}
 
         <View style={styles.middleArea}>
           <TouchableOpacity
@@ -792,19 +1197,21 @@ export const ContratoListScreen: React.FC<Props> = ({ navigation }) => {
           </TouchableOpacity>
 
           {buscadorAbierto && (
-            <View style={{ maxHeight: 340 }}>
+            <View style={{ maxHeight: 360 }}>
               <ScrollView
                 nestedScrollEnabled
                 showsVerticalScrollIndicator={false}
                 contentContainerStyle={{ paddingBottom: 8 }}
               >
-                {renderBuscador()}
+                {activeTab === 'contratos' ? renderBuscadorContratos() : renderBuscadorIncidencias()}
               </ScrollView>
             </View>
           )}
         </View>
 
-        <View style={styles.bottomArea}>{renderContenido()}</View>
+        <View style={styles.bottomArea}>
+          {activeTab === 'contratos' ? renderContenidoContratos() : renderContenidoIncidencias()}
+        </View>
 
         <ActionSheet
           visible={sheetVisible}
