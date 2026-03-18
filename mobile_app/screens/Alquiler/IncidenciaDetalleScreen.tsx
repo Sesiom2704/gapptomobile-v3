@@ -1,12 +1,12 @@
 /**
  * Ruta: mobile_app/screens/Alquiler/IncidenciaDetalleScreen.tsx
- * Versión: 1.2.0
+ * Versión: 2.0.0
  * Descripción:
  * Pantalla de detalle de incidencia para GAPPTO Mobile.
  *
  * Funcionalidades incluidas:
  * - Carga detalle completo de la incidencia.
- * - Muestra datos operativos principales.
+ * - Muestra resumen, descripción, responsable actual, historial y citas.
  * - Permite refresco manual.
  * - Permite asignar proveedor.
  * - Permite programar o reprogramar visita.
@@ -15,15 +15,16 @@
  *   - descripcion
  *   - telefono_inquilino_snapshot
  *   - notas_acceso
+ *   - estado
  * - Guarda cambios mediante updateIncidencia().
- * - NUEVO: muestra historial de cambios.
- * - NUEVO: muestra historial de citas registradas.
  *
  * Notas de diseño:
- * - Esta versión mantiene la UI simple y estable.
- * - No permite cambiar estado/prioridad por edición libre.
- * - La edición controlada queda separada de las acciones operativas.
- * - Historial y citas se renderizan en formato timeline simple reutilizable.
+ * - Mantiene la edición controlada separada de las acciones operativas.
+ * - El estado se pinta en semáforo agrupado:
+ *   - rojo
+ *   - amarillo
+ *   - verde
+ * - No se permite edición libre de prioridad ni proveedor desde el formulario de edición.
  */
 
 import React, { useCallback, useMemo, useState } from 'react';
@@ -46,6 +47,7 @@ import Ionicons from '@expo/vector-icons/Ionicons';
 import Header from '../../components/layout/Header';
 import { listStyles } from '../../components/list/listStyles';
 import { ActionSheet, ActionSheetAction } from '../../components/modals/ActionSheet';
+import { FilterPill } from '../../components/ui/FilterPill';
 
 import { colors, spacing, radius } from '../../theme';
 
@@ -56,6 +58,7 @@ import {
   assignProveedorIncidencia,
   scheduleVisitIncidencia,
   getIncidenciaEstadoColorToken,
+  INCIDENCIA_ESTADO_OPTIONS,
   type IncidenciaDetailResponse,
   type ProveedorListItem,
 } from '../../services/gestionIncidenciasApi';
@@ -155,20 +158,29 @@ const EditableField: React.FC<{
   );
 };
 
-const TimelineItem: React.FC<{
-  title: string;
-  subtitle?: string;
-  meta?: string;
-  note?: string | null;
-}> = ({ title, subtitle, meta, note }) => {
+const EstadoSelector: React.FC<{
+  value: string;
+  onChange: (v: string) => void;
+}> = ({ value, onChange }) => {
   return (
-    <View style={localStyles.timelineItem}>
-      <View style={localStyles.timelineDot} />
-      <View style={{ flex: 1 }}>
-        <Text style={localStyles.timelineTitle}>{title}</Text>
-        {!!subtitle && <Text style={localStyles.timelineSubtitle}>{subtitle}</Text>}
-        {!!meta && <Text style={localStyles.timelineMeta}>{meta}</Text>}
-        {!!note && <Text style={localStyles.timelineNote}>{note}</Text>}
+    <View style={localStyles.fieldRow}>
+      <Text style={localStyles.fieldLabel}>Estado</Text>
+
+      <View style={localStyles.estadoOptionsWrap}>
+        {INCIDENCIA_ESTADO_OPTIONS.map((item) => {
+          const selected = value === item.value;
+
+          return (
+            <View key={item.value} style={localStyles.estadoOptionWrapper}>
+              <FilterPill
+                label={item.label}
+                selected={selected}
+                onPress={() => onChange(item.value)}
+                style={localStyles.estadoOptionPill}
+              />
+            </View>
+          );
+        })}
       </View>
     </View>
   );
@@ -363,6 +375,7 @@ export const IncidenciaDetalleScreen: React.FC<Props> = ({ navigation, route }) 
   const [editDescripcion, setEditDescripcion] = useState('');
   const [editTelefonoSnapshot, setEditTelefonoSnapshot] = useState('');
   const [editNotasAcceso, setEditNotasAcceso] = useState('');
+  const [editEstado, setEditEstado] = useState('');
   const [editNotaOperativa, setEditNotaOperativa] = useState('');
 
   const hydrateEditState = useCallback((data: IncidenciaDetailResponse | null) => {
@@ -370,6 +383,7 @@ export const IncidenciaDetalleScreen: React.FC<Props> = ({ navigation, route }) 
     setEditDescripcion(String(data?.descripcion ?? ''));
     setEditTelefonoSnapshot(String(data?.telefono_inquilino_snapshot ?? ''));
     setEditNotasAcceso(String(data?.notas_acceso ?? ''));
+    setEditEstado(String(data?.estado ?? ''));
     setEditNotaOperativa('');
   }, []);
 
@@ -547,6 +561,7 @@ export const IncidenciaDetalleScreen: React.FC<Props> = ({ navigation, route }) 
         descripcion: editDescripcion,
         telefono_inquilino_snapshot: editTelefonoSnapshot.trim() || null,
         notas_acceso: editNotasAcceso.trim() || null,
+        estado: editEstado || undefined,
         nota_operativa: editNotaOperativa.trim() || undefined,
       });
 
@@ -573,6 +588,7 @@ export const IncidenciaDetalleScreen: React.FC<Props> = ({ navigation, route }) 
     editDescripcion,
     editTelefonoSnapshot,
     editNotasAcceso,
+    editEstado,
     editNotaOperativa,
     hydrateEditState,
   ]);
@@ -662,6 +678,11 @@ export const IncidenciaDetalleScreen: React.FC<Props> = ({ navigation, route }) 
             multiline
           />
 
+          <EstadoSelector
+            value={editEstado}
+            onChange={setEditEstado}
+          />
+
           <EditableField
             label="Nota operativa"
             value={editNotaOperativa}
@@ -717,76 +738,69 @@ export const IncidenciaDetalleScreen: React.FC<Props> = ({ navigation, route }) 
   };
 
   const renderHistorialSection = () => {
-    const items = detalle?.historial ?? [];
+    const historial = detalle?.historial ?? [];
 
     return (
-      <SectionCard title="Historial de cambios">
-        {items.length === 0 ? (
-          <Text style={listStyles.emptyText}>No hay movimientos registrados.</Text>
+      <SectionCard title="Historial">
+        {historial.length === 0 ? (
+          <Text style={localStyles.emptyMiniText}>No hay historial disponible.</Text>
         ) : (
-          items.map((item) => {
-            const title = item.estado_anterior_label
-              ? `${safeText(item.estado_anterior_label)} → ${safeText(item.estado_nuevo_label)}`
-              : safeText(item.estado_nuevo_label);
-
-            const subtitleParts = [
-              item.persona_cambia_nombre ? String(item.persona_cambia_nombre) : '',
-              item.rol_cambia ? String(item.rol_cambia) : '',
-            ].filter(Boolean);
-
-            return (
-              <TimelineItem
-                key={item.id}
-                title={title}
-                subtitle={subtitleParts.join(' · ') || undefined}
-                meta={formatDateTimeLabel(item.fecha_creacion)}
-                note={item.nota}
-              />
-            );
-          })
+          historial.map((item) => (
+            <View key={item.id} style={localStyles.timelineItem}>
+              <View style={localStyles.timelineDot} />
+              <View style={{ flex: 1 }}>
+                <Text style={localStyles.timelineTitle}>
+                  {safeText(item.estado_nuevo_label)}
+                </Text>
+                <Text style={localStyles.timelineMeta}>
+                  {safeText(item.persona_cambia_nombre)} · {safeText(item.rol_cambia)}
+                </Text>
+                <Text style={localStyles.timelineMeta}>
+                  {formatDateTimeLabel(item.fecha_creacion)}
+                </Text>
+                {!!item.nota && (
+                  <Text style={localStyles.timelineNote}>{item.nota}</Text>
+                )}
+              </View>
+            </View>
+          ))
         )}
       </SectionCard>
     );
   };
 
   const renderCitasSection = () => {
-    const items = detalle?.citas ?? [];
+    const citas = detalle?.citas ?? [];
 
     return (
-      <SectionCard title="Historial de citas">
-        {items.length === 0 ? (
-          <Text style={listStyles.emptyText}>No hay citas registradas.</Text>
+      <SectionCard title="Citas">
+        {citas.length === 0 ? (
+          <Text style={localStyles.emptyMiniText}>No hay citas registradas.</Text>
         ) : (
-          items.map((item) => {
-            const title = item.proveedor_nombre
-              ? `${item.proveedor_nombre}`
-              : `Cita ${item.id}`;
-
-            const subtitleParts = [
-              item.estado_cita_label ? String(item.estado_cita_label) : '',
-              item.estado_inquilino_label ? String(item.estado_inquilino_label) : '',
-            ].filter(Boolean);
-
-            const noteParts = [
-              item.motivo_reprogramacion ? `Motivo: ${item.motivo_reprogramacion}` : '',
-              item.propuesta_por_persona_nombre
-                ? `Propuesta por: ${item.propuesta_por_persona_nombre}`
-                : '',
-              item.confirmada_por_persona_nombre
-                ? `Confirmada por: ${item.confirmada_por_persona_nombre}`
-                : '',
-            ].filter(Boolean);
-
-            return (
-              <TimelineItem
-                key={item.id}
-                title={title}
-                subtitle={subtitleParts.join(' · ') || undefined}
-                meta={`Inicio: ${formatDateTimeLabel(item.fecha_inicio_programada)}`}
-                note={noteParts.join('\n') || null}
-              />
-            );
-          })
+          citas.map((item) => (
+            <View key={item.id} style={localStyles.citaCard}>
+              <Text style={localStyles.citaTitle}>
+                {safeText(item.proveedor_nombre)}
+              </Text>
+              <Text style={localStyles.citaMeta}>
+                Inicio: {formatDateTimeLabel(item.fecha_inicio_programada)}
+              </Text>
+              <Text style={localStyles.citaMeta}>
+                Fin: {formatDateTimeLabel(item.fecha_fin_programada)}
+              </Text>
+              <Text style={localStyles.citaMeta}>
+                Estado cita: {safeText(item.estado_cita_label)}
+              </Text>
+              <Text style={localStyles.citaMeta}>
+                Estado inquilino: {safeText(item.estado_inquilino_label)}
+              </Text>
+              {!!item.motivo_reprogramacion && (
+                <Text style={localStyles.citaNote}>
+                  Motivo: {item.motivo_reprogramacion}
+                </Text>
+              )}
+            </View>
+          ))
         )}
       </SectionCard>
     );
@@ -874,7 +888,6 @@ export const IncidenciaDetalleScreen: React.FC<Props> = ({ navigation, route }) 
         </SectionCard>
 
         {renderHistorialSection()}
-
         {renderCitasSection()}
 
         {!editMode && (
@@ -1195,11 +1208,27 @@ const localStyles = StyleSheet.create({
     fontWeight: '700',
     color: '#FFFFFF',
   },
+  estadoOptionsWrap: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    marginHorizontal: -4,
+  },
+  estadoOptionWrapper: {
+    width: '50%',
+    paddingHorizontal: 4,
+    marginBottom: 8,
+  },
+  estadoOptionPill: {
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
   timelineItem: {
     flexDirection: 'row',
     alignItems: 'flex-start',
     gap: spacing.sm,
-    marginTop: spacing.sm,
+    paddingVertical: spacing.sm,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: colors.border,
   },
   timelineDot: {
     width: 10,
@@ -1209,25 +1238,47 @@ const localStyles = StyleSheet.create({
     marginTop: 6,
   },
   timelineTitle: {
-    fontSize: 14,
+    fontSize: 13,
     fontWeight: '700',
     color: colors.textPrimary,
-  },
-  timelineSubtitle: {
-    marginTop: 2,
-    fontSize: 12,
-    color: colors.textSecondary,
   },
   timelineMeta: {
     marginTop: 2,
     fontSize: 12,
-    color: colors.textMuted,
+    color: colors.textSecondary,
   },
   timelineNote: {
+    marginTop: 4,
+    fontSize: 13,
+    color: colors.textPrimary,
+  },
+  citaCard: {
+    borderWidth: 1,
+    borderColor: colors.border,
+    borderRadius: radius.lg,
+    padding: spacing.md,
+    backgroundColor: '#FFFFFF',
+    marginBottom: spacing.sm,
+  },
+  citaTitle: {
+    fontSize: 14,
+    fontWeight: '700',
+    color: colors.textPrimary,
+    marginBottom: 4,
+  },
+  citaMeta: {
+    fontSize: 12,
+    color: colors.textSecondary,
+    marginTop: 2,
+  },
+  citaNote: {
     marginTop: 6,
     fontSize: 13,
     color: colors.textPrimary,
-    lineHeight: 19,
+  },
+  emptyMiniText: {
+    fontSize: 13,
+    color: colors.textSecondary,
   },
 });
 

@@ -21,6 +21,7 @@
 
 import axios from 'axios';
 import { api } from './api';
+import { colors } from '../theme';
 
 const BASE = '/api/v1/gestion-incidencias';
 
@@ -88,6 +89,24 @@ export type ResponsableActual = {
   id: string;
   nombre?: string | null;
 };
+
+export const INCIDENCIA_ESTADO_OPTIONS = [
+  { value: 'new', label: 'Nueva' },
+  { value: 'under_review', label: 'En gestión' },
+  { value: 'awaiting_provider_assignment', label: 'Pendiente de asignación de proveedor' },
+  { value: 'awaiting_quote', label: 'Pendiente de presupuesto' },
+  { value: 'quote_submitted', label: 'Presupuesto recibido' },
+  { value: 'quote_approved', label: 'Presupuesto aprobado' },
+  { value: 'scheduled', label: 'Visita programada' },
+  { value: 'tenant_confirmed', label: 'Confirmada por inquilino' },
+  { value: 'tenant_reschedule_requested', label: 'Reprogramación solicitada' },
+  { value: 'in_progress', label: 'En curso' },
+  { value: 'awaiting_parts', label: 'Pendiente de piezas' },
+  { value: 'pending_follow_up', label: 'Pendiente de seguimiento' },
+  { value: 'resolved', label: 'Resuelta' },
+  { value: 'closed', label: 'Cerrada' },
+  { value: 'cancelled', label: 'Cancelada' },
+] as const;
 
 export type CitaIncidenciaResumen = {
   id: string;
@@ -234,6 +253,7 @@ export type IncidenciaUpdatePayload = {
   descripcion?: string | null;
   telefono_inquilino_snapshot?: string | null;
   notas_acceso?: string | null;
+  estado?: EstadoIncidencia | null;
   nota_operativa?: string | null;
 };
 
@@ -365,23 +385,35 @@ function normalizeCitaItem(r: any): CitaIncidenciaItem {
 export function getIncidenciaEstadoColorToken(estado?: string | null): string {
   const value = String(estado ?? '').trim().toLowerCase();
 
-  if (value === 'new') return '#2563eb';
-  if (value === 'under_review') return '#7c3aed';
-  if (value === 'awaiting_provider_assignment') return '#d97706';
-  if (value === 'awaiting_quote') return '#b45309';
-  if (value === 'quote_submitted') return '#0369a1';
-  if (value === 'quote_approved') return '#0f766e';
-  if (value === 'scheduled') return '#0891b2';
-  if (value === 'tenant_confirmed') return '#0f766e';
-  if (value === 'tenant_reschedule_requested') return '#c2410c';
-  if (value === 'in_progress') return '#9333ea';
-  if (value === 'awaiting_parts') return '#ca8a04';
-  if (value === 'pending_follow_up') return '#ea580c';
-  if (value === 'resolved') return '#15803d';
-  if (value === 'closed') return '#4b5563';
-  if (value === 'cancelled') return '#b91c1c';
+  const redStates = new Set([
+    'new',
+    'awaiting_provider_assignment',
+    'tenant_reschedule_requested',
+    'awaiting_parts',
+    'pending_follow_up',
+    'cancelled',
+  ]);
 
-  return '#4b5563';
+  const yellowStates = new Set([
+    'under_review',
+    'awaiting_quote',
+    'quote_submitted',
+    'quote_approved',
+    'scheduled',
+    'in_progress',
+  ]);
+
+  const greenStates = new Set([
+    'tenant_confirmed',
+    'resolved',
+    'closed',
+  ]);
+
+  if (redStates.has(value)) return colors.danger;
+  if (yellowStates.has(value)) return colors.warning;
+  if (greenStates.has(value)) return colors.success;
+
+  return colors.textSecondary;
 }
 
 export function getIncidenciaDisplaySubtitle(item: IncidenciaListItem): string {

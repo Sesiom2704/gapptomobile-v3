@@ -124,6 +124,23 @@ ESTADO_INQUILINO_LABELS = {
     "rejected": "Rechazado",
 }
 
+ALLOWED_ESTADOS = {
+    "new",
+    "under_review",
+    "awaiting_provider_assignment",
+    "awaiting_quote",
+    "quote_submitted",
+    "quote_approved",
+    "scheduled",
+    "tenant_confirmed",
+    "tenant_reschedule_requested",
+    "in_progress",
+    "awaiting_parts",
+    "pending_follow_up",
+    "resolved",
+    "closed",
+    "cancelled",
+}
 
 def _estado_label(value: Optional[str]) -> str:
     if not value:
@@ -148,6 +165,14 @@ def _estado_inquilino_label(value: Optional[str]) -> str:
         return "Sin estado"
     return ESTADO_INQUILINO_LABELS.get(value, value)
 
+def _validate_estado_incidencia(value: Optional[str]) -> str:
+    normalized = str(value or "").strip().lower()
+    if normalized not in ALLOWED_ESTADOS:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Estado de incidencia no válido",
+        )
+    return normalized
 
 def _get_owned_contrato(
     db: Session,
@@ -699,6 +724,12 @@ def update_incidencia(
         if incidencia.notas_acceso != new_value:
             incidencia.notas_acceso = new_value
             changed_fields.append("notas_acceso")
+
+    if payload.estado is not None:
+        new_estado = _validate_estado_incidencia(payload.estado)
+        if incidencia.estado != new_estado:
+            incidencia.estado = new_estado
+            changed_fields.append("estado")
 
     if not changed_fields:
         return GestionIncidenciaUpdateResponse(

@@ -199,6 +199,7 @@ class GestionIncidenciaUpdateRequest(BaseModel):
     titulo: Optional[str] = None
     descripcion: Optional[str] = None
     telefono_inquilino_snapshot: Optional[str] = None
+    estado: Optional[str] = None
     notas_acceso: Optional[str] = None
     nota_operativa: Optional[str] = None
 
