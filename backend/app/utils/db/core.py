@@ -1,4 +1,35 @@
-# backend/app/utils/db/core.py
+"""
+/**
+ * Ruta: backend/app/utils/db/core.py
+ * Versión: 1.0.0
+ * Descripción:
+ * Motor de sincronización tabla a tabla para GAPPTO Mobile 3.0.
+ *
+ * Funcionalidades incluidas:
+ * - Sincroniza tablas entre adapters Postgres y Google Sheets.
+ * - Soporta origen y destino en Neon, Supabase y Sheets a través de adapters.
+ * - Lee tablas desde source y las escribe en dest.
+ * - Detecta views y matviews en Postgres.
+ * - Evita escritura en views/matviews cuando no se permite modo destructivo.
+ * - Soporta ejecución real y dry-run.
+ * - Normaliza datos al pasar de Sheets a Postgres.
+ * - Refleja estructura en destino Postgres cuando el origen también es Postgres.
+ * - Delega en los adapters la lógica específica de lectura y escritura.
+ *
+ * Ajustes de esta versión:
+ * - Se elimina una validación redundante de headers al escribir en Google Sheets.
+ * - Se reduce una llamada innecesaria por tabla hacia la API de Sheets.
+ * - Se mantiene la validación de headers dentro del adapter de Sheets.
+ * - Se conserva el comportamiento funcional existente del motor.
+ *
+ * Notas de diseño:
+ * - El objetivo es reducir llamadas repetidas a Google Sheets sin cambiar contratos.
+ * - La responsabilidad de asegurar headers en Sheets queda centralizada en el adapter.
+ * - La normalización Sheets -> Postgres permanece separada de la lógica de escritura.
+ * - Se mantiene un flujo simple y predecible por tabla para no romper compatibilidad.
+ */
+"""
+
 from __future__ import annotations
 
 from typing import Any, Dict, List, Optional, Tuple
@@ -37,8 +68,19 @@ class SyncEngine:
         execute: bool,
         allow_destructive: bool,
     ) -> None:
+        """
+        Ejecuta la sincronización de las tablas indicadas.
+
+        Criterios importantes:
+        - Lee siempre desde source.
+        - Escribe en dest solo si execute=True.
+        - Cuando el destino es Sheets, la validación de headers se deja
+          centralizada dentro del adapter para evitar lecturas duplicadas.
+        """
+        exclude_set = set(exclude or [])
+
         for full_name in tables:
-            if exclude and full_name in set(exclude):
+            if full_name in exclude_set:
                 print(f"[mirror] {full_name}: skip (excluded)")
                 continue
 
@@ -73,7 +115,8 @@ class SyncEngine:
                 raise RuntimeError(f"source adapter no soportado: {type(self.source)}")
 
             # --- Normalización CRÍTICA Sheets -> Postgres ---
-            # Sheets no tiene NULL: los campos vacíos llegan como "" y Postgres no puede castear "" a uuid/int/timestamp/numeric/bool.
+            # Sheets no tiene NULL: los campos vacíos llegan como "" y Postgres no puede
+            # castear "" a uuid/int/timestamp/numeric/bool.
             # Además, algunas filas pueden venir más cortas que headers (celdas vacías al final).
             if isinstance(self.source, SheetsAdapter) and isinstance(self.dest, PostgresAdapter):
                 hlen = len(headers)
@@ -86,22 +129,26 @@ class SyncEngine:
                         if s == "":
                             return None
                         sl = s.lower()
+
                         # boolean típicos de Sheets
                         if sl in ("true", "false"):
                             return sl == "true"
-                        # deja timestamps ISO / números como string; Postgres suele castear bien
+
+                        # Dejamos timestamps ISO / números como string;
+                        # Postgres suele castear bien.
                         return s
+
                     return v
 
                 norm_rows: List[Tuple[Any, ...]] = []
                 for r in rows:
                     rr = list(r)
 
-                    # si la fila viene más corta que headers, rellenamos con None
+                    # Si la fila viene más corta que headers, rellenamos con None
                     if len(rr) < hlen:
                         rr += [None] * (hlen - len(rr))
 
-                    # si viene más larga, truncamos
+                    # Si viene más larga, truncamos
                     if len(rr) > hlen:
                         rr = rr[:hlen]
 
@@ -116,11 +163,12 @@ class SyncEngine:
 
             if isinstance(self.dest, SheetsAdapter):
                 # IMPORTANTE:
-                # - ensure_headers hace lecturas de Sheets (cuota)
-                # - en DRY-RUN no tocamos Sheets
+                # - En dry-run no tocamos Sheets.
+                # - En execute=True no llamamos aquí a ensure_headers, porque write_table()
+                #   ya lo hace internamente. Duplicarlo provoca lecturas innecesarias
+                #   contra la API de Google Sheets.
                 if execute:
-                    self.dest.ensure_headers(full_name, headers)
-                    print(f"[Sheets] {full_name}: headers OK")
+                    print(f"[Sheets] {full_name}: write preparation OK")
                 else:
                     print(f"[Sheets] {full_name}: (dry-run) skip headers check")
 
@@ -138,7 +186,8 @@ class SyncEngine:
                 )
 
             elif isinstance(self.dest, SheetsAdapter):
-                # En dry-run no escribimos (y ya hemos evitado lecturas)
+                # En dry-run no escribimos.
+                # En execute=True, el propio adapter asegura headers, capacidad y escritura.
                 self.dest.write_table(
                     full_name,
                     headers,

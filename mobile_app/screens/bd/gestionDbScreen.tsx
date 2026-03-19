@@ -1,6 +1,34 @@
-//mobile_app\screens\bd\gestionDbScreen.tsx
+/**
+ * Ruta: mobile_app/screens/bd/gestionDbScreen.tsx
+ * Versión: 1.0.0
+ * Descripción:
+ * Pantalla de gestión manual de base de datos y sincronizaciones para GAPPTO Mobile.
+ *
+ * Funcionalidades incluidas:
+ * - Permite seleccionar la base activa de la app entre Supabase y Neon.
+ * - Guarda la base activa en SecureStore.
+ * - Permite lanzar sincronizaciones manuales entre Neon, Supabase y Sheets.
+ * - Soporta dry-run y ejecución real.
+ * - Soporta modo destructivo controlado.
+ * - Consulta el estado del job por polling.
+ * - Permite cancelar un job en curso.
+ * - Muestra progreso, tabla actual y log desplegable.
+ * - Incluye ping de backend para depuración.
+ *
+ * Ajustes de esta versión:
+ * - Se refuerzan validaciones antes de lanzar sincronización.
+ * - Se mejora la limpieza del polling para evitar estados colgados.
+ * - Se evita relanzar un job manual si ya hay uno en curso.
+ * - Se mantienen logs de depuración y comportamiento funcional existente.
+ *
+ * Notas de diseño:
+ * - La pantalla sigue siendo manual y operativa, útil para pruebas y soporte.
+ * - Se prioriza la claridad del estado del job y la prevención de acciones conflictivas.
+ * - El polling sigue siendo simple para no añadir complejidad innecesaria.
+ * - Se mantiene compatibilidad con el backend actual de sincronización.
+ */
 
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   View,
   Text,
@@ -12,32 +40,28 @@ import {
   LayoutAnimation,
   Platform,
   UIManager,
-} from 'react-native';
-import * as SecureStore from 'expo-secure-store';
-import Header from '../../components/layout/Header';
-import { panelStyles } from '../../components/panels/panelStyles';
-import { colors } from '../../theme/colors';
-import { api } from '../../services/api';
+} from "react-native";
+import * as SecureStore from "expo-secure-store";
+import Header from "../../components/layout/Header";
+import { panelStyles } from "../../components/panels/panelStyles";
+import { colors } from "../../theme/colors";
+import { api } from "../../services/api";
 
 // Habilitar animaciones en Android (para desplegables)
-if (Platform.OS === 'android' && UIManager.setLayoutAnimationEnabledExperimental) {
+if (Platform.OS === "android" && UIManager.setLayoutAnimationEnabledExperimental) {
   UIManager.setLayoutAnimationEnabledExperimental(true);
 }
 
-type DBKey = 'supabase' | 'neon';
-type EndpointDB = 'neon' | 'supabase' | 'sheets';
-type JobStatus = 'idle' | 'queued' | 'running' | 'done' | 'error' | 'canceled';
+type DBKey = "supabase" | "neon";
+type EndpointDB = "neon" | "supabase" | "sheets";
+type JobStatus = "idle" | "queued" | "running" | "done" | "error" | "canceled";
 
-/** ---------------- DEBUG helpers ----------------
- * Mantengo los logs en consola (Expo).
- * Si más adelante quieres “modo debug” con toggle, lo añadimos.
- */
 const DEBUG_DB = true;
+const POLL_INTERVAL_MS = 900;
 
 function debug(...args: any[]) {
   if (!DEBUG_DB) return;
-  // Prefijo para localizar rápido en Expo logs
-  console.log('[GestionDb]', ...args);
+  console.log("[GestionDb]", ...args);
 }
 
 function safeJson(x: any) {
@@ -49,7 +73,6 @@ function safeJson(x: any) {
 }
 
 function extractAxiosError(e: any) {
-  // Compatible con axios errors típicos
   const status = e?.response?.status;
   const data = e?.response?.data;
   const detail = data?.detail ?? data;
@@ -57,8 +80,6 @@ function extractAxiosError(e: any) {
   return { status, data, detail, message };
 }
 
-// --------------- Helpers API ---------------
-// NOTA: backend expone /api/db (no /api/admin)
 async function startSyncJob(payload: {
   source: EndpointDB;
   dest: EndpointDB;
@@ -67,7 +88,7 @@ async function startSyncJob(payload: {
   tables?: string[] | null;
   exclude?: string[] | null;
 }) {
-  return api.post('/api/db/sync/start', payload);
+  return api.post("/api/db/sync/start", payload);
 }
 
 async function fetchSyncStatus(jobId: string) {
@@ -78,7 +99,6 @@ async function cancelSyncJob(jobId: string) {
   return api.post(`/api/db/sync/${jobId}/cancel`);
 }
 
-// --------------- UI atoms ---------------
 function Pill({
   label,
   active,
@@ -143,13 +163,13 @@ function PrimaryButton({
   onPress,
   busy,
   disabled,
-  tone = 'primary',
+  tone = "primary",
 }: {
   label: string;
   onPress?: () => void;
   busy?: boolean;
   disabled?: boolean;
-  tone?: 'primary' | 'danger';
+  tone?: "primary" | "danger";
 }) {
   const isDisabled = disabled || busy;
 
@@ -159,7 +179,7 @@ function PrimaryButton({
       onPress={isDisabled ? undefined : onPress}
       style={[
         styles.primaryBtn,
-        tone === 'danger' ? styles.primaryBtnDanger : styles.primaryBtnPrimary,
+        tone === "danger" ? styles.primaryBtnDanger : styles.primaryBtnPrimary,
         isDisabled ? { opacity: 0.6 } : null,
       ]}
     >
@@ -168,14 +188,14 @@ function PrimaryButton({
   );
 }
 
-function Badge({ text, tone }: { text: string; tone: 'info' | 'ok' | 'warn' | 'err' }) {
+function Badge({ text, tone }: { text: string; tone: "info" | "ok" | "warn" | "err" }) {
   const bg =
-    tone === 'ok'
+    tone === "ok"
       ? colors.success
-      : tone === 'err'
+      : tone === "err"
         ? colors.danger
-        : tone === 'warn'
-          ? '#f59e0b'
+        : tone === "warn"
+          ? "#f59e0b"
           : colors.primary;
 
   return (
@@ -194,147 +214,169 @@ function ProgressBar({ progress }: { progress: number }) {
   );
 }
 
-// --------------- Screen ---------------
 export default function GestionDbScreen() {
-  // 1) DB activa para requests normales (X-DB)
-  const [currentDb, setCurrentDb] = useState<DBKey>('supabase');
-  const dbOptions = useMemo(
-    () => [
-      { key: 'supabase' as DBKey, label: 'Supabase', hint: 'pooler' },
-      { key: 'neon' as DBKey, label: 'Neon', hint: 'serverless' },
-    ],
-    []
-  );
+  const mountedRef = useRef(true);
+  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const reqIdRef = useRef<string>("");
 
-  const applyDb = useCallback(async (key: DBKey) => {
-    debug('applyDb ->', key);
-    setCurrentDb(key);
-    try {
-      await SecureStore.setItemAsync('dbKey', key);
-      // si tienes helper setDbKey(...) en tu api.ts (opcional), mantenlo:
-      // setDbKey(key);
-      Alert.alert('Base de datos', `Ahora usas: ${key.toUpperCase()}`);
-    } catch (e) {
-      debug('applyDb error:', e);
-      Alert.alert('Base de datos', 'No se pudo guardar la selección.');
-    }
-  }, []);
+  const [currentDb, setCurrentDb] = useState<DBKey>("supabase");
 
-  useEffect(() => {
-    (async () => {
-      try {
-        const stored = (await SecureStore.getItemAsync('dbKey')) as DBKey | null;
-        const effective = stored || 'supabase';
-        debug('boot: stored dbKey =', stored, '-> effective =', effective);
-        setCurrentDb(effective);
-        // setDbKey(effective);
-      } catch (e) {
-        debug('boot: SecureStore read failed:', e);
-        setCurrentDb('supabase');
-      }
-    })();
-  }, []);
-
-  // Ping opcional (para confirmar baseURL y conectividad real)
-  useEffect(() => {
-    (async () => {
-      try {
-        debug('api.baseURL =', (api.defaults as any)?.baseURL);
-        const r = await api.get('/api/db/ping');
-        debug('PING OK:', r?.status, r?.data);
-      } catch (e: any) {
-        const x = extractAxiosError(e);
-        debug('PING FAIL:', safeJson(x));
-      }
-    })();
-  }, []);
-
-  // 2) Sync job
-  const [syncSrc, setSyncSrc] = useState<EndpointDB>('neon');
-  const [syncDst, setSyncDst] = useState<EndpointDB>('supabase');
+  const [syncSrc, setSyncSrc] = useState<EndpointDB>("neon");
+  const [syncDst, setSyncDst] = useState<EndpointDB>("supabase");
   const [syncExecute, setSyncExecute] = useState(false);
   const [syncDestructive, setSyncDestructive] = useState(false);
 
   const [jobId, setJobId] = useState<string | null>(null);
-  const [jobStatus, setJobStatus] = useState<JobStatus>('idle');
+  const [jobStatus, setJobStatus] = useState<JobStatus>("idle");
   const [progress, setProgress] = useState<number>(0);
   const [currentTable, setCurrentTable] = useState<string | null>(null);
-  const [logTail, setLogTail] = useState<string>('');
+  const [logTail, setLogTail] = useState<string>("");
   const [launching, setLaunching] = useState(false);
   const [logOpen, setLogOpen] = useState(false);
 
-  // Polling
-  const pollRef = useRef<number | null>(null);
-
-  // request correlation id (para trazar un intento de sync completo)
-  const reqIdRef = useRef<string>('');
+  const dbOptions = useMemo(
+    () => [
+      { key: "supabase" as DBKey, label: "Supabase", hint: "pooler" },
+      { key: "neon" as DBKey, label: "Neon", hint: "serverless" },
+    ],
+    []
+  );
 
   const syncOptions: { key: EndpointDB; label: string; subtitle: string }[] = [
-    { key: 'neon', label: 'Neon', subtitle: 'Postgres' },
-    { key: 'supabase', label: 'Supabase', subtitle: 'Postgres' },
-    { key: 'sheets', label: 'Sheets', subtitle: 'Google' },
+    { key: "neon", label: "Neon", subtitle: "Postgres" },
+    { key: "supabase", label: "Supabase", subtitle: "Postgres" },
+    { key: "sheets", label: "Sheets", subtitle: "Google" },
   ];
 
-  const clearPoll = () => {
+  const isJobBusy = jobStatus === "queued" || jobStatus === "running";
+  const canLaunch = !launching && !isJobBusy;
+
+  const clearPoll = useCallback(() => {
     if (pollRef.current !== null) {
-      debug('poll: clear');
+      debug("poll: clear");
       clearInterval(pollRef.current);
       pollRef.current = null;
     }
-  };
-
-  const startPolling = useCallback((id: string) => {
-    debug('poll: start', { jobId: id, reqId: reqIdRef.current });
-    clearPoll();
-    pollRef.current = setInterval(async () => {
-      try {
-        const r = await fetchSyncStatus(id);
-        const d = r.data || {};
-        const st = (d.status as JobStatus) || 'idle';
-        const pr = Number(d.progress || 0);
-
-        debug('poll: tick', {
-          reqId: reqIdRef.current,
-          jobId: id,
-          status: st,
-          progress: pr,
-          current_table: d.current_table,
-        });
-
-        setJobStatus(st);
-        setProgress(pr);
-        setCurrentTable(d.current_table || null);
-        setLogTail(d.log_tail || '');
-
-        if (st === 'done' || st === 'error' || st === 'canceled') {
-          debug('poll: stop terminal status', st, 'error=', d.error);
-          clearPoll();
-        }
-      } catch (e: any) {
-        const x = extractAxiosError(e);
-        debug('poll: ERROR -> stop', safeJson(x));
-        clearPoll();
-      }
-    }, 900) as unknown as number;
   }, []);
+
+  const applyDb = useCallback(async (key: DBKey) => {
+    debug("applyDb ->", key);
+    setCurrentDb(key);
+
+    try {
+      await SecureStore.setItemAsync("dbKey", key);
+      Alert.alert("Base de datos", `Ahora usas: ${key.toUpperCase()}`);
+    } catch (e) {
+      debug("applyDb error:", e);
+      Alert.alert("Base de datos", "No se pudo guardar la selección.");
+    }
+  }, []);
+
+  const startPolling = useCallback(
+    (id: string) => {
+      debug("poll: start", { jobId: id, reqId: reqIdRef.current });
+      clearPoll();
+
+      pollRef.current = setInterval(async () => {
+        try {
+          const r = await fetchSyncStatus(id);
+          const d = r.data || {};
+          const st = (d.status as JobStatus) || "idle";
+          const pr = Number(d.progress || 0);
+
+          debug("poll: tick", {
+            reqId: reqIdRef.current,
+            jobId: id,
+            status: st,
+            progress: pr,
+            current_table: d.current_table,
+          });
+
+          if (!mountedRef.current) {
+            clearPoll();
+            return;
+          }
+
+          setJobStatus(st);
+          setProgress(pr);
+          setCurrentTable(d.current_table || null);
+          setLogTail(d.log_tail || "");
+
+          if (st === "done" || st === "error" || st === "canceled") {
+            debug("poll: stop terminal status", st, "error=", d.error);
+            clearPoll();
+          }
+        } catch (e: any) {
+          const x = extractAxiosError(e);
+          debug("poll: ERROR -> stop", safeJson(x));
+          clearPoll();
+
+          if (mountedRef.current) {
+            setJobStatus("error");
+          }
+        }
+      }, POLL_INTERVAL_MS);
+    },
+    [clearPoll]
+  );
 
   useEffect(() => {
-    return () => clearPoll();
+    mountedRef.current = true;
+
+    (async () => {
+      try {
+        const stored = (await SecureStore.getItemAsync("dbKey")) as DBKey | null;
+        const effective = stored || "supabase";
+        debug("boot: stored dbKey =", stored, "-> effective =", effective);
+
+        if (mountedRef.current) {
+          setCurrentDb(effective);
+        }
+      } catch (e) {
+        debug("boot: SecureStore read failed:", e);
+        if (mountedRef.current) {
+          setCurrentDb("supabase");
+        }
+      }
+    })();
+
+    return () => {
+      mountedRef.current = false;
+      clearPoll();
+    };
+  }, [clearPoll]);
+
+  useEffect(() => {
+    (async () => {
+      try {
+        debug("api.baseURL =", (api.defaults as any)?.baseURL);
+        const r = await api.get("/api/db/ping");
+        debug("PING OK:", r?.status, r?.data);
+      } catch (e: any) {
+        const x = extractAxiosError(e);
+        debug("PING FAIL:", safeJson(x));
+      }
+    })();
   }, []);
 
-  const statusTone: 'info' | 'ok' | 'warn' | 'err' = useMemo(() => {
-    if (jobStatus === 'done') return 'ok';
-    if (jobStatus === 'error') return 'err';
-    if (jobStatus === 'canceled') return 'warn';
-    if (jobStatus === 'running' || jobStatus === 'queued') return 'info';
-    return 'info';
+  const statusTone: "info" | "ok" | "warn" | "err" = useMemo(() => {
+    if (jobStatus === "done") return "ok";
+    if (jobStatus === "error") return "err";
+    if (jobStatus === "canceled") return "warn";
+    if (jobStatus === "running" || jobStatus === "queued") return "info";
+    return "info";
   }, [jobStatus]);
 
+  const executionHint = useMemo(() => {
+    if (!syncExecute) return "Modo simulación: no escribe datos (dry-run).";
+    if (syncExecute && !syncDestructive) return "Ejecutará escritura sin cambios destructivos.";
+    return "Ejecutará y podrá eliminar estructuras sobrantes en el destino.";
+  }, [syncExecute, syncDestructive]);
+
   const launchSync = useCallback(async () => {
-    // correlation id por intento
     reqIdRef.current = `${Date.now()}-${Math.random().toString(16).slice(2, 8)}`;
 
-    debug('launchSync begin', {
+    debug("launchSync begin", {
       reqId: reqIdRef.current,
       source: syncSrc,
       dest: syncDst,
@@ -342,18 +384,23 @@ export default function GestionDbScreen() {
       allow_destructive: syncDestructive,
     });
 
-    if (syncSrc === syncDst) {
-      Alert.alert('Sincronización', 'Origen y destino no pueden ser iguales.');
+    if (!canLaunch) {
+      Alert.alert("Sincronización", "Ya hay un proceso en curso.");
       return;
     }
 
-    // Seguridad: si destructive ON y execute OFF, no tiene sentido
+    if (syncSrc === syncDst) {
+      Alert.alert("Sincronización", "Origen y destino no pueden ser iguales.");
+      return;
+    }
+
     if (!syncExecute && syncDestructive) {
-      Alert.alert('Sincronización', '“Destructivo” solo aplica cuando “Ejecutar” está activado.');
+      Alert.alert("Sincronización", "“Destructivo” solo aplica cuando “Ejecutar” está activado.");
       return;
     }
 
     setLaunching(true);
+
     try {
       const payload = {
         source: syncSrc,
@@ -362,55 +409,56 @@ export default function GestionDbScreen() {
         allow_destructive: syncDestructive,
       };
 
-      debug('launchSync POST /api/db/sync/start payload=', safeJson(payload));
+      debug("launchSync POST /api/db/sync/start payload=", safeJson(payload));
 
       const r = await startSyncJob(payload);
 
-      debug('launchSync response', { status: r?.status, data: r?.data });
+      debug("launchSync response", { status: r?.status, data: r?.data });
 
       const id = (r?.data?.job_id as string) || null;
       if (!id) {
-        debug('launchSync: missing job_id. raw=', safeJson(r?.data));
-        Alert.alert('Sincronización', 'El backend no devolvió job_id. Revisa logs del servidor.');
+        debug("launchSync: missing job_id. raw=", safeJson(r?.data));
+        Alert.alert("Sincronización", "El backend no devolvió job_id. Revisa logs del servidor.");
         return;
       }
 
       setJobId(id);
-      setJobStatus('queued');
+      setJobStatus("queued");
       setProgress(0);
       setCurrentTable(null);
-      setLogTail('');
+      setLogTail("");
       setLogOpen(false);
 
       startPolling(id);
     } catch (e: any) {
       const x = extractAxiosError(e);
-      debug('launchSync ERROR', { reqId: reqIdRef.current, ...x });
+      debug("launchSync ERROR", { reqId: reqIdRef.current, ...x });
 
-      // Mensaje útil al usuario
       const msg =
-        (typeof x.detail === 'string' ? x.detail : safeJson(x.detail)) ||
+        (typeof x.detail === "string" ? x.detail : safeJson(x.detail)) ||
         x.message ||
-        'No se pudo iniciar el job';
+        "No se pudo iniciar el job";
 
-      Alert.alert('Sincronización', msg);
+      Alert.alert("Sincronización", msg);
     } finally {
       setLaunching(false);
-      debug('launchSync end', { reqId: reqIdRef.current });
+      debug("launchSync end", { reqId: reqIdRef.current });
     }
-  }, [syncSrc, syncDst, syncExecute, syncDestructive, startPolling]);
+  }, [canLaunch, startPolling, syncDestructive, syncDst, syncExecute, syncSrc]);
 
   const cancelJob = useCallback(async () => {
     if (!jobId) return;
-    debug('cancelJob begin', { reqId: reqIdRef.current, jobId });
+
+    debug("cancelJob begin", { reqId: reqIdRef.current, jobId });
+
     try {
       const r = await cancelSyncJob(jobId);
-      debug('cancelJob response', { status: r?.status, data: r?.data });
-      Alert.alert('Sincronización', 'Cancelación solicitada.');
+      debug("cancelJob response", { status: r?.status, data: r?.data });
+      Alert.alert("Sincronización", "Cancelación solicitada.");
     } catch (e: any) {
       const x = extractAxiosError(e);
-      debug('cancelJob ERROR', safeJson(x));
-      Alert.alert('Sincronización', 'No se pudo cancelar el job.');
+      debug("cancelJob ERROR", safeJson(x));
+      Alert.alert("Sincronización", "No se pudo cancelar el job.");
     }
   }, [jobId]);
 
@@ -419,20 +467,12 @@ export default function GestionDbScreen() {
     setLogOpen((v) => !v);
   }, []);
 
-  // Texto contextual de riesgo/operación
-  const executionHint = useMemo(() => {
-    if (!syncExecute) return 'Modo simulación: no escribe datos (dry-run).';
-    if (syncExecute && !syncDestructive) return 'Ejecutará escritura sin cambios destructivos.';
-    return 'Ejecutará y podrá eliminar columnas/tablas sobrantes (destructivo).';
-  }, [syncExecute, syncDestructive]);
-
   return (
     <>
       <Header title="Importación y copias" subtitle="Sincroniza Neon, Supabase y Google Sheets." showBack />
 
       <View style={panelStyles.screen}>
         <ScrollView contentContainerStyle={panelStyles.scrollContent}>
-          {/* --- Card 1: DB activa para la app --- */}
           <View style={styles.card}>
             <View style={styles.cardHeader}>
               <Text style={styles.cardTitle}>Base activa (peticiones normales)</Text>
@@ -454,20 +494,18 @@ export default function GestionDbScreen() {
             </View>
           </View>
 
-          {/* --- Card 2: Sync --- */}
           <View style={styles.card}>
             <View style={styles.cardHeader}>
               <Text style={styles.cardTitle}>Sincronización / Copia</Text>
               <Badge
-                text={syncExecute ? (syncDestructive ? 'EXEC + DESTR' : 'EXEC') : 'DRY-RUN'}
-                tone={syncExecute ? (syncDestructive ? 'warn' : 'ok') : 'info'}
+                text={syncExecute ? (syncDestructive ? "EXEC + DESTR" : "EXEC") : "DRY-RUN"}
+                tone={syncExecute ? (syncDestructive ? "warn" : "ok") : "info"}
               />
             </View>
             <Text style={styles.cardSubtitle}>
               Define origen y destino. Recomendación: empieza siempre con dry-run.
             </Text>
 
-            {/* Origen */}
             <View style={styles.selectorBlock}>
               <Text style={styles.blockLabel}>Origen</Text>
               <View style={styles.pillRow}>
@@ -477,13 +515,12 @@ export default function GestionDbScreen() {
                     label={`${o.label} · ${o.subtitle}`}
                     active={syncSrc === o.key}
                     onPress={() => setSyncSrc(o.key)}
-                    disabled={jobStatus === 'queued' || jobStatus === 'running'}
+                    disabled={isJobBusy}
                   />
                 ))}
               </View>
             </View>
 
-            {/* Destino */}
             <View style={styles.selectorBlock}>
               <Text style={styles.blockLabel}>Destino</Text>
               <View style={styles.pillRow}>
@@ -493,13 +530,12 @@ export default function GestionDbScreen() {
                     label={`${o.label} · ${o.subtitle}`}
                     active={syncDst === o.key}
                     onPress={() => setSyncDst(o.key)}
-                    disabled={jobStatus === 'queued' || jobStatus === 'running'}
+                    disabled={isJobBusy}
                   />
                 ))}
               </View>
             </View>
 
-            {/* Toggles */}
             <View style={styles.divider} />
 
             <ToggleRow
@@ -507,15 +543,15 @@ export default function GestionDbScreen() {
               description="Si está desactivado, solo simula el plan (dry-run)."
               value={syncExecute}
               onToggle={() => setSyncExecute((v) => !v)}
-              disabled={jobStatus === 'queued' || jobStatus === 'running'}
+              disabled={isJobBusy}
             />
 
             <ToggleRow
               title="Destructivo (permitir limpieza)"
-              description="Permite eliminar columnas/estructuras sobrantes en el destino."
+              description="Permite eliminar estructuras sobrantes en el destino."
               value={syncDestructive}
               onToggle={() => setSyncDestructive((v) => !v)}
-              disabled={!syncExecute || jobStatus === 'queued' || jobStatus === 'running'}
+              disabled={!syncExecute || isJobBusy}
             />
 
             <Text style={styles.hintText}>{executionHint}</Text>
@@ -523,13 +559,13 @@ export default function GestionDbScreen() {
             <View style={{ height: 10 }} />
 
             <PrimaryButton
-              label={syncExecute ? 'Iniciar sincronización' : 'Ver plan (dry-run)'}
+              label={syncExecute ? "Iniciar sincronización" : "Ver plan (dry-run)"}
               onPress={launchSync}
-              busy={launching || jobStatus === 'queued' || jobStatus === 'running'}
+              busy={launching || isJobBusy}
+              disabled={!canLaunch}
             />
           </View>
 
-          {/* --- Card 3: Estado del job --- */}
           {jobId && (
             <View style={styles.card}>
               <View style={styles.cardHeader}>
@@ -545,9 +581,10 @@ export default function GestionDbScreen() {
                   <Text style={styles.progressMetaLeft}>Progreso</Text>
                   <Text style={styles.progressMetaRight}>{progress.toFixed(2)}%</Text>
                 </View>
+
                 {!!currentTable && (
                   <Text style={styles.tableLine} numberOfLines={1}>
-                    Tabla en proceso: <Text style={{ fontWeight: '700' }}>{currentTable}</Text>
+                    Tabla en proceso: <Text style={{ fontWeight: "700" }}>{currentTable}</Text>
                   </Text>
                 )}
               </View>
@@ -559,7 +596,7 @@ export default function GestionDbScreen() {
                   label="Cancelar"
                   tone="danger"
                   onPress={cancelJob}
-                  disabled={!(jobStatus === 'queued' || jobStatus === 'running')}
+                  disabled={!isJobBusy}
                 />
               </View>
 
@@ -567,12 +604,12 @@ export default function GestionDbScreen() {
 
               <TouchableOpacity activeOpacity={0.9} onPress={toggleLog} style={styles.logHeaderRow}>
                 <Text style={styles.logTitle}>Log (últimas líneas)</Text>
-                <Text style={styles.logToggle}>{logOpen ? 'Ocultar' : 'Mostrar'}</Text>
+                <Text style={styles.logToggle}>{logOpen ? "Ocultar" : "Mostrar"}</Text>
               </TouchableOpacity>
 
               {logOpen && (
                 <View style={styles.logBox}>
-                  <Text style={styles.logText}>{logTail || '—'}</Text>
+                  <Text style={styles.logText}>{logTail || "—"}</Text>
                 </View>
               )}
             </View>
@@ -586,7 +623,6 @@ export default function GestionDbScreen() {
 }
 
 const styles = StyleSheet.create({
-  // Tarjeta: “surface” clara sobre el fondo de tu app
   card: {
     backgroundColor: colors.surface,
     borderRadius: 18,
@@ -596,14 +632,14 @@ const styles = StyleSheet.create({
     marginBottom: 12,
   },
   cardHeader: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
     gap: 10,
   },
   cardTitle: {
     fontSize: 14,
-    fontWeight: '800',
+    fontWeight: "800",
     color: colors.textPrimary,
   },
   cardSubtitle: {
@@ -612,20 +648,18 @@ const styles = StyleSheet.create({
     color: colors.textSecondary,
     lineHeight: 16,
   },
-
   selectorBlock: {
     marginTop: 12,
   },
   blockLabel: {
     fontSize: 12,
-    fontWeight: '700',
+    fontWeight: "700",
     color: colors.textPrimary,
     marginBottom: 8,
   },
-
   pillRow: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
+    flexDirection: "row",
+    flexWrap: "wrap",
     gap: 8,
   },
   pill: {
@@ -634,7 +668,7 @@ const styles = StyleSheet.create({
     borderRadius: 999,
     borderWidth: 1,
     minHeight: 38,
-    justifyContent: 'center',
+    justifyContent: "center",
   },
   pillActive: {
     backgroundColor: colors.primarySoft,
@@ -646,7 +680,7 @@ const styles = StyleSheet.create({
   },
   pillText: {
     fontSize: 9.5,
-    fontWeight: '700',
+    fontWeight: "700",
   },
   pillTextActive: {
     color: colors.primary,
@@ -654,22 +688,20 @@ const styles = StyleSheet.create({
   pillTextInactive: {
     color: colors.textSecondary,
   },
-
   divider: {
     height: StyleSheet.hairlineWidth,
     backgroundColor: colors.border,
     marginVertical: 12,
   },
-
   toggleRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
+    flexDirection: "row",
+    alignItems: "center",
     gap: 12,
     paddingVertical: 10,
   },
   toggleTitle: {
     fontSize: 13,
-    fontWeight: '800',
+    fontWeight: "800",
     color: colors.textPrimary,
   },
   toggleDesc: {
@@ -683,7 +715,7 @@ const styles = StyleSheet.create({
     height: 26,
     borderRadius: 999,
     padding: 3,
-    justifyContent: 'center',
+    justifyContent: "center",
   },
   toggleTrackOn: {
     backgroundColor: colors.primary,
@@ -697,27 +729,25 @@ const styles = StyleSheet.create({
     borderRadius: 999,
   },
   toggleThumbOn: {
-    backgroundColor: '#fff',
-    alignSelf: 'flex-end',
+    backgroundColor: "#fff",
+    alignSelf: "flex-end",
   },
   toggleThumbOff: {
-    backgroundColor: '#fff',
-    alignSelf: 'flex-start',
+    backgroundColor: "#fff",
+    alignSelf: "flex-start",
   },
-
   hintText: {
     marginTop: 8,
     fontSize: 11,
     color: colors.textMuted,
     lineHeight: 15,
   },
-
   primaryBtn: {
     borderRadius: 14,
     paddingVertical: 12,
     paddingHorizontal: 14,
-    alignItems: 'center',
-    justifyContent: 'center',
+    alignItems: "center",
+    justifyContent: "center",
   },
   primaryBtnPrimary: {
     backgroundColor: colors.primary,
@@ -726,74 +756,70 @@ const styles = StyleSheet.create({
     backgroundColor: colors.danger,
   },
   primaryBtnText: {
-    color: '#fff',
-    fontWeight: '900',
+    color: "#fff",
+    fontWeight: "900",
     fontSize: 13,
     letterSpacing: 0.2,
   },
-
   badge: {
     paddingHorizontal: 10,
     paddingVertical: 5,
     borderRadius: 999,
   },
   badgeText: {
-    color: '#fff',
+    color: "#fff",
     fontSize: 11,
-    fontWeight: '900',
+    fontWeight: "900",
     letterSpacing: 0.3,
   },
-
   progressTrack: {
     height: 10,
     borderRadius: 999,
     backgroundColor: colors.border,
-    overflow: 'hidden',
+    overflow: "hidden",
   },
   progressFill: {
-    height: '100%',
+    height: "100%",
     borderRadius: 999,
     backgroundColor: colors.primary,
   },
   progressMetaRow: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
+    flexDirection: "row",
+    justifyContent: "space-between",
     marginTop: 6,
   },
   progressMetaLeft: {
     fontSize: 11,
     color: colors.textSecondary,
-    fontWeight: '700',
+    fontWeight: "700",
   },
   progressMetaRight: {
     fontSize: 11,
     color: colors.textSecondary,
-    fontWeight: '900',
+    fontWeight: "900",
   },
   tableLine: {
     marginTop: 8,
     fontSize: 11,
     color: colors.textSecondary,
   },
-
   actionsRow: {
-    flexDirection: 'row',
-    justifyContent: 'flex-end',
+    flexDirection: "row",
+    justifyContent: "flex-end",
   },
-
   logHeaderRow: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
   },
   logTitle: {
     fontSize: 12,
-    fontWeight: '900',
+    fontWeight: "900",
     color: colors.textPrimary,
   },
   logToggle: {
     fontSize: 12,
-    fontWeight: '800',
+    fontWeight: "800",
     color: colors.primary,
   },
   logBox: {
@@ -805,7 +831,7 @@ const styles = StyleSheet.create({
     padding: 10,
   },
   logText: {
-    fontFamily: Platform.select({ ios: 'Menlo', android: 'monospace', default: 'monospace' }),
+    fontFamily: Platform.select({ ios: "Menlo", android: "monospace", default: "monospace" }),
     fontSize: 11,
     color: colors.textPrimary,
     lineHeight: 15,

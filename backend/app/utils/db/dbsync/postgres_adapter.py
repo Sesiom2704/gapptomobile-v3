@@ -1,4 +1,37 @@
-# backend/app/utils/db/dbsync/postgres_adapter.py
+"""
+/**
+ * Ruta: backend/app/utils/db/dbsync/postgres_adapter.py
+ * Versión: 1.0.0
+ * Descripción:
+ * Adaptador Postgres para el motor de sincronización de GAPPTO Mobile 3.0.
+ *
+ * Funcionalidades incluidas:
+ * - Conecta con bases Postgres mediante SQLAlchemy.
+ * - Lista tablas, vistas y vistas materializadas del schema public.
+ * - Obtiene información de tablas y detecta si son view o matview.
+ * - Lee tablas completas mediante SELECT *.
+ * - Lista dependencias FK como relaciones child -> parent.
+ * - Lista tablas reales del destino.
+ * - Ejecuta truncado multi-tabla controlado.
+ * - Refleja estructura de una tabla origen en destino cuando es necesario.
+ * - Escribe datos en Postgres por lotes.
+ * - Coacciona valores provenientes de Sheets a tipos compatibles con Postgres.
+ * - Crea tablas fallback con columnas TEXT si no existen.
+ *
+ * Ajustes de esta versión:
+ * - Se mejora la claridad del código y de los comentarios internos.
+ * - Se refuerza el tipado y la legibilidad de helpers internos.
+ * - Se mantiene intacto el contrato funcional del adapter.
+ * - Se conserva el comportamiento existente de lectura, truncado, coerción e inserción.
+ *
+ * Notas de diseño:
+ * - Este adapter no se modifica de forma agresiva para no romper la sync actual.
+ * - La coerción de tipos sigue siendo especialmente importante para Sheets -> Postgres.
+ * - La creación fallback con columnas TEXT se mantiene como red de seguridad.
+ * - La lógica de estructura y escritura permanece separada para facilitar mantenimiento.
+ */
+"""
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -90,6 +123,9 @@ class PostgresAdapter:
         return [f"{r.schema}.{r.name}" for r in rows]
 
     def table_info(self, full_name: str) -> TableInfo:
+        """
+        Devuelve información básica de una tabla, incluyendo si es view/matview.
+        """
         schema, name = self._split(full_name)
 
         q = text(
@@ -110,8 +146,10 @@ class PostgresAdapter:
 
     def list_fk_edges(self, *, schema: str = "public") -> List[Tuple[str, str]]:
         """
-        Devuelve relaciones FK como aristas (child_full_name, parent_full_name)
-        con nombres SIEMPRE cualificados (schema.table).
+        Devuelve relaciones FK como aristas:
+          (child_full_name, parent_full_name)
+
+        Los nombres se devuelven siempre cualificados como schema.table.
         """
         q = text(
             """
@@ -147,7 +185,9 @@ class PostgresAdapter:
         return edges
 
     def list_real_tables(self, *, schema: str = "public") -> List[str]:
-        """Devuelve SOLO tablas reales (relkind='r') del schema indicado."""
+        """
+        Devuelve SOLO tablas reales (relkind='r') del schema indicado.
+        """
         q = text(
             """
             SELECT n.nspname AS schema, c.relname AS name
@@ -170,7 +210,8 @@ class PostgresAdapter:
     ) -> None:
         """
         Trunca múltiples TABLAS en una única sentencia TRUNCATE.
-        - Solo tablas reales existentes.
+
+        Solo actúa sobre tablas reales existentes.
         """
         if not full_names:
             return
@@ -202,7 +243,9 @@ class PostgresAdapter:
     # Lectura / Escritura
     # -----------------------------
     def read_table(self, full_name: str) -> Tuple[List[str], List[Tuple[Any, ...]]]:
-        """Lee tabla/vista completa (SELECT *)."""
+        """
+        Lee tabla o vista completa mediante SELECT *.
+        """
         schema, name = self._split(full_name)
         sql = text(f'SELECT * FROM "{schema}"."{name}"')
         with self.engine.connect() as conn:
@@ -214,7 +257,10 @@ class PostgresAdapter:
     def ensure_table_from_source(self, source_engine: Engine, full_name: str) -> None:
         """
         Crea la tabla en el destino si no existe, reflejando columnas del origen.
-        - Si es view/matview: NO creamos.
+
+        Reglas:
+        - Si el objeto es view/matview, no crea nada.
+        - Si la tabla ya existe en destino, no hace nada.
         """
         info = self.table_info(full_name)
         if info.is_view:
@@ -233,6 +279,7 @@ class PostgresAdapter:
 
         md = MetaData(schema=schema)
         columns: List[Column] = []
+
         for c in cols:
             col_name = c["name"]
             col_type = c["type"]
@@ -247,26 +294,27 @@ class PostgresAdapter:
     # -----------------------------
     def _coerce_value_for_column(self, col, value: Any) -> Any:
         """
-        Convierte strings provenientes de Sheets al tipo esperado por Postgres:
+        Convierte valores provenientes de Sheets al tipo esperado por Postgres.
 
-        - "" -> None (para tipos no text)
+        Reglas principales:
+        - None -> None
+        - "" -> None para tipos no texto
         - numeric: "82,58" -> 82.58
         - bool: "TRUE"/"FALSE"/"1"/"0" -> bool
         - date/datetime: parse ISO8601
-        - UUID/Decimal: str/Decimal
+        - UUID -> str
         """
-        # None stays None
         if value is None:
             return None
 
-        # Normalize strings
+        # Normalización de strings
         if isinstance(value, str):
             v = value.strip()
 
-            # Empty string: for non-text, treat as NULL
+            # Vacío: para no text, se trata como NULL
             if v == "":
                 if isinstance(col.type, (String, Text)):
-                    return ""  # keep for text
+                    return ""
                 return None
 
             # Boolean
@@ -276,15 +324,17 @@ class PostgresAdapter:
                     return True
                 if vv in ("false", "f", "0", "no", "n"):
                     return False
-                # fallback: leave as-is (will error clearly)
                 return v
 
             # Integer-like
             if isinstance(col.type, (SmallInteger, Integer, BigInteger)):
-                # allow "2.0" or "2,0" from sheets
-                vv = v.replace(".", "").replace(",", ".") if v.count(",") == 1 and v.count(".") == 0 else v
+                # Permite "2.0" o "2,0" desde Sheets
+                vv = (
+                    v.replace(".", "").replace(",", ".")
+                    if v.count(",") == 1 and v.count(".") == 0
+                    else v
+                )
                 try:
-                    # if "2.0" -> 2
                     return int(float(vv.replace(",", ".")))
                 except Exception:
                     return v
@@ -292,11 +342,9 @@ class PostgresAdapter:
             # Float/Numeric
             if isinstance(col.type, (Float, Numeric)):
                 vv = v.replace(" ", "")
-                # decimal comma -> dot when there is no dot already
                 if "," in vv and "." not in vv:
                     vv = vv.replace(",", ".")
                 try:
-                    # Numeric can accept Decimal; Float accepts float.
                     if isinstance(col.type, Numeric):
                         return Decimal(vv)
                     return float(vv)
@@ -306,7 +354,6 @@ class PostgresAdapter:
             # Date
             if isinstance(col.type, Date) and not isinstance(col.type, DateTime):
                 try:
-                    # accept "YYYY-MM-DD" or full ISO -> date
                     if "T" in v:
                         return datetime.fromisoformat(v).date()
                     return date.fromisoformat(v)
@@ -320,12 +367,10 @@ class PostgresAdapter:
                 except Exception:
                     return v
 
-            # UUID in text columns sometimes
-            if isinstance(value, str):
-                # If column is UUID-ish stored as text, leave it
-                return v
+            # Strings normales o UUIDs almacenados como texto
+            return v
 
-        # Already-correct types
+        # Tipos ya correctos
         if isinstance(value, (bool, int, float, Decimal, datetime, date)):
             return value
 
@@ -335,9 +380,15 @@ class PostgresAdapter:
         # Fallback
         return value
 
-    def _coerce_rows_to_table_types(self, table_obj: Table, headers: List[str], rows: Sequence[Tuple[Any, ...]]):
+    def _coerce_rows_to_table_types(
+        self,
+        table_obj: Table,
+        headers: List[str],
+        rows: Sequence[Tuple[Any, ...]],
+    ) -> List[Tuple[Any, ...]]:
         """
         Coacciona cada celda según el tipo de la columna en destino.
+
         Solo afecta a columnas que existan en destino.
         """
         col_by_name = {c.name: c for c in table_obj.columns}
@@ -348,11 +399,13 @@ class PostgresAdapter:
             for h, v in zip(headers, r):
                 col = col_by_name.get(h)
                 if col is None:
-                    # Columna no existe en destino (raro si estructura está bien). Dejar tal cual.
+                    # Columna no existe en destino.
+                    # Lo dejamos tal cual para no alterar comportamiento.
                     rr.append(v)
                 else:
                     rr.append(self._coerce_value_for_column(col, v))
             out.append(tuple(rr))
+
         return out
 
     def write_table(
@@ -381,7 +434,7 @@ class PostgresAdapter:
         schema, name = self._split(full_name)
         ins = inspect(self.engine)
 
-        # Si no existe, creamos una tabla “mínima” con TEXT (fallback)
+        # Si no existe, creamos una tabla mínima con TEXT (fallback)
         if name not in ins.get_table_names(schema=schema):
             if allow_destructive:
                 self._drop_if_exists(schema, name)
@@ -407,7 +460,7 @@ class PostgresAdapter:
         md = MetaData(schema=schema)
         t = Table(name, md, autoload_with=self.engine)
 
-        # ---- COERCIÓN (aquí se arregla el "82,58" -> 82.58) ----
+        # COERCIÓN (aquí se arregla el "82,58" -> 82.58)
         coerced_rows = self._coerce_rows_to_table_types(t, headers, rows)
 
         batch_size = 1000
@@ -421,12 +474,19 @@ class PostgresAdapter:
     # Helpers internos
     # -----------------------------
     def _split(self, full_name: str) -> tuple[str, str]:
+        """
+        Divide schema.table en (schema, table).
+        Si no viene schema, asume public.
+        """
         if "." in full_name:
             schema, name = full_name.split(".", 1)
             return schema, name
         return "public", full_name
 
     def _drop_if_exists(self, schema: str, name: str) -> None:
+        """
+        Elimina la tabla si existe.
+        """
         try:
             with self.engine.begin() as conn:
                 conn.execute(text(f'DROP TABLE IF EXISTS "{schema}"."{name}" CASCADE'))
@@ -434,7 +494,9 @@ class PostgresAdapter:
             raise
 
     def _create_text_table(self, schema: str, name: str, headers: List[str]) -> None:
-        """Crea tabla básica con columnas TEXT (fallback)."""
+        """
+        Crea una tabla básica con columnas TEXT NULL como fallback.
+        """
         cols_sql = ", ".join([f'"{h}" TEXT NULL' for h in headers])
         ddl = f'CREATE TABLE IF NOT EXISTS "{schema}"."{name}" ({cols_sql})'
         with self.engine.begin() as conn:

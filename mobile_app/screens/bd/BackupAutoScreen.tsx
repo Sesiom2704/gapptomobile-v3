@@ -1,4 +1,30 @@
-// screens/bd/BackupAutoScreen.tsx
+/**
+ * Ruta: mobile_app/screens/bd/BackupAutoScreen.tsx
+ * Versión: 1.0.0
+ * Descripción:
+ * Pantalla de ejecución automática de copias para GAPPTO Mobile.
+ *
+ * Funcionalidades incluidas:
+ * - Ejecuta copia Neon -> Supabase.
+ * - Ejecuta copia Neon -> Google Sheets.
+ * - Ejecuta ambos procesos de forma secuencial.
+ * - Muestra progreso, tabla actual, estado y errores de cada job.
+ * - Muestra logs desplegables de ambos procesos.
+ * - Guarda en SecureStore el slot diario completado.
+ * - Permite volver a la pantalla principal al finalizar.
+ *
+ * Ajustes de esta versión:
+ * - Se evita repetir el backup automático si el slot del día ya fue completado.
+ * - Se refuerza el control de montaje/desmontaje del componente.
+ * - Se centralizan helpers de espera y textos de estado.
+ * - Se mantiene la ejecución secuencial y conservadora.
+ *
+ * Notas de diseño:
+ * - Esta pantalla no ofrece opciones manuales; está pensada como flujo automático controlado.
+ * - Se prioriza estabilidad frente a ejecuciones duplicadas.
+ * - El guardado del slot completado no bloquea la UI si falla SecureStore.
+ * - Se mantiene compatibilidad con el backend actual de jobs.
+ */
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
@@ -47,6 +73,10 @@ function extractAxiosError(e: any) {
   return { status, data, detail, message };
 }
 
+function wait(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 async function startSyncJob(payload: {
   source: EndpointDB;
   dest: EndpointDB;
@@ -63,16 +93,18 @@ async function fetchSyncStatus(jobId: string) {
 }
 
 /**
- * Decisiones por defecto (fáciles de cambiar en un solo sitio):
+ * Decisiones por defecto:
  * - Siempre ejecuta (sin dry-run)
  * - No destructivo por seguridad
- * - Ejecución secuencial (menos carga, menos problemas)
+ * - Ejecución secuencial
  */
 const AUTO_EXECUTE = true;
-const AUTO_ALLOW_DESTRUCTIVE = false; // cambia a true solo si de verdad quieres limpieza destructiva
-const RUN_SEQUENTIALLY = true; // si algún día queréis paralelo, se puede implementar
+const AUTO_ALLOW_DESTRUCTIVE = false;
+const RUN_SEQUENTIALLY = true;
+const JOB_TIMEOUT_MS = 10 * 60_000;
+const POLL_INTERVAL_MS = 900;
 
-// ---------------- UI atoms (ligeros) ----------------
+// ---------------- UI atoms ----------------
 function Badge({ text, tone }: { text: string; tone: "info" | "ok" | "warn" | "err" }) {
   const bg =
     tone === "ok"
@@ -150,6 +182,12 @@ function makeInitialJobState(): JobUiState {
   };
 }
 
+function getCompletionText(finished: boolean, finishedOk: boolean | null) {
+  if (!finished) return null;
+  if (finishedOk) return "Procesos completados.";
+  return "Proceso finalizado con errores. Revisa el estado.";
+}
+
 export default function BackupAutoScreen({ navigation }: { navigation: any }) {
   const mountedRef = useRef(true);
   const startedRef = useRef(false);
@@ -160,7 +198,6 @@ export default function BackupAutoScreen({ navigation }: { navigation: any }) {
   const [running, setRunning] = useState(false);
   const [finished, setFinished] = useState(false);
   const [finishedOk, setFinishedOk] = useState<boolean | null>(null);
-
   const [logOpen, setLogOpen] = useState(false);
 
   const toggleLog = useCallback(() => {
@@ -181,7 +218,8 @@ export default function BackupAutoScreen({ navigation }: { navigation: any }) {
     ): Promise<"done" | "error" | "canceled"> => {
       const setJob = label === "job1" ? setJob1 : setJob2;
 
-      // 1) Start
+      if (!mountedRef.current) return "canceled";
+
       setJob((s) => ({
         ...s,
         status: "queued",
@@ -197,48 +235,53 @@ export default function BackupAutoScreen({ navigation }: { navigation: any }) {
         const id = (r?.data?.job_id as string) || null;
 
         if (!id) {
-          setJob((s) => ({
-            ...s,
-            status: "error",
-            errorText: "El backend no devolvió job_id.",
-          }));
+          if (mountedRef.current) {
+            setJob((s) => ({
+              ...s,
+              status: "error",
+              errorText: "El backend no devolvió job_id.",
+            }));
+          }
           return "error";
         }
 
-        setJob((s) => ({ ...s, jobId: id, status: "queued" }));
+        if (mountedRef.current) {
+          setJob((s) => ({ ...s, jobId: id, status: "queued" }));
+        }
 
-        // 2) Poll loop (simple, estable)
         const t0 = Date.now();
-        const timeoutMs = 10 * 60_000; // 10 min por seguridad
 
-        while (mountedRef.current && Date.now() - t0 < timeoutMs) {
-          await new Promise((r2) => setTimeout(r2, 900));
+        while (mountedRef.current && Date.now() - t0 < JOB_TIMEOUT_MS) {
+          await wait(POLL_INTERVAL_MS);
 
           const rr = await fetchSyncStatus(id);
           const d = rr?.data || {};
           const st = (d.status as JobStatus) || "idle";
           const pr = Number(d.progress || 0);
 
-          setJob((s) => ({
-            ...s,
-            status: st,
-            progress: pr,
-            currentTable: d.current_table || null,
-            logTail: d.log_tail || "",
-            errorText: d.error ? String(d.error) : s.errorText,
-          }));
+          if (mountedRef.current) {
+            setJob((s) => ({
+              ...s,
+              status: st,
+              progress: pr,
+              currentTable: d.current_table || null,
+              logTail: d.log_tail || "",
+              errorText: d.error ? String(d.error) : s.errorText,
+            }));
+          }
 
           if (st === "done" || st === "error" || st === "canceled") {
             return st;
           }
         }
 
-        // Timeout
-        setJob((s) => ({
-          ...s,
-          status: "error",
-          errorText: "Timeout esperando el estado del proceso.",
-        }));
+        if (mountedRef.current) {
+          setJob((s) => ({
+            ...s,
+            status: "error",
+            errorText: "Timeout esperando el estado del proceso.",
+          }));
+        }
         return "error";
       } catch (e: any) {
         const x = extractAxiosError(e);
@@ -246,11 +289,14 @@ export default function BackupAutoScreen({ navigation }: { navigation: any }) {
           (typeof x.detail === "string" ? x.detail : x.message) ||
           "No se pudo iniciar o consultar el job.";
 
-        setJob((s) => ({
-          ...s,
-          status: "error",
-          errorText: msg,
-        }));
+        if (mountedRef.current) {
+          setJob((s) => ({
+            ...s,
+            status: "error",
+            errorText: msg,
+          }));
+        }
+
         return "error";
       }
     },
@@ -261,11 +307,39 @@ export default function BackupAutoScreen({ navigation }: { navigation: any }) {
     if (startedRef.current) return;
     startedRef.current = true;
 
-    setRunning(true);
-    setFinished(false);
-    setFinishedOk(null);
+    const todaySlot = getSlotKeyForToday(new Date());
 
-    // Job 1: Neon -> Supabase
+    // Si hoy no toca backup por slot, no arrancamos nada.
+    if (!todaySlot) {
+      if (mountedRef.current) {
+        setRunning(false);
+        setFinished(true);
+        setFinishedOk(true);
+      }
+      return;
+    }
+
+    // Si ya se completó el slot de hoy, evitamos repetir el proceso.
+    try {
+      const lastCompleted = await SecureStore.getItemAsync(SS_BACKUP_LAST_COMPLETED_SLOT);
+      if (lastCompleted === todaySlot) {
+        if (mountedRef.current) {
+          setRunning(false);
+          setFinished(true);
+          setFinishedOk(true);
+        }
+        return;
+      }
+    } catch {
+      // No bloqueamos el proceso si SecureStore falla al leer.
+    }
+
+    if (mountedRef.current) {
+      setRunning(true);
+      setFinished(false);
+      setFinishedOk(null);
+    }
+
     const st1 = await runSingleJob("job1", {
       source: "neon",
       dest: "supabase",
@@ -275,7 +349,6 @@ export default function BackupAutoScreen({ navigation }: { navigation: any }) {
 
     if (!mountedRef.current) return;
 
-    // Si falla o se cancela, no seguimos (comportamiento conservador)
     if (st1 !== "done") {
       setRunning(false);
       setFinished(true);
@@ -283,7 +356,6 @@ export default function BackupAutoScreen({ navigation }: { navigation: any }) {
       return;
     }
 
-    // Job 2: Neon -> Sheets
     if (RUN_SEQUENTIALLY) {
       const st2 = await runSingleJob("job2", {
         source: "neon",
@@ -299,22 +371,17 @@ export default function BackupAutoScreen({ navigation }: { navigation: any }) {
       setFinished(true);
       setFinishedOk(ok);
 
-      // Si ambos OK, guardamos el slot completado para que Boot no vuelva a sugerir
       if (ok) {
-        const slotKey = getSlotKeyForToday(new Date());
-        if (slotKey) {
-          try {
-            await SecureStore.setItemAsync(SS_BACKUP_LAST_COMPLETED_SLOT, slotKey);
-          } catch {
-            // No bloqueamos por fallo de SecureStore
-          }
+        try {
+          await SecureStore.setItemAsync(SS_BACKUP_LAST_COMPLETED_SLOT, todaySlot);
+        } catch {
+          // No bloqueamos por fallo de SecureStore
         }
       }
 
       return;
     }
 
-    // (Si algún día queréis paralelo, aquí se implementaría)
     setRunning(false);
     setFinished(true);
     setFinishedOk(false);
@@ -323,16 +390,13 @@ export default function BackupAutoScreen({ navigation }: { navigation: any }) {
   useEffect(() => {
     mountedRef.current = true;
     void runAll();
+
     return () => {
       mountedRef.current = false;
     };
   }, [runAll]);
 
-  const completionText = useMemo(() => {
-    if (!finished) return null;
-    if (finishedOk) return "Procesos completados.";
-    return "Proceso finalizado con errores. Revisa el estado.";
-  }, [finished, finishedOk]);
+  const completionText = useMemo(() => getCompletionText(finished, finishedOk), [finished, finishedOk]);
 
   return (
     <>
@@ -344,7 +408,6 @@ export default function BackupAutoScreen({ navigation }: { navigation: any }) {
 
       <View style={panelStyles.screen}>
         <ScrollView contentContainerStyle={panelStyles.scrollContent}>
-          {/* Estado general */}
           <View style={styles.card}>
             <View style={styles.cardHeader}>
               <Text style={styles.cardTitle}>Ejecución automática</Text>
@@ -371,7 +434,7 @@ export default function BackupAutoScreen({ navigation }: { navigation: any }) {
             </View>
 
             <Text style={styles.cardSubtitle}>
-              Este screen ejecuta las copias sin opciones (sin dry-run). El botón de volver se habilita al terminar.
+              Este screen ejecuta las copias sin opciones. El botón de volver se habilita al terminar.
             </Text>
 
             {completionText ? (
@@ -381,7 +444,6 @@ export default function BackupAutoScreen({ navigation }: { navigation: any }) {
             ) : null}
           </View>
 
-          {/* Job 1 */}
           <View style={styles.card}>
             <View style={styles.rowBetween}>
               <Text style={styles.blockTitle}>1) Neon → Supabase</Text>
@@ -407,7 +469,6 @@ export default function BackupAutoScreen({ navigation }: { navigation: any }) {
             </View>
           </View>
 
-          {/* Job 2 */}
           <View style={styles.card}>
             <View style={styles.rowBetween}>
               <Text style={styles.blockTitle}>2) Neon → Google Sheets</Text>
@@ -433,7 +494,6 @@ export default function BackupAutoScreen({ navigation }: { navigation: any }) {
             </View>
           </View>
 
-          {/* Logs (desplegable) */}
           <View style={styles.card}>
             <TouchableOpacity activeOpacity={0.9} onPress={toggleLog} style={styles.logHeaderRow}>
               <Text style={styles.logTitle}>Status / Logs</Text>
@@ -453,7 +513,6 @@ export default function BackupAutoScreen({ navigation }: { navigation: any }) {
             ) : null}
           </View>
 
-          {/* Botón volver */}
           <View style={{ marginTop: 4 }}>
             <PrimaryButton
               label={finished ? "Volver a principal" : "Procesando…"}
@@ -496,20 +555,17 @@ const styles = StyleSheet.create({
     color: colors.textSecondary,
     lineHeight: 16,
   },
-
   rowBetween: {
     flexDirection: "row",
     alignItems: "center",
     justifyContent: "space-between",
     gap: 10,
   },
-
   blockTitle: {
     fontSize: 13,
     fontWeight: "900",
     color: colors.textPrimary,
   },
-
   completionText: {
     marginTop: 10,
     fontSize: 12,
@@ -517,7 +573,6 @@ const styles = StyleSheet.create({
   },
   completionOk: { color: colors.success },
   completionErr: { color: colors.danger },
-
   badge: {
     paddingHorizontal: 10,
     paddingVertical: 5,
@@ -529,7 +584,6 @@ const styles = StyleSheet.create({
     fontWeight: "900",
     letterSpacing: 0.3,
   },
-
   progressTrack: {
     height: 10,
     borderRadius: 999,
@@ -567,7 +621,6 @@ const styles = StyleSheet.create({
     color: colors.danger,
     fontWeight: "800",
   },
-
   primaryBtn: {
     borderRadius: 14,
     paddingVertical: 12,
@@ -582,7 +635,6 @@ const styles = StyleSheet.create({
     fontSize: 13,
     letterSpacing: 0.2,
   },
-
   logHeaderRow: {
     flexDirection: "row",
     justifyContent: "space-between",

@@ -1,4 +1,35 @@
-# backend/app/api/v1/db_router.py
+"""
+/**
+ * Ruta: backend/app/api/v1/db_router.py
+ * Versión: 1.0.0
+ * Descripción:
+ * Router de sincronización de bases de datos para GAPPTO Mobile 3.0.
+ *
+ * Funcionalidades incluidas:
+ * - Expone endpoints para iniciar, consultar y cancelar jobs de sincronización.
+ * - Permite sincronización entre Neon, Supabase y Google Sheets.
+ * - Construye adapters según configuración de entorno.
+ * - Genera plan de tablas con normalización, exclude, dependencias FK y ordenación.
+ * - Filtra views/matviews cuando el origen es Postgres.
+ * - Ejecuta mirror tabla a tabla con seguimiento de progreso.
+ * - Soporta dry-run y ejecución destructiva controlada.
+ * - Mantiene logs en memoria por job.
+ * - Incluye endpoint de comprobación de acceso a Google Sheets.
+ *
+ * Ajustes de esta versión:
+ * - Se añade protección frente a ejecuciones concurrentes hacia Google Sheets.
+ * - Se centraliza una pausa configurable entre tablas al escribir en Sheets.
+ * - Se mejora el log operativo para identificar ejecución protegida con Sheets.
+ * - Se mantiene intacta la lógica funcional existente del plan y de los endpoints.
+ *
+ * Notas de diseño:
+ * - El objetivo es reducir errores 429 sin cambiar contratos públicos del router.
+ * - La protección de concurrencia se aplica solo cuando Sheets participa en el sync.
+ * - El job sigue ejecutando tabla a tabla para no romper el comportamiento actual.
+ * - Se prioriza compatibilidad con la versión actual antes que un refactor agresivo.
+ */
+"""
+
 from __future__ import annotations
 
 import io
@@ -8,6 +39,7 @@ import time
 import uuid
 import threading
 import traceback
+from contextlib import nullcontext
 from typing import Dict, List, Optional, Set, Tuple
 
 from fastapi import APIRouter, HTTPException
@@ -66,6 +98,16 @@ PRIORITY_INDEX = {t: i for i, t in enumerate(PRIORITY)}
 # main.py debe incluir este router con prefix="/api"
 # ------------------------------
 router = APIRouter(prefix="/db", tags=["db"])
+
+
+# ------------------------------
+# Protección de concurrencia para Sheets
+# ------------------------------
+# Motivo:
+# Si se ejecutan dos syncs simultáneos usando Sheets, aumenta mucho el riesgo
+# de rate limit 429. Este lock serializa esos trabajos sin afectar a syncs
+# puramente Postgres.
+SHEETS_SYNC_LOCK = threading.Lock()
 
 
 # ------------------------------
@@ -133,6 +175,43 @@ def _get_env(name: str) -> str:
     return v.strip().strip('"').strip("'")
 
 
+def _get_float_env(name: str, default: float) -> float:
+    """
+    Lee un float desde entorno con fallback seguro.
+    """
+    raw = _get_env(name)
+    if not raw:
+        return default
+    try:
+        value = float(raw)
+        return max(0.0, value)
+    except Exception:
+        return default
+
+
+def _uses_sheets(source: str, dest: str) -> bool:
+    """
+    Indica si el job involucra Google Sheets como source o destination.
+    """
+    return (source == "sheets") or (dest == "sheets")
+
+
+def _per_table_delay_seconds(payload: SyncStartRequest) -> float:
+    """
+    Devuelve la pausa entre tablas.
+
+    Motivo:
+    - Cuando el destino es Sheets, conviene espaciar llamadas para reducir 429.
+    - Se deja configurable por entorno sin romper el comportamiento actual.
+
+    Variables soportadas:
+    - DBSYNC_SHEETS_TABLE_DELAY_SECONDS
+    """
+    if payload.dest == "sheets" and payload.execute:
+        return _get_float_env("DBSYNC_SHEETS_TABLE_DELAY_SECONDS", 0.8)
+    return 0.0
+
+
 def make_adapter(name: str):
     name = (name or "").lower()
 
@@ -154,7 +233,10 @@ def make_adapter(name: str):
         if not sid:
             raise HTTPException(status_code=500, detail="GOOGLE_SHEETS_ID no está configurada")
         if not creds:
-            raise HTTPException(status_code=500, detail="GOOGLE_APPLICATION_CREDENTIALS no está configurada")
+            raise HTTPException(
+                status_code=500,
+                detail="GOOGLE_APPLICATION_CREDENTIALS no está configurada",
+            )
         return SheetsAdapter(spreadsheet_id=sid, creds_path=creds)
 
     raise HTTPException(status_code=400, detail=f"Adapter desconocido: {name}")
@@ -190,7 +272,6 @@ def _to_public(name: str) -> str:
     if not s:
         return s
     if "." in s:
-        # respeta schema si ya viene
         return s
     return f"public.{s}"
 
@@ -386,11 +467,9 @@ def _build_final_plan(
     # ----------------------
     # Caso 2: source Sheets (u otro)
     # ----------------------
-    # all_tables en sheets suelen ser "users", "gastos", ...
     raw = _normalize_requested_tables(all_tables, requested_tables)
     info.append(f"[plan] Tablas base seleccionadas (raw source): {len(raw)}")
 
-    # normalizamos a public.<sheet_name_clean>
     normalized = []
     for t in raw:
         t_clean = _clean_table_name(t)
@@ -399,7 +478,6 @@ def _build_final_plan(
         t_pub = _to_public(t_clean)
         normalized.append(t_pub)
 
-    # aplicar exclude flexible (admite "users" o "public.users")
     normalized = [t for t in normalized if (t not in ex and _short(t) not in ex)]
     info.append(f"[plan] Tablas normalizadas a public.*: {len(normalized)}")
 
@@ -426,99 +504,112 @@ def _run_job(job: Job):
         if payload.source == payload.dest:
             raise RuntimeError("source y dest no pueden ser iguales")
 
-        src = make_adapter(payload.source)
-        dst = make_adapter(payload.dest)
+        uses_sheets = _uses_sheets(payload.source, payload.dest)
+        table_delay_s = _per_table_delay_seconds(payload)
 
-        # 1) Tablas candidatas desde source
-        all_tables = src.list_tables()
+        # Si Sheets participa en el flujo, serializamos la ejecución
+        # para evitar saturación por varias syncs paralelas.
+        lock_context = SHEETS_SYNC_LOCK if uses_sheets else nullcontext()
 
-        # 2) Plan
-        target, plan_info = _build_final_plan(
-            src=src,
-            all_tables=all_tables,
-            requested_tables=payload.tables,
-            exclude=payload.exclude,
-        )
+        with lock_context:
+            if uses_sheets:
+                job.write_log("[guard] Sheets lock activado para evitar syncs concurrentes.")
+                if table_delay_s > 0:
+                    job.write_log(f"[guard] Pausa entre tablas hacia Sheets: {table_delay_s:.2f}s")
 
-        print(f"[order] Selección inicial (plan): {len(target)} tablas.")
-        for line in plan_info:
-            print(line)
-        print("[order] Orden plan:", " -> ".join(target))
+            src = make_adapter(payload.source)
+            dst = make_adapter(payload.dest)
 
-        # 2.b) Filtrar views/matviews si source es Postgres
-        target_write = list(target)
+            # 1) Tablas candidatas desde source
+            all_tables = src.list_tables()
 
-        if isinstance(src, PostgresAdapter):
-            filtered = []
-            skipped_views = []
-            for t in target:
-                try:
-                    info = src.table_info(t)
-                    if info.is_view:
-                        skipped_views.append(t)
-                        continue
-                except Exception:
-                    pass
-                filtered.append(t)
-            target_write = filtered
-            if skipped_views:
-                print(f"[order] Skip views/matviews en mirror: {len(skipped_views)}")
-                print("[order] Views skipped:", " -> ".join(skipped_views))
+            # 2) Plan
+            target, plan_info = _build_final_plan(
+                src=src,
+                all_tables=all_tables,
+                requested_tables=payload.tables,
+                exclude=payload.exclude,
+            )
 
-        # Para truncar: SOLO tablas reales existentes en destino (si destino es Postgres)
-        target_truncate = []
-        if isinstance(dst, PostgresAdapter):
-            real_dest = set(dst.list_real_tables(schema="public"))
-            target_truncate = [t for t in target_write if t in real_dest]
+            print(f"[order] Selección inicial (plan): {len(target)} tablas.")
+            for line in plan_info:
+                print(line)
+            print("[order] Orden plan:", " -> ".join(target))
 
-        job.total_tables = len(target_write)
-        job.processed_tables = 0
-        job.progress = 0.0
+            # 2.b) Filtrar views/matviews si source es Postgres
+            target_write = list(target)
 
-        engine = SyncEngine(
-            src,
-            dst,
-            config={
-                "include": ["public.*"],
-                "exclude": ["public.alembic_version"],
-                "clear_first_per_table": False,
-            },
-        )
+            if isinstance(src, PostgresAdapter):
+                filtered = []
+                skipped_views = []
+                for t in target:
+                    try:
+                        info = src.table_info(t)
+                        if info.is_view:
+                            skipped_views.append(t)
+                            continue
+                    except Exception:
+                        pass
+                    filtered.append(t)
+                target_write = filtered
+                if skipped_views:
+                    print(f"[order] Skip views/matviews en mirror: {len(skipped_views)}")
+                    print("[order] Views skipped:", " -> ".join(skipped_views))
 
-        job.write_log(
-            f"Comienza sync {payload.source} → {payload.dest}. "
-            f"Tablas(plan)={len(target)}, Tablas(write)={job.total_tables}, "
-            f"execute={payload.execute}, destructive={payload.allow_destructive}"
-        )
+            # Para truncar: SOLO tablas reales existentes en destino (si destino es Postgres)
+            target_truncate = []
+            if isinstance(dst, PostgresAdapter):
+                real_dest = set(dst.list_real_tables(schema="public"))
+                target_truncate = [t for t in target_write if t in real_dest]
 
-        if payload.execute and isinstance(dst, PostgresAdapter):
+            job.total_tables = len(target_write)
+            job.processed_tables = 0
+            job.progress = 0.0
+
+            engine = SyncEngine(
+                src,
+                dst,
+                config={
+                    "include": ["public.*"],
+                    "exclude": ["public.alembic_version"],
+                    "clear_first_per_table": False,
+                },
+            )
+
             job.write_log(
-                f"[pre] Truncating destination REAL tables: {len(target_truncate)} (single statement) ..."
-            )
-            dst.truncate_tables(target_truncate, allow_destructive=payload.allow_destructive)
-            job.write_log("[pre] Destination truncated OK.")
-
-        for idx, full in enumerate(target_write, start=1):
-            if job._cancel:
-                job.status = "canceled"
-                job.write_log("Cancelado por el usuario.")
-                return
-
-            job.current_table = full
-            job.write_log(f"→ [{idx}/{job.total_tables}] {full}")
-
-            engine.mirror(
-                tables=[full],
-                exclude=None,
-                execute=payload.execute,
-                allow_destructive=payload.allow_destructive,
+                f"Comienza sync {payload.source} → {payload.dest}. "
+                f"Tablas(plan)={len(target)}, Tablas(write)={job.total_tables}, "
+                f"execute={payload.execute}, destructive={payload.allow_destructive}"
             )
 
-            job.processed_tables = idx
-            job.progress = round((idx / (job.total_tables or 1)) * 100.0, 2)
+            if payload.execute and isinstance(dst, PostgresAdapter):
+                job.write_log(
+                    f"[pre] Truncating destination REAL tables: {len(target_truncate)} (single statement) ..."
+                )
+                dst.truncate_tables(target_truncate, allow_destructive=payload.allow_destructive)
+                job.write_log("[pre] Destination truncated OK.")
 
-            if payload.dest == "sheets" and payload.execute:
-                time.sleep(0.4)
+            for idx, full in enumerate(target_write, start=1):
+                if job._cancel:
+                    job.status = "canceled"
+                    job.write_log("Cancelado por el usuario.")
+                    return
+
+                job.current_table = full
+                job.write_log(f"→ [{idx}/{job.total_tables}] {full}")
+
+                engine.mirror(
+                    tables=[full],
+                    exclude=None,
+                    execute=payload.execute,
+                    allow_destructive=payload.allow_destructive,
+                )
+
+                job.processed_tables = idx
+                job.progress = round((idx / (job.total_tables or 1)) * 100.0, 2)
+
+                if table_delay_s > 0:
+                    time.sleep(table_delay_s)
 
         job.status = "done"
         job.ended_at = time.time()
