@@ -1,6 +1,6 @@
 /**
  * Ruta: mobile_app/screens/Alquiler/ContratoListScreen.tsx
- * Versión: 5.0.0
+ * Versión: 5.1.0
  * Descripción:
  * Pantalla mixta de contratos e incidencias para GAPPTO Mobile.
  *
@@ -18,6 +18,12 @@
  *   - rojo
  *   - amarillo
  *   - verde
+ * - NUEVO: filtros extra en incidencias:
+ *   - por estado real
+ *   - por referencia de vivienda
+ * - NUEVO: título de incidencia con formato:
+ *   - CODIGO · REFERENCIA
+ * - NUEVO: uso preferente de dirección completa cuando existe.
  *
  * Reglas funcionales:
  * - "Activo" en contratos se calcula con la Regla 3:
@@ -30,6 +36,10 @@
  * - Se mantiene navegación actual de contratos.
  * - Incidencias se integran en el mismo screen sin rehacer navegación global.
  * - El color de incidencias se agrupa en 3 estados visuales para simplificar lectura.
+ * - En incidencias:
+ *   - el título prioriza código + referencia
+ *   - la dirección completa baja a subtítulo/fecha para mejorar lectura
+ *   - el badge de estado se mantiene como overlay.
  */
 
 import React, { useCallback, useMemo, useState } from 'react';
@@ -57,7 +67,7 @@ import { ExpenseCard } from '../../components/cards/ExpenseCard';
 import { ActionSheet, ActionSheetAction } from '../../components/modals/ActionSheet';
 import { listStyles as styles } from '../../components/list/listStyles';
 
-import { colors, spacing, radius } from '../../theme';
+import { colors, spacing } from '../../theme';
 import { EuroformatEuro, formatFechaCorta } from '../../utils/format';
 
 import {
@@ -154,11 +164,7 @@ function getContratoObjetoAgrupado(code?: string | null): ObjetoFiltro {
   if (c === 'completa') return 'completo';
   if (c.startsWith('habitacion_')) return 'habitaciones';
 
-  if (
-    c === 'vivienda' ||
-    c === 'vivienda_garaje' ||
-    c === 'vivienda_trastero'
-  ) {
+  if (c === 'vivienda' || c === 'vivienda_garaje' || c === 'vivienda_trastero') {
     return 'vivienda';
   }
 
@@ -226,6 +232,29 @@ function getIncidenciaCardBackground(estado?: string | null): string {
   return colors.surface;
 }
 
+function getIncidenciaTitle(item: IncidenciaListItem): string {
+  const codigo = String(item.codigo ?? '').trim();
+  const referencia = String(item.referencia_vivienda ?? '').trim();
+
+  if (codigo && referencia) return `${codigo} · ${referencia}`;
+  if (codigo) return codigo;
+  if (referencia) return referencia;
+  return item.id;
+}
+
+function getIncidenciaAddressLabel(item: IncidenciaListItem): string {
+  const direccion = String(item.direccion_completa ?? '').trim();
+  if (direccion) return direccion;
+
+  const referencia = String(item.referencia_vivienda ?? '').trim();
+  if (referencia) return referencia;
+
+  const localidad = String(item.localidad ?? '').trim();
+  if (localidad) return localidad;
+
+  return '';
+}
+
 export const ContratoListScreen: React.FC<Props> = ({ navigation }) => {
   const [tab, setTab] = useState<TabValue>('contratos');
 
@@ -264,9 +293,13 @@ export const ContratoListScreen: React.FC<Props> = ({ navigation }) => {
   const [incSearchText, setIncSearchText] = useState('');
   const [incColorFilter, setIncColorFilter] = useState<IncidenciaColorGroup>('all');
   const [incCategoriaFilter, setIncCategoriaFilter] = useState<string>('todos');
+  const [incEstadoFilter, setIncEstadoFilter] = useState<string>('todos');
+  const [incReferenciaFilter, setIncReferenciaFilter] = useState<string>('todos');
 
   const [showIncColorFilter, setShowIncColorFilter] = useState(false);
   const [showIncCategoriaFilter, setShowIncCategoriaFilter] = useState(false);
+  const [showIncEstadoFilter, setShowIncEstadoFilter] = useState(false);
+  const [showIncReferenciaFilter, setShowIncReferenciaFilter] = useState(false);
 
   const closeBuscador = useCallback(() => {
     Keyboard.dismiss();
@@ -468,6 +501,33 @@ export const ContratoListScreen: React.FC<Props> = ({ navigation }) => {
     return Array.from(map.values()).sort((a, b) => a.localeCompare(b, 'es'));
   }, [incidencias]);
 
+  const incidenciasEstadosDisponibles = useMemo(() => {
+    const map = new Map<string, string>();
+
+    incidencias.forEach((item) => {
+      const estado = String(item.estado ?? '').trim();
+      const label = String(item.estado_label ?? estado).trim();
+      if (!estado) return;
+      map.set(estado, label || estado);
+    });
+
+    return Array.from(map.entries())
+      .map(([value, label]) => ({ value, label }))
+      .sort((a, b) => a.label.localeCompare(b.label, 'es'));
+  }, [incidencias]);
+
+  const incidenciasReferenciasDisponibles = useMemo(() => {
+    const map = new Map<string, string>();
+
+    incidencias.forEach((item) => {
+      const ref = String(item.referencia_vivienda ?? '').trim();
+      if (!ref) return;
+      map.set(ref, ref);
+    });
+
+    return Array.from(map.values()).sort((a, b) => a.localeCompare(b, 'es'));
+  }, [incidencias]);
+
   const contratosFiltrados = useMemo(() => {
     const term = normalizeText(searchText);
 
@@ -533,9 +593,12 @@ export const ContratoListScreen: React.FC<Props> = ({ navigation }) => {
         normalizeText(item.titulo).includes(term) ||
         normalizeText(item.categoria).includes(term) ||
         normalizeText(item.estado_label).includes(term) ||
+        normalizeText(item.estado).includes(term) ||
         normalizeText(item.proveedor_actual_nombre).includes(term) ||
         normalizeText(item.gestor_actual_nombre).includes(term) ||
-        normalizeText(item.localidad).includes(term);
+        normalizeText(item.localidad).includes(term) ||
+        normalizeText(item.referencia_vivienda).includes(term) ||
+        normalizeText(item.direccion_completa).includes(term);
 
       if (term.length > 0 && !hayTexto) return false;
 
@@ -547,9 +610,26 @@ export const ContratoListScreen: React.FC<Props> = ({ navigation }) => {
         if (normalizeText(item.categoria) !== normalizeText(incCategoriaFilter)) return false;
       }
 
+      if (incEstadoFilter !== 'todos') {
+        if (normalizeText(item.estado) !== normalizeText(incEstadoFilter)) return false;
+      }
+
+      if (incReferenciaFilter !== 'todos') {
+        if (normalizeText(item.referencia_vivienda) !== normalizeText(incReferenciaFilter)) {
+          return false;
+        }
+      }
+
       return true;
     });
-  }, [incidencias, incSearchText, incColorFilter, incCategoriaFilter]);
+  }, [
+    incidencias,
+    incSearchText,
+    incColorFilter,
+    incCategoriaFilter,
+    incEstadoFilter,
+    incReferenciaFilter,
+  ]);
 
   const renderBuscadorContratos = () => {
     return (
@@ -775,7 +855,7 @@ export const ContratoListScreen: React.FC<Props> = ({ navigation }) => {
           <TextInput
             value={incSearchText}
             onChangeText={setIncSearchText}
-            placeholder="Código, título, categoría, proveedor…"
+            placeholder="Código, referencia, dirección, estado, proveedor…"
             placeholderTextColor={colors.textMuted}
             style={styles.searchInput}
           />
@@ -824,6 +904,104 @@ export const ContratoListScreen: React.FC<Props> = ({ navigation }) => {
             </View>
           )}
         </View>
+
+        {incidenciasEstadosDisponibles.length > 0 && (
+          <View style={{ marginTop: 16 }}>
+            <View style={localStyles.filterHeaderRow}>
+              <Text style={styles.searchLabel}>Estado real</Text>
+              <TouchableOpacity
+                onPress={() => setShowIncEstadoFilter((prev) => !prev)}
+                style={localStyles.filterHeaderAction}
+              >
+                <Ionicons
+                  name={showIncEstadoFilter ? 'remove-circle-outline' : 'add-circle-outline'}
+                  size={16}
+                  color={colors.textSecondary}
+                  style={{ marginRight: 4 }}
+                />
+                <Text style={localStyles.filterHeaderActionText}>
+                  {showIncEstadoFilter ? 'Ocultar' : 'Mostrar'}
+                </Text>
+              </TouchableOpacity>
+            </View>
+
+            {showIncEstadoFilter && (
+              <View style={styles.pillsRowWrap}>
+                <View style={styles.pillWrapper}>
+                  <FilterPill
+                    label="Todos"
+                    selected={incEstadoFilter === 'todos'}
+                    onPress={() => setIncEstadoFilter('todos')}
+                    style={styles.filterPill}
+                  />
+                </View>
+
+                {incidenciasEstadosDisponibles.map((item) => {
+                  const selected = incEstadoFilter === item.value;
+                  return (
+                    <View style={styles.pillWrapper} key={item.value}>
+                      <FilterPill
+                        label={item.label}
+                        selected={selected}
+                        onPress={() => setIncEstadoFilter(selected ? 'todos' : item.value)}
+                        style={styles.filterPill}
+                      />
+                    </View>
+                  );
+                })}
+              </View>
+            )}
+          </View>
+        )}
+
+        {incidenciasReferenciasDisponibles.length > 0 && (
+          <View style={{ marginTop: 16 }}>
+            <View style={localStyles.filterHeaderRow}>
+              <Text style={styles.searchLabel}>Referencia vivienda</Text>
+              <TouchableOpacity
+                onPress={() => setShowIncReferenciaFilter((prev) => !prev)}
+                style={localStyles.filterHeaderAction}
+              >
+                <Ionicons
+                  name={showIncReferenciaFilter ? 'remove-circle-outline' : 'add-circle-outline'}
+                  size={16}
+                  color={colors.textSecondary}
+                  style={{ marginRight: 4 }}
+                />
+                <Text style={localStyles.filterHeaderActionText}>
+                  {showIncReferenciaFilter ? 'Ocultar' : 'Mostrar'}
+                </Text>
+              </TouchableOpacity>
+            </View>
+
+            {showIncReferenciaFilter && (
+              <View style={styles.pillsRowWrap}>
+                <View style={styles.pillWrapper}>
+                  <TwoLineCompactPill
+                    label="Todas"
+                    selected={incReferenciaFilter === 'todos'}
+                    onPress={() => setIncReferenciaFilter('todos')}
+                    style={styles.filterPill}
+                  />
+                </View>
+
+                {incidenciasReferenciasDisponibles.map((item) => {
+                  const selected = incReferenciaFilter === item;
+                  return (
+                    <View style={styles.pillWrapper} key={item}>
+                      <TwoLineCompactPill
+                        label={item}
+                        selected={selected}
+                        onPress={() => setIncReferenciaFilter(selected ? 'todos' : item)}
+                        style={styles.filterPill}
+                      />
+                    </View>
+                  );
+                })}
+              </View>
+            )}
+          </View>
+        )}
 
         {incidenciasCategoriasDisponibles.length > 0 && (
           <View style={{ marginTop: 16 }}>
@@ -996,10 +1174,24 @@ export const ContratoListScreen: React.FC<Props> = ({ navigation }) => {
         {incidenciasFiltradas.map((item) => {
           const estadoColor = getIncidenciaEstadoColorToken(item.estado);
           const subtitleBase = getIncidenciaDisplaySubtitle(item);
-          const category = subtitleBase || 'Incidencia';
-          const dateLabel = item.fecha_creacion
-            ? `Creada el ${formatFechaCorta(item.fecha_creacion)}`
-            : 'Fecha no disponible';
+
+          const categoryParts = [
+            item.titulo ? String(item.titulo) : '',
+            subtitleBase ? String(subtitleBase) : '',
+          ].filter(Boolean);
+
+          const category =
+            categoryParts.length > 0 ? categoryParts.join(' · ') : 'Incidencia';
+
+          const addressLabel = getIncidenciaAddressLabel(item);
+
+          const dateParts = [
+            item.fecha_creacion ? `Creada el ${formatFechaCorta(item.fecha_creacion)}` : '',
+            addressLabel,
+          ].filter(Boolean);
+
+          const dateLabel =
+            dateParts.length > 0 ? dateParts.join(' · ') : 'Fecha no disponible';
 
           const badgeLabel = item.estado_label || 'Sin estado';
 
@@ -1007,10 +1199,10 @@ export const ContratoListScreen: React.FC<Props> = ({ navigation }) => {
             <View key={item.id} style={localStyles.incidenciaCardWrapper}>
               <ExpenseCard
                 backgroundColor={getIncidenciaCardBackground(item.estado)}
-                title={item.codigo || item.id}
-                category={item.titulo ? `${item.titulo} · ${category}` : category}
+                title={getIncidenciaTitle(item)}
+                category={category}
                 dateLabel={dateLabel}
-                amountLabel={item.localidad ? item.localidad : 'Incidencia'}
+                amountLabel=""
                 segmentoId="GEST-RESTO"
                 inactive={false}
                 iconNameOverride="warning-outline"
@@ -1056,45 +1248,16 @@ export const ContratoListScreen: React.FC<Props> = ({ navigation }) => {
       />
 
       <View style={styles.screen}>
-        <View style={{ paddingHorizontal: 16, paddingTop: 8 }}>
-          <View style={{ flexDirection: 'row', gap: 10 }}>
-            <View
-              style={{
-                flex: 1,
-                backgroundColor: colors.surface,
-                borderRadius: 14,
-                borderWidth: 1,
-                borderColor: colors.border,
-                padding: 12,
-              }}
-            >
-              <Text style={{ fontSize: 11, color: colors.textSecondary, fontWeight: '700' }}>
-                Contratos activos
-              </Text>
-              <Text
-                style={{ marginTop: 4, fontSize: 18, fontWeight: '900', color: colors.textPrimary }}
-              >
-                {resumenActivos.cantidad}
-              </Text>
+        <View style={localStyles.summaryArea}>
+          <View style={localStyles.summaryRow}>
+            <View style={localStyles.summaryCard}>
+              <Text style={localStyles.summaryLabel}>Contratos activos</Text>
+              <Text style={localStyles.summaryValue}>{resumenActivos.cantidad}</Text>
             </View>
 
-            <View
-              style={{
-                flex: 1,
-                backgroundColor: colors.surface,
-                borderRadius: 14,
-                borderWidth: 1,
-                borderColor: colors.border,
-                padding: 12,
-              }}
-            >
-              <Text style={{ fontSize: 11, color: colors.textSecondary, fontWeight: '700' }}>
-                Ingreso mensual activo
-              </Text>
-              <Text
-                numberOfLines={1}
-                style={{ marginTop: 4, fontSize: 16, fontWeight: '900', color: colors.textPrimary }}
-              >
+            <View style={localStyles.summaryCard}>
+              <Text style={localStyles.summaryLabel}>Ingreso mensual activo</Text>
+              <Text numberOfLines={1} style={localStyles.summaryValueMoney}>
                 {EuroformatEuro(resumenActivos.rentaMensual)}
               </Text>
             </View>
@@ -1135,7 +1298,7 @@ export const ContratoListScreen: React.FC<Props> = ({ navigation }) => {
           </TouchableOpacity>
 
           {buscadorAbierto && (
-            <View style={{ maxHeight: 340 }}>
+            <View style={{ maxHeight: 360 }}>
               <ScrollView
                 nestedScrollEnabled
                 showsVerticalScrollIndicator={false}
@@ -1163,6 +1326,39 @@ export const ContratoListScreen: React.FC<Props> = ({ navigation }) => {
 };
 
 const localStyles = StyleSheet.create({
+  summaryArea: {
+    paddingHorizontal: 16,
+    paddingTop: 8,
+  },
+  summaryRow: {
+    flexDirection: 'row',
+    gap: 10,
+  },
+  summaryCard: {
+    flex: 1,
+    backgroundColor: colors.surface,
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: colors.border,
+    padding: 12,
+  },
+  summaryLabel: {
+    fontSize: 11,
+    color: colors.textSecondary,
+    fontWeight: '700',
+  },
+  summaryValue: {
+    marginTop: 4,
+    fontSize: 18,
+    fontWeight: '900',
+    color: colors.textPrimary,
+  },
+  summaryValueMoney: {
+    marginTop: 4,
+    fontSize: 16,
+    fontWeight: '900',
+    color: colors.textPrimary,
+  },
   tabsArea: {
     paddingHorizontal: spacing.md,
     paddingTop: spacing.sm,
@@ -1195,6 +1391,7 @@ const localStyles = StyleSheet.create({
     borderRadius: 999,
     borderWidth: 1,
     backgroundColor: '#FFFFFF',
+    maxWidth: 150,
   },
   estadoBadgeText: {
     fontSize: 11,

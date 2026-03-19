@@ -1,12 +1,49 @@
+"""
+/**
+ * Ruta: backend/app/utils/db/dbsync/sheets_adapter.py
+ * Versión: 1.0.0
+ * Descripción:
+ * Adaptador de Google Sheets para el motor de sincronización de GAPPTO Mobile 3.0.
+ *
+ * Funcionalidades incluidas:
+ * - Conecta con Google Sheets mediante cuenta de servicio.
+ * - Abre un spreadsheet por ID.
+ * - Lista tablas disponibles a partir de worksheets.
+ * - Crea worksheets si no existen.
+ * - Asegura cabeceras esperadas en cada worksheet.
+ * - Lee tablas completas desde Google Sheets.
+ * - Normaliza tipos Python no serializables a valores válidos para Sheets.
+ * - Asegura capacidad mínima de grid antes de escribir.
+ * - Permite escritura en modo execute/dry-run.
+ * - Permite limpieza destructiva o parcial antes de escribir.
+ * - Escribe datos desde Neon/Supabase/otras fuentes a Google Sheets.
+ *
+ * Ajustes de esta versión:
+ * - Se refuerza el sistema de reintentos ante errores 429 y 5xx.
+ * - Se añade backoff exponencial con jitter para reducir bloqueos por cuota.
+ * - Se cachean worksheets ya abiertas para evitar llamadas repetidas innecesarias.
+ * - Se cachean cabeceras validadas para reducir lecturas repetidas de fila 1.
+ * - Se evita una resolución duplicada de worksheet al asegurar cabeceras desde write_table().
+ * - Se mantiene la compatibilidad funcional con la lógica existente.
+ *
+ * Notas de diseño:
+ * - El objetivo es reducir errores de rate limit sin cambiar el contrato público del adapter.
+ * - No se eliminan capacidades actuales; se optimiza la forma de llamar a Google Sheets.
+ * - La reducción de llamadas repetidas es clave para evitar 429 en sincronizaciones largas.
+ * - La normalización de valores se mantiene separada de la lógica de escritura.
+ */
+"""
+
 from __future__ import annotations
 
 import base64
 import json
 import os
+import random
 import time
 from datetime import date, datetime, time as dtime
 from decimal import Decimal
-from typing import Any, List, Sequence, Tuple
+from typing import Any, Dict, List, Sequence, Set, Tuple
 from uuid import UUID
 
 
@@ -53,29 +90,58 @@ class SheetsAdapter:
         self.gc = gspread.authorize(creds)
         self.sh = self._with_retry(self.gc.open_by_key, self.spreadsheet_id)
 
+        # Cache local para evitar pedir a Google la misma worksheet varias veces
+        # durante una misma ejecución.
+        self._ws_cache: Dict[str, Any] = {}
+
+        # Cache de headers ya validados en esta ejecución.
+        # Clave: nombre de tabla.
+        self._validated_headers: Set[str] = set()
+
     # -----------------------------
     # Robustez: retry/backoff (429/5xx)
     # -----------------------------
     def _with_retry(self, fn, *args, **kwargs):
         """
-        Wrapper simple para tolerar rate limits / picos 5xx.
+        Wrapper robusto para tolerar rate limits / picos 5xx.
 
-        - Reintentos exponenciales (hasta ~30s).
-        - Detecta 429 y mensajes típicos "Quota exceeded".
+        Mejoras respecto a una versión simple:
+        - Reintentos exponenciales.
+        - Jitter aleatorio para evitar reintentos sincronizados.
+        - Detección de 429, quota/rate limit y códigos 5xx habituales.
+        - Mantiene la misma firma de uso que el código original.
         """
-        for attempt in range(7):
+        max_retries = 7
+        base_sleep_s = 1.0
+        max_sleep_s = 30.0
+        last_error = None
+
+        for attempt in range(max_retries):
             try:
                 return fn(*args, **kwargs)
             except Exception as e:
+                last_error = e
                 msg = repr(e)
-                is_429 = ("429" in msg) or ("Quota exceeded" in msg) or ("RATE_LIMIT" in msg)
+
+                is_429 = (
+                    "429" in msg
+                    or "Quota exceeded" in msg
+                    or "RATE_LIMIT" in msg
+                    or "rateLimitExceeded" in msg
+                    or "RESOURCE_EXHAUSTED" in msg
+                    or "Too Many Requests" in msg
+                )
                 is_5xx = any(code in msg for code in ["500", "502", "503", "504"])
-                if is_429 or is_5xx:
-                    sleep_s = min(2 ** attempt, 30)
-                    time.sleep(sleep_s)
-                    continue
-                raise
-        raise RuntimeError("Sheets API: demasiados reintentos (429/5xx).")
+
+                if not (is_429 or is_5xx):
+                    raise
+
+                # Backoff exponencial + jitter
+                sleep_s = min(base_sleep_s * (2 ** attempt), max_sleep_s)
+                sleep_s += random.uniform(0, 0.5)
+                time.sleep(sleep_s)
+
+        raise RuntimeError(f"Sheets API: demasiados reintentos (429/5xx). Error: {last_error}")
 
     # -----------------------------
     # Normalización de valores (CRÍTICO)
@@ -103,8 +169,6 @@ class SheetsAdapter:
 
         # Fechas/horas
         if isinstance(v, (datetime, date, dtime)):
-            # ISO (Sheets lo deja como string; si quieres formato fecha real,
-            # ya lo formateas en la hoja)
             return v.isoformat()
 
         # Numéricos/IDs no JSON
@@ -139,30 +203,69 @@ class SheetsAdapter:
     # Helpers
     # -----------------------------
     def list_tables(self) -> List[str]:
-        """Lista worksheets -> títulos => tablas disponibles."""
+        """
+        Lista worksheets -> títulos => tablas disponibles.
+        """
         wss = self._with_retry(self.sh.worksheets)
+
+        # Alimentamos cache para futuras operaciones.
+        for ws in wss:
+            title = getattr(ws, "title", None)
+            if title:
+                self._ws_cache[title] = ws
+
         return [ws.title for ws in wss]
 
     def _get_or_create_ws(self, title: str):
+        """
+        Devuelve una worksheet existente o la crea si no existe.
+
+        Incluye cache local para evitar reconsultar la misma hoja varias veces
+        en la misma ejecución.
+        """
+        if title in self._ws_cache:
+            return self._ws_cache[title]
+
         try:
-            return self._with_retry(self.sh.worksheet, title)
+            ws = self._with_retry(self.sh.worksheet, title)
+            self._ws_cache[title] = ws
+            return ws
         except Exception:
-            return self._with_retry(self.sh.add_worksheet, title=title, rows=2000, cols=60)
+            ws = self._with_retry(self.sh.add_worksheet, title=title, rows=2000, cols=60)
+            self._ws_cache[title] = ws
+            return ws
+
+    def _ensure_headers_ws(self, ws, table: str, headers: List[str]) -> None:
+        """
+        Variante interna de ensure_headers que trabaja con una worksheet ya resuelta.
+
+        Esto evita:
+        - volver a pedir la worksheet
+        - releer headers si ya se validaron en esta ejecución
+        """
+        if table in self._validated_headers:
+            return
+
+        current = self._with_retry(ws.row_values, 1)
+        if current != headers:
+            self._with_retry(ws.update, "A1", [headers], value_input_option="RAW")
+
+        self._validated_headers.add(table)
 
     def ensure_headers(self, table: str, headers: List[str]) -> None:
         """
         Asegura que la fila 1 tiene los headers esperados.
-        OJO: esto implica lecturas (row_values). Por eso SyncEngine lo llama solo en execute=True.
+
+        OJO: esto implica lecturas (row_values). Por eso SyncEngine lo llama
+        solo en execute=True.
         """
         ws = self._get_or_create_ws(table)
-        current = self._with_retry(ws.row_values, 1)
-        if current == headers:
-            return
-        self._with_retry(ws.update, "A1", [headers])
+        self._ensure_headers_ws(ws, table, headers)
 
     def read_table(self, table: str) -> Tuple[List[str], List[Tuple[Any, ...]]]:
         """
         Lee tabla desde Sheet.
+
         Nota: es una operación de lectura cara (cuota). Úsala cuando el SOURCE sea Sheets.
         """
         ws = self._get_or_create_ws(table)
@@ -174,7 +277,7 @@ class SheetsAdapter:
         return headers, [tuple(r) for r in data_rows]
 
     def _a1_to_col_index(self, a1_col: str) -> int:
-        """""
+        """
         Convierte letras de columna (A, Z, AA, ZZ) a índice 1-based.
         """
         a1_col = (a1_col or "").strip().upper()
@@ -192,7 +295,6 @@ class SheetsAdapter:
         Esto evita errores del tipo:
         Range (X!A2:ZZ) exceeds grid limits. Max rows: 1, max columns: N
         """
-        # gspread Worksheet suele exponer row_count y col_count
         try:
             current_rows = int(getattr(ws, "row_count", 0) or 0)
             current_cols = int(getattr(ws, "col_count", 0) or 0)
@@ -200,20 +302,15 @@ class SheetsAdapter:
             current_rows = 0
             current_cols = 0
 
-        # Si no podemos leer row/col, intentamos forzar un resize “seguro”
         need_rows = max(min_rows, current_rows or 0)
         need_cols = max(min_cols, current_cols or 0)
 
-        # Si ya cumple, no hacer nada
         if current_rows >= need_rows and current_cols >= need_cols:
             return
 
-        # gspread: resize(rows=..., cols=...)
-        # OJO: algunos backends de Sheets fallan si intentas reducir; aquí solo ampliamos.
         try:
             self._with_retry(ws.resize, rows=need_rows, cols=need_cols)
         except Exception:
-            # fallback: intentar ampliar solo rows o cols
             if current_rows < need_rows:
                 self._with_retry(ws.resize, rows=need_rows)
             if current_cols < need_cols:
@@ -227,14 +324,15 @@ class SheetsAdapter:
         - escribir data en A2 con data_rows_len filas y headers_len columnas
         """
         # Necesitamos al menos 2 filas para que exista A2, incluso si no hay datos.
-        min_rows = max(2, 1 + max(data_rows_len, 1))  # headers + al menos 1 fila de data (o espacio)
-        # Necesitamos al menos tantas columnas como headers y, por seguridad, hasta ZZ si vamos a limpiar A2:ZZ.
-        # ZZ = 702 columnas. Es grande, pero Sheets lo soporta y evita el error para siempre.
-        # Si prefieres algo menos agresivo, usa max(headers_len, 60).
+        min_rows = max(2, 1 + max(data_rows_len, 1))
+
+        # Necesitamos al menos tantas columnas como headers.
+        # Se mantiene un mínimo razonable de 60 para evitar fallos por hojas recién creadas
+        # o con grid demasiado ajustado.
         min_cols = max(headers_len, 60)
+
         self._ensure_grid_capacity(ws, min_rows=min_rows, min_cols=min_cols)
 
-    
     def write_table(
         self,
         table: str,
@@ -253,6 +351,11 @@ class SheetsAdapter:
             - asegura capacidad mínima de grid (evita Invalid range)
             - limpia contenido previo
             - escribe data desde A2
+
+        Ajuste importante:
+        - Se evita resolver dos veces la misma worksheet en la misma operación.
+        - Se reduce el número de lecturas repetidas de headers cuando la tabla
+          ya ha sido validada durante esta ejecución.
         """
         ws = self._get_or_create_ws(table)
 
@@ -262,24 +365,28 @@ class SheetsAdapter:
         # Normalizamos filas (EVITA TypeError datetime no JSON serializable)
         data = self._normalize_matrix(rows)
 
-        # Asegurar capacidad mínima (CRÍTICO para evitar A2:ZZ > grid)
+        # Asegurar capacidad mínima antes de cualquier operación sobre A1/A2
         self._ensure_minimum_for_a2_ops(ws, headers_len=len(headers), data_rows_len=len(data))
 
-        # Aseguramos headers (esto lee/actualiza)
-        self.ensure_headers(table, headers)
+        # Asegurar headers sin volver a resolver la worksheet
+        self._ensure_headers_ws(ws, table, headers)
 
         # Limpieza
         if allow_destructive:
+            # Limpia todo el contenido previo y vuelve a dejar headers
             self._with_retry(ws.clear)
-            self._with_retry(ws.update, "A1", [headers])
-            # Tras clear, asegurar otra vez capacidad mínima (clear a veces deja grid mínimo en ciertos casos)
+            self._with_retry(ws.update, "A1", [headers], value_input_option="RAW")
+
+            # Tras clear, asegurar otra vez capacidad mínima por robustez.
             self._ensure_minimum_for_a2_ops(ws, headers_len=len(headers), data_rows_len=len(data))
+
+            # Ya hemos dejado headers actualizados explícitamente.
+            self._validated_headers.add(table)
         else:
-            # En vez de A2:ZZ (que depende de grid), limpiamos dinámicamente hasta el ancho real que usamos
-            # y hasta un número razonable de columnas.
-            # Calculamos última columna según headers_len (mínimo 1)
+            # Limpiamos solo el bloque de datos, no la hoja completa.
+            # Así evitamos rangos demasiado grandes e innecesarios.
             last_col_idx = max(len(headers), 1)
-            # Convertimos índice a letra (A1). Implementación simple.
+
             def idx_to_a1_col(n: int) -> str:
                 s = ""
                 while n > 0:
@@ -294,5 +401,5 @@ class SheetsAdapter:
         if not data:
             return
 
-        # Escribir data
-        self._with_retry(ws.update, "A2", data)
+        # Escritura de datos en bloque.
+        self._with_retry(ws.update, "A2", data, value_input_option="RAW")

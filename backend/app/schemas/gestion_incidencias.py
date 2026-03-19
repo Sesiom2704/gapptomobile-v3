@@ -1,6 +1,6 @@
 """
 Ruta: backend/app/schemas/gestion_incidencias.py
-Versión: 1.2.0
+Versión: 1.3.0
 Descripción:
 Schemas Pydantic para la API GAPPTO de gestión de incidencias.
 
@@ -12,7 +12,8 @@ Funcionalidades incluidas:
 - Payload de asignación de proveedor.
 - Payload de programación de visita.
 - Payload de actualización controlada de incidencia.
-- NUEVO: exposición de historial de cambios y listado de citas.
+- Exposición de historial de cambios y listado de citas.
+- NUEVO: exposición de referencia y dirección visible de vivienda/patrimonio.
 
 Notas de diseño:
 - Se reutiliza el modelo funcional ya existente del dominio incidencias.
@@ -20,6 +21,8 @@ Notas de diseño:
   - autenticación por usuario logueado
   - operación funcional sobre incidencias, proveedores y citas
 - Los labels de estado/prioridad/cita se exponen ya resueltos para facilitar la UI móvil.
+- referencia_vivienda y direccion_completa se exponen para evitar mostrar ids técnicos
+  de patrimonio en la aplicación móvil.
 """
 
 from __future__ import annotations
@@ -99,6 +102,10 @@ class GestionIncidenciaListItem(BaseModel):
     contrato_id: Optional[str] = None
     patrimonio_id: Optional[str] = None
 
+    # NUEVO: datos visibles de vivienda
+    referencia_vivienda: Optional[str] = None
+    direccion_completa: Optional[str] = None
+
 
 class GestionIncidenciaListResponse(BaseModel):
     ok: bool = True
@@ -113,6 +120,10 @@ class GestionIncidenciaDetailResponse(BaseModel):
 
     contrato_id: Optional[str] = None
     patrimonio_id: Optional[str] = None
+
+    # NUEVO: datos visibles de vivienda
+    referencia_vivienda: Optional[str] = None
+    direccion_completa: Optional[str] = None
 
     persona_reporta_id: Optional[str] = None
     rol_reporta: Optional[str] = None

@@ -1,6 +1,6 @@
 /**
  * Ruta: mobile_app/screens/Alquiler/IncidenciaDetalleScreen.tsx
- * Versión: 2.0.0
+ * Versión: 2.1.0
  * Descripción:
  * Pantalla de detalle de incidencia para GAPPTO Mobile.
  *
@@ -17,6 +17,12 @@
  *   - notas_acceso
  *   - estado
  * - Guarda cambios mediante updateIncidencia().
+ *
+ * Ajustes de esta versión:
+ * - Resumen muestra referencia y dirección de la vivienda.
+ * - Se evita enseñar patrimonio_id como dato principal de UI.
+ * - Si el título está vacío, no se muestra en lectura.
+ * - El header aprovecha código + referencia de vivienda.
  *
  * Notas de diseño:
  * - Mantiene la edición controlada separada de las acciones operativas.
@@ -99,6 +105,25 @@ function formatDateTimeLabel(value?: string | null): string {
   } catch {
     return safeText(value);
   }
+}
+
+function getIncidenciaReferencia(data: IncidenciaDetailResponse | null | undefined): string {
+  return String((data as any)?.referencia_vivienda ?? '').trim();
+}
+
+function getIncidenciaDireccion(data: IncidenciaDetailResponse | null | undefined): string {
+  return String((data as any)?.direccion_completa ?? '').trim();
+}
+
+function getHeaderSubtitle(data: IncidenciaDetailResponse | null | undefined): string {
+  const codigo = String(data?.codigo ?? '').trim();
+  const referencia = getIncidenciaReferencia(data);
+
+  if (codigo && referencia) return `Incidencia ${codigo} · ${referencia}`;
+  if (codigo) return `Incidencia ${codigo}`;
+  if (referencia) return referencia;
+
+  return 'Gestión operativa de incidencia.';
 }
 
 const SectionCard: React.FC<{
@@ -635,6 +660,8 @@ export const IncidenciaDetalleScreen: React.FC<Props> = ({ navigation, route }) 
   );
 
   const renderDescripcionSection = () => {
+    const hasTitulo = String(detalle?.titulo ?? '').trim().length > 0;
+
     if (editMode) {
       return (
         <SectionCard
@@ -652,7 +679,7 @@ export const IncidenciaDetalleScreen: React.FC<Props> = ({ navigation, route }) 
             label="Título"
             value={editTitulo}
             onChangeText={setEditTitulo}
-            placeholder="Título opcional"
+            placeholder="Opcional. Úsalo si quieres una cabecera corta"
           />
 
           <EditableField
@@ -729,7 +756,7 @@ export const IncidenciaDetalleScreen: React.FC<Props> = ({ navigation, route }) 
           </TouchableOpacity>
         }
       >
-        <FieldRow label="Título" value={detalle?.titulo} />
+        {hasTitulo && <FieldRow label="Título" value={detalle?.titulo} />}
         <FieldRow label="Descripción" value={detalle?.descripcion} multiline />
         <FieldRow label="Teléfono snapshot" value={detalle?.telefono_inquilino_snapshot} />
         <FieldRow label="Notas de acceso" value={detalle?.notas_acceso} multiline />
@@ -815,6 +842,9 @@ export const IncidenciaDetalleScreen: React.FC<Props> = ({ navigation, route }) 
       );
     }
 
+    const referenciaVivienda = getIncidenciaReferencia(detalle);
+    const direccionCompleta = getIncidenciaDireccion(detalle);
+
     return (
       <ScrollView
         style={listStyles.list}
@@ -857,7 +887,8 @@ export const IncidenciaDetalleScreen: React.FC<Props> = ({ navigation, route }) 
           <FieldRow label="Código" value={detalle.codigo} />
           <FieldRow label="Categoría" value={detalle.categoria} />
           <FieldRow label="Contrato" value={detalle.contrato_id} />
-          <FieldRow label="Patrimonio" value={detalle.patrimonio_id} />
+          <FieldRow label="Referencia vivienda" value={referenciaVivienda || null} />
+          <FieldRow label="Dirección completa" value={direccionCompleta || null} multiline />
           <FieldRow label="Fecha creación" value={formatDateTimeLabel(detalle.fecha_creacion)} />
           <FieldRow
             label="Última actualización"
@@ -923,7 +954,7 @@ export const IncidenciaDetalleScreen: React.FC<Props> = ({ navigation, route }) 
     <>
       <Header
         title="Detalle incidencia"
-        subtitle={detalle?.codigo ? `Incidencia ${detalle.codigo}` : 'Gestión operativa de incidencia.'}
+        subtitle={getHeaderSubtitle(detalle)}
         showBack
         onBackPress={handleBack}
       />

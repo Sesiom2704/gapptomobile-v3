@@ -170,6 +170,8 @@ export type IncidenciaListItem = {
   localidad?: string | null;
   contrato_id?: string | null;
   patrimonio_id?: string | null;
+  referencia_vivienda?: string | null;
+  direccion_completa?: string | null;
 };
 
 export type IncidenciaListResponse = {
@@ -183,6 +185,8 @@ export type IncidenciaDetailResponse = {
   codigo: string;
   contrato_id?: string | null;
   patrimonio_id?: string | null;
+  referencia_vivienda?: string | null;
+  direccion_completa?: string | null;
   persona_reporta_id?: string | null;
   rol_reporta?: string | null;
   categoria?: string | null;
@@ -231,6 +235,8 @@ export type IncidenciaActionResponse = {
     fecha_creacion?: string | null;
     contrato_id?: string | null;
     patrimonio_id?: string | null;
+    referencia_vivienda?: string | null;
+    direccion_completa?: string | null;
   };
   mensaje?: string | null;
 };
@@ -288,6 +294,8 @@ function normalizeIncidenciaListItem(r: any): IncidenciaListItem {
     localidad: r?.localidad ?? null,
     contrato_id: r?.contrato_id ?? null,
     patrimonio_id: r?.patrimonio_id ?? null,
+    referencia_vivienda: r?.referencia_vivienda ?? null,
+    direccion_completa: r?.direccion_completa ?? null,
   };
 }
 
@@ -324,6 +332,8 @@ function normalizeIncidenciaDetail(r: any): IncidenciaDetailResponse {
     codigo: String(r?.codigo ?? ''),
     contrato_id: r?.contrato_id ?? null,
     patrimonio_id: r?.patrimonio_id ?? null,
+    referencia_vivienda: r?.referencia_vivienda ?? null,
+    direccion_completa: r?.direccion_completa ?? null,
     persona_reporta_id: r?.persona_reporta_id ?? null,
     rol_reporta: r?.rol_reporta ?? null,
     categoria: r?.categoria ?? null,

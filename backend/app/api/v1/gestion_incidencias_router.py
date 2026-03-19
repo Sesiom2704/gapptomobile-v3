@@ -1,6 +1,6 @@
 """
 Ruta: backend/app/api/v1/gestion_incidencias_router.py
-Versión: 1.1.0
+Versión: 1.2.0
 Descripción:
 API v1 de gestión de incidencias para GAPPTO.
 
@@ -11,7 +11,10 @@ Funcionalidades incluidas:
 - Listado de proveedores activos para incidencias.
 - Asignación de proveedor a incidencia.
 - Programación de visita para incidencia.
-- NUEVO: actualización controlada de campos editables de incidencia.
+- Actualización controlada de campos editables de incidencia.
+- NUEVO: exposición de referencia de vivienda y dirección completa.
+- NUEVO: validación y actualización controlada de estado.
+- NUEVO: corrección de trazabilidad de historial al cambiar estado.
 
 Notas de diseño:
 - Esta capa está pensada para GAPPTO Mobile / backoffice, no para BOT.
@@ -20,7 +23,7 @@ Notas de diseño:
 - Para la trazabilidad funcional de acciones operativas:
   - se intenta resolver una persona gestora activa del contrato perteneciente al usuario;
   - si no existe una única persona gestora clara, se devuelve error funcional explícito.
-- La edición controlada no permite cambios de estado/proveedor/cita por este endpoint.
+- La edición controlada no permite cambios de proveedor/cita por este endpoint.
 """
 
 from __future__ import annotations
@@ -82,7 +85,6 @@ ASIGNACION_ESTADO_INACTIVE = "inactive"
 CITA_ESTADO_PROPOSED = "proposed"
 CITA_INQUILINO_PENDING_CONFIRMATION = "pending_confirmation"
 
-
 ESTADO_LABELS = {
     "new": "Nueva",
     "under_review": "En gestión",
@@ -142,6 +144,7 @@ ALLOWED_ESTADOS = {
     "cancelled",
 }
 
+
 def _estado_label(value: Optional[str]) -> str:
     if not value:
         return "Sin estado"
@@ -165,6 +168,7 @@ def _estado_inquilino_label(value: Optional[str]) -> str:
         return "Sin estado"
     return ESTADO_INQUILINO_LABELS.get(value, value)
 
+
 def _validate_estado_incidencia(value: Optional[str]) -> str:
     normalized = str(value or "").strip().lower()
     if normalized not in ALLOWED_ESTADOS:
@@ -173,6 +177,7 @@ def _validate_estado_incidencia(value: Optional[str]) -> str:
             detail="Estado de incidencia no válido",
         )
     return normalized
+
 
 def _get_owned_contrato(
     db: Session,
@@ -331,6 +336,8 @@ def _resolve_actor_persona_for_contrato(
 
 
 def _build_incidencia_resumen(incidencia: models.Incidencia) -> GestionIncidenciaResumen:
+    patrimonio = getattr(incidencia, "patrimonio", None)
+
     return GestionIncidenciaResumen(
         id=incidencia.id,
         codigo=incidencia.codigo,
@@ -343,10 +350,14 @@ def _build_incidencia_resumen(incidencia: models.Incidencia) -> GestionIncidenci
         fecha_creacion=incidencia.fecha_creacion,
         contrato_id=incidencia.contrato_id,
         patrimonio_id=incidencia.patrimonio_id,
+        referencia_vivienda=getattr(patrimonio, "referencia", None),
+        direccion_completa=getattr(patrimonio, "direccion_completa", None),
     )
 
 
-def _build_cita_resumen(cita: Optional[models.CitaIncidencia]) -> Optional[GestionCitaIncidenciaResumen]:
+def _build_cita_resumen(
+    cita: Optional[models.CitaIncidencia],
+) -> Optional[GestionCitaIncidenciaResumen]:
     if not cita:
         return None
 
@@ -363,6 +374,7 @@ def _build_cita_resumen(cita: Optional[models.CitaIncidencia]) -> Optional[Gesti
         estado_inquilino=cita.estado_inquilino,
         estado_inquilino_label=_estado_inquilino_label(cita.estado_inquilino),
     )
+
 
 def _build_historial_item(
     item: models.HistorialEstadoIncidencia,
@@ -410,6 +422,20 @@ def _build_cita_item(
         updated_at=cita.updated_at,
     )
 
+
+def _get_last_cita_by_incidencia(
+    db: Session,
+    incidencia_id: str,
+) -> Optional[models.CitaIncidencia]:
+    return (
+        db.query(models.CitaIncidencia)
+        .options(joinedload(models.CitaIncidencia.proveedor))
+        .filter(models.CitaIncidencia.incidencia_id == incidencia_id)
+        .order_by(models.CitaIncidencia.created_at.desc())
+        .first()
+    )
+
+
 def _build_incidencia_detail_response(
     db: Session,
     incidencia: models.Incidencia,
@@ -448,12 +474,16 @@ def _build_incidencia_detail_response(
         reverse=True,
     )
 
+    patrimonio = getattr(incidencia, "patrimonio", None)
+
     return GestionIncidenciaDetailResponse(
         ok=True,
         id=incidencia.id,
         codigo=incidencia.codigo,
         contrato_id=incidencia.contrato_id,
         patrimonio_id=incidencia.patrimonio_id,
+        referencia_vivienda=getattr(patrimonio, "referencia", None),
+        direccion_completa=getattr(patrimonio, "direccion_completa", None),
         persona_reporta_id=incidencia.persona_reporta_id,
         rol_reporta=incidencia.rol_reporta,
         categoria=incidencia.categoria,
@@ -472,15 +502,6 @@ def _build_incidencia_detail_response(
         ultima_cita=_build_cita_resumen(ultima_cita),
         historial=[_build_historial_item(x) for x in historial_sorted],
         citas=[_build_cita_item(x) for x in citas_sorted],
-    )
-
-def _get_last_cita_by_incidencia(db: Session, incidencia_id: str) -> Optional[models.CitaIncidencia]:
-    return (
-        db.query(models.CitaIncidencia)
-        .options(joinedload(models.CitaIncidencia.proveedor))
-        .filter(models.CitaIncidencia.incidencia_id == incidencia_id)
-        .order_by(models.CitaIncidencia.created_at.desc())
-        .first()
     )
 
 
@@ -545,6 +566,8 @@ def listar_incidencias_activas(
 
     items = []
     for incidencia, proveedor, gestor_actual in rows:
+        patrimonio = getattr(incidencia, "patrimonio", None)
+
         items.append(
             GestionIncidenciaListItem(
                 id=incidencia.id,
@@ -560,9 +583,11 @@ def listar_incidencias_activas(
                 proveedor_actual_nombre=proveedor.nombre if proveedor else None,
                 gestor_actual_id=incidencia.gestor_actual_id,
                 gestor_actual_nombre=gestor_actual.nombre_completo if gestor_actual else None,
-                localidad=getattr(getattr(incidencia, "patrimonio", None), "localidad", None),
+                localidad=getattr(patrimonio, "localidad", None),
                 contrato_id=incidencia.contrato_id,
                 patrimonio_id=incidencia.patrimonio_id,
+                referencia_vivienda=getattr(patrimonio, "referencia", None),
+                direccion_completa=getattr(patrimonio, "direccion_completa", None),
             )
         )
 
@@ -587,6 +612,7 @@ def listar_incidencias_por_contrato(
             models.Proveedor,
             models.Persona,
         )
+        .options(joinedload(models.Incidencia.patrimonio))
         .outerjoin(
             models.Proveedor,
             models.Proveedor.id == models.Incidencia.proveedor_actual_id,
@@ -602,6 +628,8 @@ def listar_incidencias_por_contrato(
 
     items = []
     for incidencia, proveedor, gestor_actual in rows:
+        patrimonio = getattr(incidencia, "patrimonio", None)
+
         items.append(
             GestionIncidenciaListItem(
                 id=incidencia.id,
@@ -617,9 +645,11 @@ def listar_incidencias_por_contrato(
                 proveedor_actual_nombre=proveedor.nombre if proveedor else None,
                 gestor_actual_id=incidencia.gestor_actual_id,
                 gestor_actual_nombre=gestor_actual.nombre_completo if gestor_actual else None,
-                localidad=None,
+                localidad=getattr(patrimonio, "localidad", None),
                 contrato_id=incidencia.contrato_id,
                 patrimonio_id=incidencia.patrimonio_id,
+                referencia_vivienda=getattr(patrimonio, "referencia", None),
+                direccion_completa=getattr(patrimonio, "direccion_completa", None),
             )
         )
 
@@ -694,6 +724,7 @@ def update_incidencia(
     incidencia = _get_owned_incidencia_with_context(db, incidencia_id, current_user)
     actor_persona = _resolve_actor_persona_for_contrato(db, incidencia.contrato_id, current_user)
 
+    estado_anterior = incidencia.estado
     changed_fields: list[str] = []
 
     if payload.titulo is not None:
@@ -742,7 +773,7 @@ def update_incidencia(
         historial = models.HistorialEstadoIncidencia(
             id=generate_historial_estado_id(),
             incidencia_id=incidencia.id,
-            estado_anterior=incidencia.estado,
+            estado_anterior=estado_anterior,
             estado_nuevo=incidencia.estado,
             persona_cambia_id=actor_persona.id,
             rol_cambia="gestor",
@@ -784,7 +815,7 @@ def assign_provider(
     db: Session = Depends(get_db),
     current_user: models.User = Depends(require_user),
 ):
-    incidencia = _get_owned_incidencia(db, incidencia_id, current_user)
+    incidencia = _get_owned_incidencia_with_context(db, incidencia_id, current_user)
     proveedor = _get_owned_proveedor(db, payload.proveedor_id, current_user)
     actor_persona = _resolve_actor_persona_for_contrato(db, incidencia.contrato_id, current_user)
 
@@ -832,6 +863,8 @@ def assign_provider(
         db.rollback()
         raise
 
+    incidencia = _get_owned_incidencia_with_context(db, incidencia_id, current_user)
+
     return GestionIncidenciaActionResponse(
         ok=True,
         incidencia=_build_incidencia_resumen(incidencia),
@@ -850,7 +883,7 @@ def schedule_visit(
     db: Session = Depends(get_db),
     current_user: models.User = Depends(require_user),
 ):
-    incidencia = _get_owned_incidencia(db, incidencia_id, current_user)
+    incidencia = _get_owned_incidencia_with_context(db, incidencia_id, current_user)
     proveedor = _get_owned_proveedor(db, payload.proveedor_id, current_user)
     actor_persona = _resolve_actor_persona_for_contrato(db, incidencia.contrato_id, current_user)
 
@@ -906,6 +939,8 @@ def schedule_visit(
     except Exception:
         db.rollback()
         raise
+
+    incidencia = _get_owned_incidencia_with_context(db, incidencia_id, current_user)
 
     return GestionIncidenciaScheduleVisitResponse(
         ok=True,
