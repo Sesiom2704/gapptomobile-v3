@@ -496,150 +496,238 @@ def create_ingreso(
     db: Session = Depends(get_db),
     current_user: models.User = Depends(require_user),
 ):
-    payload = to_payload(ingreso_in)
+    """
+    Crea un nuevo ingreso.
 
-    for k in [
-        "rango_cobro",
-        "periodicidad",
-        "rama_id",
-        "tipo_id",
-        "referencia_vivienda_id",
-        "concepto",
-        "cuenta_id",
-    ]:
-        if k in payload and isinstance(payload[k], str) and payload[k].strip() == "":
-            payload[k] = None
+    Qué hace:
+    - Normaliza el payload recibido.
+    - Valida coherencia entre rama_id y tipo_id.
+    - Valida cuenta y vivienda para el usuario actual.
+    - Genera ID si no viene uno válido.
+    - Asigna user_id automáticamente.
+    - Inicializa campos omitidos si no vienen informados.
+    - Aplica lógica especial para PAGO UNICO:
+        * activo = False
+        * cobrado = True
+        * kpi = False
+        * inactivatedon = now()
+        * ultimo_ingreso_on = now()
+        * ajuste de liquidez inmediato en cuenta asociada
+    - Inserta el ingreso.
+    - Reintenta si hay colisión de ID.
+    - Devuelve el ingreso serializado con relaciones cargadas.
 
-    _normalize_ingreso_text_payload(payload)
+    Nota importante:
+    - Se corrige el bug detectado: generate_ingreso_id requiere db.
+    """
 
-    logger.warning("[INGRESOS][CREATE] payload normalizado=%s", payload)
+    try:
+        # ------------------------------------------------------------
+        # 1) Extraer payload del schema Pydantic
+        # ------------------------------------------------------------
+        payload = to_payload(ingreso_in)
 
-    # Validaciones funcionales
-    rama, tipo = _validate_rama_tipo_ingreso(
-        db,
-        rama_id=payload.get("rama_id"),
-        tipo_id=payload.get("tipo_id"),
-    )
+        # ------------------------------------------------------------
+        # 2) Convertir cadenas vacías en None para evitar basura tipo ""
+        # ------------------------------------------------------------
+        for k in [
+            "rango_cobro",
+            "periodicidad",
+            "rama_id",
+            "tipo_id",
+            "referencia_vivienda_id",
+            "concepto",
+            "cuenta_id",
+        ]:
+            if k in payload and isinstance(payload[k], str) and payload[k].strip() == "":
+                payload[k] = None
 
-    cuenta = _validate_cuenta_for_user(
-        db,
-        cuenta_id=payload.get("cuenta_id"),
-        current_user=current_user,
-    )
+        # ------------------------------------------------------------
+        # 3) Normalización global a MAYÚSCULAS en textos funcionales
+        # ------------------------------------------------------------
+        _normalize_ingreso_text_payload(payload)
 
-    vivienda = _validate_vivienda_for_user(
-        db,
-        vivienda_id=payload.get("referencia_vivienda_id"),
-        current_user=current_user,
-    )
+        logger.warning("[INGRESOS][CREATE] payload normalizado=%s", payload)
 
-    logger.warning(
-        "[INGRESOS][CREATE] validaciones ok | rama=%s | tipo=%s | cuenta=%s | vivienda=%s | user_id=%s",
-        getattr(rama, "id", None),
-        getattr(tipo, "id", None),
-        getattr(cuenta, "id", None),
-        getattr(vivienda, "id", None),
-        getattr(current_user, "id", None),
-    )
+        # ------------------------------------------------------------
+        # 4) Validaciones funcionales
+        # ------------------------------------------------------------
+        # - rama_id debe existir
+        # - tipo_id debe existir
+        # - tipo_id debe pertenecer a rama_id
+        rama, tipo = _validate_rama_tipo_ingreso(
+            db,
+            rama_id=payload.get("rama_id"),
+            tipo_id=payload.get("tipo_id"),
+        )
 
-    raw_id = (payload.get("id") or "").upper()
-    payload["id"] = raw_id if _ID_RE.fullmatch(raw_id) else generate_ingreso_id()
+        # - si viene cuenta_id, debe existir y pertenecer al usuario actual
+        cuenta = _validate_cuenta_for_user(
+            db,
+            cuenta_id=payload.get("cuenta_id"),
+            current_user=current_user,
+        )
 
-    payload["user_id"] = current_user.id
-    payload.setdefault("omitido_este_mes", False)
-    payload.setdefault("omitido_count", 0)
+        # - si viene referencia_vivienda_id, debe existir y pertenecer al usuario actual
+        vivienda = _validate_vivienda_for_user(
+            db,
+            vivienda_id=payload.get("referencia_vivienda_id"),
+            current_user=current_user,
+        )
 
-    periodicidad = (payload.get("periodicidad") or "").strip().upper()
-    importe = safe_float(payload.get("importe"))
-    cuenta_id = payload.get("cuenta_id")
+        logger.warning(
+            "[INGRESOS][CREATE] validaciones ok | rama=%s | tipo=%s | cuenta=%s | vivienda=%s | user_id=%s",
+            getattr(rama, "id", None),
+            getattr(tipo, "id", None),
+            getattr(cuenta, "id", None),
+            getattr(vivienda, "id", None),
+            getattr(current_user, "id", None),
+        )
 
-    if periodicidad == PERIODICIDAD_PAGO_UNICO:
-        payload["activo"] = False
-        payload["cobrado"] = True
-        payload["kpi"] = False
-        payload["inactivatedon"] = func.now()
-        payload["ultimo_ingreso_on"] = func.now()
-        payload["omitido_este_mes"] = False
+        # ------------------------------------------------------------
+        # 5) Resolver/generar ID
+        # ------------------------------------------------------------
+        # Si el cliente manda un ID válido con patrón INGRESO-XXXXXX, se respeta.
+        # Si no, se genera uno nuevo comprobando colisión en BD.
+        raw_id = (payload.get("id") or "").upper()
+        payload["id"] = raw_id if _ID_RE.fullmatch(raw_id) else generate_ingreso_id(db)
 
-    for _ in range(5):
-        try:
-            _debug_ingreso_context("[INGRESOS][CREATE][BEFORE ORM]", payload)
+        # ------------------------------------------------------------
+        # 6) Campos de sistema y defaults defensivos
+        # ------------------------------------------------------------
+        payload["user_id"] = current_user.id
+        payload.setdefault("omitido_este_mes", False)
+        payload.setdefault("omitido_count", 0)
 
-            obj = models.Ingreso(**payload)
-            db.add(obj)
+        # Si no viene ingresos_cobrados, el schema ya trae 0,
+        # pero lo dejamos robusto por si cambia el flujo en el futuro.
+        payload.setdefault("ingresos_cobrados", 0)
 
-            logger.warning(
-                "[INGRESOS][CREATE] obj creado en ORM | id=%s | tipo_id=%s | rama_id=%s | cuenta_id=%s",
-                getattr(obj, "id", None),
-                getattr(obj, "tipo_id", None),
-                getattr(obj, "rama_id", None),
-                getattr(obj, "cuenta_id", None),
-            )
+        # ------------------------------------------------------------
+        # 7) Preparar lógica funcional según periodicidad
+        # ------------------------------------------------------------
+        periodicidad = (payload.get("periodicidad") or "").strip().upper()
+        importe = safe_float(payload.get("importe"))
+        cuenta_id = payload.get("cuenta_id")
 
-            if periodicidad == PERIODICIDAD_PAGO_UNICO:
+        # Regla de negocio existente:
+        # Un PAGO UNICO nace ya cobrado, no activo y no KPI.
+        if periodicidad == PERIODICIDAD_PAGO_UNICO:
+            payload["activo"] = False
+            payload["cobrado"] = True
+            payload["kpi"] = False
+            payload["inactivatedon"] = func.now()
+            payload["ultimo_ingreso_on"] = func.now()
+            payload["omitido_este_mes"] = False
+
+        # ------------------------------------------------------------
+        # 8) Insert con reintentos por colisión de ID
+        # ------------------------------------------------------------
+        for _ in range(5):
+            try:
+                _debug_ingreso_context("[INGRESOS][CREATE][BEFORE ORM]", payload)
+
+                # Crear objeto ORM
+                obj = models.Ingreso(**payload)
+                db.add(obj)
+
                 logger.warning(
-                    "[INGRESOS][CREATE] ajuste liquidez previo commit | cuenta_id=%s | importe=%s",
-                    cuenta_id,
-                    importe,
+                    "[INGRESOS][CREATE] obj creado en ORM | id=%s | tipo_id=%s | rama_id=%s | cuenta_id=%s",
+                    getattr(obj, "id", None),
+                    getattr(obj, "tipo_id", None),
+                    getattr(obj, "rama_id", None),
+                    getattr(obj, "cuenta_id", None),
                 )
-                adjust_liquidez(db, cuenta_id, +importe)
 
-            db.commit()
-            db.refresh(obj)
+                # Si es PAGO UNICO, impacta inmediatamente en liquidez
+                if periodicidad == PERIODICIDAD_PAGO_UNICO:
+                    logger.warning(
+                        "[INGRESOS][CREATE] ajuste liquidez previo commit | cuenta_id=%s | importe=%s",
+                        cuenta_id,
+                        importe,
+                    )
+                    adjust_liquidez(db, cuenta_id, +importe)
 
-            logger.warning("[INGRESOS][CREATE] commit OK | ingreso_id=%s", obj.id)
+                # Persistir
+                db.commit()
+                db.refresh(obj)
 
-            obj = _get_ingreso_for_user(db, obj.id, current_user)
-            return _serialize_ingreso(obj)
+                logger.warning("[INGRESOS][CREATE] commit OK | ingreso_id=%s", obj.id)
 
-        except IntegrityError as e:
-            db.rollback()
+                # Releer con relaciones para devolver respuesta completa y consistente
+                obj = _get_ingreso_for_user(db, obj.id, current_user)
+                response_data = _serialize_ingreso(obj)
 
-            err_msg = str(getattr(e, "orig", e)).upper()
-            logger.exception("[INGRESOS][CREATE] IntegrityError | payload=%s", payload)
+                logger.warning("[INGRESOS][CREATE] response=%s", response_data)
+                return response_data
 
-            is_duplicate_id = (
-                "INGRESOS_PKEY" in err_msg
-                or ("DUPLICATE KEY VALUE" in err_msg and "(ID)" in err_msg)
-                or "KEY (ID)=" in err_msg
-            )
+            except IntegrityError as e:
+                db.rollback()
 
-            if is_duplicate_id:
-                payload["id"] = generate_ingreso_id()
-                logger.warning("[INGRESOS][CREATE] retry por colisión de ID nuevo=%s", payload["id"])
-                continue
+                err_msg = str(getattr(e, "orig", e)).upper()
+                logger.exception("[INGRESOS][CREATE] IntegrityError | payload=%s", payload)
 
-            raise HTTPException(
-                status_code=400,
-                detail=f"Error de integridad al crear ingreso: {getattr(e, 'orig', e)}",
-            )
+                # Detectar colisión de PK para reintentar con nuevo ID
+                is_duplicate_id = (
+                    "INGRESOS_PKEY" in err_msg
+                    or ("DUPLICATE KEY VALUE" in err_msg and "(ID)" in err_msg)
+                    or "KEY (ID)=" in err_msg
+                )
 
-        except DataError as e:
-            db.rollback()
-            logger.exception("[INGRESOS][CREATE] DataError | payload=%s", payload)
-            raise HTTPException(
-                status_code=400,
-                detail=f"Datos inválidos: {e.orig}",
-            )
+                if is_duplicate_id:
+                    payload["id"] = generate_ingreso_id(db)
+                    logger.warning(
+                        "[INGRESOS][CREATE] retry por colisión de ID nuevo=%s",
+                        payload["id"],
+                    )
+                    continue
 
-        except HTTPException:
-            db.rollback()
-            raise
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Error de integridad al crear ingreso: {getattr(e, 'orig', e)}",
+                )
 
-        except Exception as e:
-            db.rollback()
-            logger.exception("[INGRESOS][CREATE] Exception inesperada | payload=%s", payload)
-            tb = traceback.format_exc()
-            logger.error("[INGRESOS][CREATE] traceback=\n%s", tb)
-            raise HTTPException(
-                status_code=500,
-                detail=f"Error inesperado al crear ingreso: {e.__class__.__name__}: {e}",
-            )
+            except DataError as e:
+                db.rollback()
+                logger.exception("[INGRESOS][CREATE] DataError | payload=%s", payload)
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Datos inválidos: {e.orig}",
+                )
 
-    raise HTTPException(
-        status_code=500,
-        detail="No se pudo generar un ID único para el ingreso tras varios intentos.",
-    )
+            except HTTPException:
+                db.rollback()
+                raise
+
+            except Exception as e:
+                db.rollback()
+                logger.exception("[INGRESOS][CREATE] Exception inesperada | payload=%s", payload)
+                tb = traceback.format_exc()
+                logger.error("[INGRESOS][CREATE] traceback=\n%s", tb)
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"Error inesperado al crear ingreso: {e.__class__.__name__}: {e}",
+                )
+
+        # Si llega aquí, hubo demasiadas colisiones de ID
+        raise HTTPException(
+            status_code=500,
+            detail="No se pudo generar un ID único para el ingreso tras varios intentos.",
+        )
+
+    except HTTPException:
+        db.rollback()
+        raise
+
+    except Exception as e:
+        db.rollback()
+        logger.exception("[INGRESOS][CREATE] Exception previa al bucle de inserción")
+        tb = traceback.format_exc()
+        logger.error("[INGRESOS][CREATE] traceback previo=\n%s", tb)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error inesperado antes de crear ingreso: {e.__class__.__name__}: {e}",
+        )
 
 
 def _month_range(year: int, month: int) -> tuple[date, date]:

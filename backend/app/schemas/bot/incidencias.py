@@ -1,6 +1,6 @@
 """
 Ruta: backend/app/schemas/bot/incidencias.py
-Versión: 1.4.0
+Versión: 1.5.1
 Descripción:
 Schemas Pydantic específicos para incidencias del BOT de alquileres.
 
@@ -20,17 +20,23 @@ Funcionalidades incluidas:
 - Resumen de cita asociado a una incidencia
 - Labels legibles para BOT sobre estado y prioridad
 - Estructuras preparadas para BOT_SERVICE
+- Registro de resultado de visita post-intervención
+- Creación de presupuesto asociado a incidencia
+- Decisión de presupuesto por propietario
+- Confirmación de resolución por inquilino
+- Cierre formal de incidencia por gestor
 
 Notas de diseño:
 - Se usan los nombres reales de base de datos:
   persona_reporta_id, rol_reporta, contrato_id, patrimonio_id.
 - El backend maestro valida negocio y persistencia.
 - BOT_SERVICE solo consume estos contratos y presenta la información.
+- Se reutilizan los estados reales existentes de incidencias y citas.
 """
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
 from typing import List, Optional, Literal
 
 from pydantic import BaseModel, Field
@@ -84,6 +90,25 @@ class BotCitaIncidenciaResumen(BaseModel):
     estado_cita_label: str
     estado_inquilino: str
     estado_inquilino_label: str
+    resultado_visita: Optional[str] = None
+    resultado_visita_label: Optional[str] = None
+
+
+class BotIncidentQuoteSummary(BaseModel):
+    id: str
+    incidencia_id: str
+    proveedor_id: str
+    importe: float
+    moneda: str
+    descripcion: Optional[str] = None
+    valido_hasta: Optional[date] = None
+    estado: str
+    fecha_envio: datetime
+    fecha_revision: Optional[datetime] = None
+    enviado_por_persona_id: Optional[str] = None
+    revisado_por_persona_id: Optional[str] = None
+    nota_aprobacion: Optional[str] = None
+    nota_rechazo: Optional[str] = None
 
 
 class BotIncidenciaDetailResponse(BaseModel):
@@ -108,6 +133,7 @@ class BotIncidenciaDetailResponse(BaseModel):
     fecha_cierre: Optional[datetime] = None
     responsable_actual: Optional[BotResponsableActual] = None
     ultima_cita: Optional[BotCitaIncidenciaResumen] = None
+    presupuestos: List[BotIncidentQuoteSummary] = Field(default_factory=list)
 
 
 class BotIncidenciaListItem(BaseModel):
@@ -266,16 +292,82 @@ class BotProveedorCreateResponse(BaseModel):
     proveedor: BotProveedorListItem
     mensaje: str
 
-class BotLocalidadListItem(BaseModel):
-    id: int
-    nombre: str
-    region_nombre: Optional[str] = None
-    pais_nombre: Optional[str] = None
+
+class BotVisitResultRequest(BaseModel):
+    gestor_persona_id: str = Field(..., description="Persona gestora que registra el resultado de visita")
+    cita_id: str = Field(..., description="ID de la cita asociada a la incidencia")
+    resultado_visita: Literal[
+        "resolved_on_visit",
+        "requires_quote",
+        "requires_new_visit",
+        "no_show",
+    ] = Field(..., description="Resultado funcional de la visita")
+    nota: str = Field(..., min_length=3, description="Nota técnica obligatoria del gestor")
+    visible_para_inquilino: bool = Field(
+        default=False,
+        description="Indica si la nota asociada puede mostrarse al inquilino",
+    )
 
 
-class BotLocalidadListResponse(BaseModel):
+class BotVisitResultResponse(BaseModel):
     ok: bool = True
-    items: List[BotLocalidadListItem] = Field(default_factory=list)
+    incidencia: BotIncidenciaResumen
+    cita: BotCitaIncidenciaResumen
+    mensaje: str
+
+
+class BotCreateIncidentQuoteRequest(BaseModel):
+    gestor_persona_id: str = Field(..., description="Persona gestora que crea el presupuesto")
+    proveedor_id: str = Field(..., description="Proveedor al que corresponde el presupuesto")
+    importe: float = Field(..., gt=0, description="Importe del presupuesto")
+    moneda: str = Field(..., min_length=1, description="Moneda del presupuesto, por ejemplo EUR")
+    descripcion: str = Field(..., min_length=3, description="Descripción de trabajos presupuestados")
+    valido_hasta: Optional[date] = Field(None, description="Fecha límite de validez del presupuesto")
+    nota: Optional[str] = Field(None, description="Nota opcional para histórico interno")
+
+
+class BotCreateIncidentQuoteResponse(BaseModel):
+    ok: bool = True
+    incidencia: BotIncidenciaResumen
+    presupuesto: BotIncidentQuoteSummary
+    mensaje: str
+
+
+class BotDecideIncidentQuoteRequest(BaseModel):
+    propietario_persona_id: str = Field(..., description="Persona propietaria que decide el presupuesto")
+    decision: Literal["approved", "rejected"] = Field(..., description="Decisión del propietario")
+    nota: str = Field(..., min_length=1, description="Nota de aprobación o rechazo")
+
+
+class BotDecideIncidentQuoteResponse(BaseModel):
+    ok: bool = True
+    incidencia: BotIncidenciaResumen
+    presupuesto: BotIncidentQuoteSummary
+    mensaje: str
+
+
+class BotTenantResolutionConfirmationRequest(BaseModel):
+    inquilino_persona_id: str = Field(..., description="Persona inquilina que confirma la resolución")
+    confirmado: bool = Field(..., description="Indica si la incidencia quedó resuelta")
+    nota: str = Field(..., min_length=1, description="Comentario obligatorio del inquilino")
+
+
+class BotTenantResolutionConfirmationResponse(BaseModel):
+    ok: bool = True
+    incidencia: BotIncidenciaResumen
+    mensaje: str
+
+
+class BotCloseIncidentRequest(BaseModel):
+    gestor_persona_id: str = Field(..., description="Persona gestora que formaliza el cierre")
+    nota: str = Field(..., min_length=1, description="Nota obligatoria de cierre formal")
+
+
+class BotCloseIncidentResponse(BaseModel):
+    ok: bool = True
+    incidencia: BotIncidenciaResumen
+    mensaje: str
+
 
 class BotMessageResponse(BaseModel):
     ok: bool

@@ -43,3 +43,13 @@ def generate_cita_incidencia_id() -> str:
 def generate_incidencia_codigo() -> str:
     now = datetime.utcnow()
     return f"INC-{now.strftime('%Y%m%d')}-{uuid4().hex[:4].upper()}"
+
+from uuid import uuid4
+
+
+def generate_nota_incidencia_id() -> str:
+    return "NOT-" + uuid4().hex[:12].upper()
+
+
+def generate_presupuesto_incidencia_id() -> str:
+    return "PRE-" + uuid4().hex[:12].upper()

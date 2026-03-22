@@ -1,6 +1,6 @@
 """
 Ruta: backend/app/api/v1/bot/incidencias.py
-Versión: 1.2.0
+Versión: 1.3.0
 
 Descripción:
 Router de incidencias del BOT de alquileres.
@@ -18,10 +18,17 @@ Funcionalidades incluidas:
 - Consulta de cita activa para inquilino
 - Respuesta de inquilino a cita activa
 - Alta mínima de proveedor desde BOT
+- Búsqueda de localidades para alta de proveedor
+- Registro de resultado de visita
+- Creación de presupuesto asociado a incidencia
+- Decisión de presupuesto por propietario
+- Confirmación de resolución por inquilino
+- Cierre formal de incidencia por gestor
 
 Notas de diseño:
-- Este router expone la API BOT-ready de la Fase 4.1, 4.3A y 4.3B.1.
+- Este router expone la API BOT-ready de la Fase 4.1, 4.3A, 4.3B.1 y 4.3C.
 - La lógica de negocio vive en incidencias_service.
+- El router solo valida el contrato HTTP y delega la operación.
 """
 
 from __future__ import annotations
@@ -31,6 +38,12 @@ from sqlalchemy.orm import Session
 
 from backend.app.db.session import get_db
 from backend.app.schemas.bot.incidencias import (
+    BotCloseIncidentRequest,
+    BotCloseIncidentResponse,
+    BotCreateIncidentQuoteRequest,
+    BotCreateIncidentQuoteResponse,
+    BotDecideIncidentQuoteRequest,
+    BotDecideIncidentQuoteResponse,
     BotIncidenciaActionResponse,
     BotIncidenciaAssignProviderRequest,
     BotIncidenciaCreateRequest,
@@ -46,19 +59,28 @@ from backend.app.schemas.bot.incidencias import (
     BotProveedorCreateResponse,
     BotProveedorListResponse,
     BotTenantActiveVisitResponse,
+    BotTenantResolutionConfirmationRequest,
+    BotTenantResolutionConfirmationResponse,
     BotTenantVisitResponseRequest,
     BotTenantVisitResponseResponse,
+    BotVisitResultRequest,
+    BotVisitResultResponse,
 )
 from backend.app.services.bot.incidencias_service import (
     assign_provider_bot,
+    close_incident_bot,
+    confirm_tenant_resolution_bot,
+    create_incident_quote_bot,
     create_incidencia_bot,
     create_proveedor_bot,
+    decide_incident_quote_bot,
     get_active_visit_for_tenant_bot,
     get_incidencia_detail_by_codigo,
     get_incidencia_detail_by_id,
     list_active_incidencias_for_bot,
     list_incidencias_by_contrato,
     list_proveedores_bot,
+    register_visit_result_bot,
     schedule_visit_bot,
     search_localidades_bot,
     take_incidencia_bot,
@@ -241,6 +263,7 @@ def tenant_visit_response(
         payload=payload,
     )
 
+
 @router.get(
     "/localidades/search",
     response_model=BotLocalidadListResponse,
@@ -255,4 +278,91 @@ def search_localidades(
         db=db,
         search=search,
         limit=limit,
+    )
+
+
+@router.post(
+    "/incidencias/{incidencia_id}/visit-results",
+    response_model=BotVisitResultResponse,
+    summary="Registrar resultado de visita para una incidencia",
+)
+def register_visit_result(
+    incidencia_id: str,
+    payload: BotVisitResultRequest,
+    db: Session = Depends(get_db),
+):
+    return register_visit_result_bot(
+        db=db,
+        incidencia_id=incidencia_id,
+        payload=payload,
+    )
+
+
+@router.post(
+    "/incidencias/{incidencia_id}/quotes",
+    response_model=BotCreateIncidentQuoteResponse,
+    summary="Crear presupuesto para una incidencia",
+)
+def create_incident_quote(
+    incidencia_id: str,
+    payload: BotCreateIncidentQuoteRequest,
+    db: Session = Depends(get_db),
+):
+    return create_incident_quote_bot(
+        db=db,
+        incidencia_id=incidencia_id,
+        payload=payload,
+    )
+
+
+@router.post(
+    "/incidencias/{incidencia_id}/quotes/{presupuesto_id}/decision",
+    response_model=BotDecideIncidentQuoteResponse,
+    summary="Aprobar o rechazar presupuesto de una incidencia",
+)
+def decide_incident_quote(
+    incidencia_id: str,
+    presupuesto_id: str,
+    payload: BotDecideIncidentQuoteRequest,
+    db: Session = Depends(get_db),
+):
+    return decide_incident_quote_bot(
+        db=db,
+        incidencia_id=incidencia_id,
+        presupuesto_id=presupuesto_id,
+        payload=payload,
+    )
+
+
+@router.post(
+    "/incidencias/{incidencia_id}/tenant-confirmation",
+    response_model=BotTenantResolutionConfirmationResponse,
+    summary="Confirmar resolución de incidencia por inquilino",
+)
+def confirm_tenant_resolution(
+    incidencia_id: str,
+    payload: BotTenantResolutionConfirmationRequest,
+    db: Session = Depends(get_db),
+):
+    return confirm_tenant_resolution_bot(
+        db=db,
+        incidencia_id=incidencia_id,
+        payload=payload,
+    )
+
+
+@router.post(
+    "/incidencias/{incidencia_id}/close",
+    response_model=BotCloseIncidentResponse,
+    summary="Cerrar formalmente una incidencia por gestor",
+)
+def close_incident(
+    incidencia_id: str,
+    payload: BotCloseIncidentRequest,
+    db: Session = Depends(get_db),
+):
+    return close_incident_bot(
+        db=db,
+        incidencia_id=incidencia_id,
+        payload=payload,
     )

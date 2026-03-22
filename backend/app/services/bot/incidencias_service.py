@@ -1,9 +1,20 @@
 """
 Ruta: backend/app/services/bot/incidencias_service.py
-Versión: 1.5.1
+Versión: 1.6.0
 
 Descripción:
 Servicio de negocio para incidencias del BOT de alquileres.
+
+Incluye:
+- Flujo base de incidencias
+- Gestión de proveedor y visitas
+- Respuesta de inquilino a cita
+- Fase 4.3C:
+  - Registro de resultado de visita
+  - Creación de presupuesto
+  - Decisión de presupuesto por propietario
+  - Confirmación de resolución por inquilino
+  - Cierre formal de incidencia por gestor
 """
 
 from __future__ import annotations
@@ -18,6 +29,13 @@ from backend.app.db import models
 from backend.app.repositories.bot.incidencias_repository import IncidenciasBotRepository
 from backend.app.schemas.bot.incidencias import (
     BotCitaIncidenciaResumen,
+    BotCloseIncidentRequest,
+    BotCloseIncidentResponse,
+    BotCreateIncidentQuoteRequest,
+    BotCreateIncidentQuoteResponse,
+    BotDecideIncidentQuoteRequest,
+    BotDecideIncidentQuoteResponse,
+    BotIncidentQuoteSummary,
     BotIncidenciaActionResponse,
     BotIncidenciaAssignProviderRequest,
     BotIncidenciaCreateRequest,
@@ -38,8 +56,12 @@ from backend.app.schemas.bot.incidencias import (
     BotProveedorListResponse,
     BotResponsableActual,
     BotTenantActiveVisitResponse,
+    BotTenantResolutionConfirmationRequest,
+    BotTenantResolutionConfirmationResponse,
     BotTenantVisitResponseRequest,
     BotTenantVisitResponseResponse,
+    BotVisitResultRequest,
+    BotVisitResultResponse,
 )
 from backend.app.utils.bot.ids import (
     generate_asignacion_incidencia_id,
@@ -47,9 +69,10 @@ from backend.app.utils.bot.ids import (
     generate_historial_estado_id,
     generate_incidencia_codigo,
     generate_incidencia_id,
+    generate_nota_incidencia_id,
+    generate_presupuesto_incidencia_id,
 )
 from backend.app.utils.id_utils import generate_proveedor_id
-from backend.app.db import models
 
 
 ALLOWED_ROLES = {"inquilino", "avalista", "gestor"}
@@ -132,6 +155,13 @@ ESTADO_INQUILINO_LABELS = {
     "rejected": "Rechazado",
 }
 
+RESULTADO_VISITA_LABELS = {
+    "resolved_on_visit": "Resuelto en visita",
+    "requires_quote": "Requiere presupuesto",
+    "requires_new_visit": "Requiere nueva visita",
+    "no_show": "No asistencia",
+}
+
 PROVEEDOR_RAMA_INCIDENCIAS = "servicios_alquileres"
 PROVEEDOR_BOT_USER_ID = 2
 
@@ -150,6 +180,15 @@ CITA_INQUILINO_REJECTED = "rejected"
 TENANT_ACTION_CONFIRM = "confirm"
 TENANT_ACTION_REJECT = "reject"
 TENANT_ACTION_RESCHEDULE = "reschedule"
+
+VISIT_RESULT_RESOLVED = "resolved_on_visit"
+VISIT_RESULT_REQUIRES_QUOTE = "requires_quote"
+VISIT_RESULT_REQUIRES_NEW_VISIT = "requires_new_visit"
+VISIT_RESULT_NO_SHOW = "no_show"
+
+QUOTE_STATUS_SENT = "sent"
+QUOTE_STATUS_APPROVED = "approved"
+QUOTE_STATUS_REJECTED = "rejected"
 
 
 def _http_400(detail: str) -> None:
@@ -184,6 +223,12 @@ def _estado_inquilino_label(value: str | None) -> str:
     return ESTADO_INQUILINO_LABELS.get(value, value)
 
 
+def _resultado_visita_label(value: str | None) -> str | None:
+    if not value:
+        return None
+    return RESULTADO_VISITA_LABELS.get(value, value)
+
+
 def _build_incidencia_resumen(incidencia) -> BotIncidenciaResumen:
     return BotIncidenciaResumen(
         id=incidencia.id,
@@ -216,6 +261,27 @@ def _build_cita_resumen(cita) -> BotCitaIncidenciaResumen | None:
         estado_cita_label=_estado_cita_label(cita.estado_cita),
         estado_inquilino=cita.estado_inquilino,
         estado_inquilino_label=_estado_inquilino_label(cita.estado_inquilino),
+        resultado_visita=getattr(cita, "resultado_visita", None),
+        resultado_visita_label=_resultado_visita_label(getattr(cita, "resultado_visita", None)),
+    )
+
+
+def _build_quote_summary(presupuesto) -> BotIncidentQuoteSummary:
+    return BotIncidentQuoteSummary(
+        id=presupuesto.id,
+        incidencia_id=presupuesto.incidencia_id,
+        proveedor_id=presupuesto.proveedor_id,
+        importe=float(presupuesto.importe),
+        moneda=presupuesto.moneda,
+        descripcion=presupuesto.descripcion,
+        valido_hasta=presupuesto.valido_hasta,
+        estado=presupuesto.estado,
+        fecha_envio=presupuesto.fecha_envio,
+        fecha_revision=presupuesto.fecha_revision,
+        enviado_por_persona_id=presupuesto.enviado_por_persona_id,
+        revisado_por_persona_id=presupuesto.revisado_por_persona_id,
+        nota_aprobacion=presupuesto.nota_aprobacion,
+        nota_rechazo=presupuesto.nota_rechazo,
     )
 
 
@@ -254,6 +320,25 @@ def _assert_persona_is_inquilino_of_contrato(
     return inquilino_participante
 
 
+def _assert_persona_is_propietario_of_contrato(
+    repo: IncidenciasBotRepository,
+    *,
+    contrato_id: str,
+    propietario_persona_id: str,
+):
+    propietario_participante = repo.get_contrato_participante_by_rol(
+        contrato_id=contrato_id,
+        persona_id=propietario_persona_id,
+        rol="propietario",
+    )
+    if not propietario_participante:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="La persona indicada no puede decidir este presupuesto como propietario",
+        )
+    return propietario_participante
+
+
 def _http_403_or_400_gestor_not_allowed() -> None:
     raise HTTPException(
         status_code=status.HTTP_403_FORBIDDEN,
@@ -264,9 +349,7 @@ def _http_403_or_400_gestor_not_allowed() -> None:
 def _resolve_ubicacion_from_localidad_id(db: Session, localidad_id: int) -> dict:
     loc = (
         db.query(models.Localidad)
-        .options(
-            joinedload(models.Localidad.region).joinedload(models.Region.pais)
-        )
+        .options(joinedload(models.Localidad.region).joinedload(models.Region.pais))
         .filter(models.Localidad.id == localidad_id)
         .first()
     )
@@ -282,6 +365,29 @@ def _resolve_ubicacion_from_localidad_id(db: Session, localidad_id: int) -> dict
         "comunidad": getattr(region, "nombre", None) if region else None,
         "pais": getattr(pais_obj, "nombre", None) if pais_obj else None,
     }
+
+
+def _create_nota_incidencia(
+    repo: IncidenciasBotRepository,
+    *,
+    incidencia_id: str,
+    autor_persona_id: str | None,
+    autor_rol: str | None,
+    tipo_nota: str,
+    nota: str,
+    visible_para_inquilino: bool,
+):
+    if not nota:
+        return
+    repo.create_nota_incidencia(
+        nota_id=generate_nota_incidencia_id(),
+        incidencia_id=incidencia_id,
+        autor_persona_id=autor_persona_id,
+        autor_rol=autor_rol,
+        tipo_nota=tipo_nota,
+        nota=nota,
+        visible_para_inquilino=visible_para_inquilino,
+    )
 
 
 def create_incidencia_bot(
@@ -416,6 +522,7 @@ def get_incidencia_detail_by_id(db: Session, incidencia_id: str) -> BotIncidenci
         )
 
     ultima_cita = repo.get_last_cita_by_incidencia(incidencia.id)
+    presupuestos = repo.list_presupuestos_by_incidencia(incidencia.id)
 
     return BotIncidenciaDetailResponse(
         ok=True,
@@ -439,6 +546,7 @@ def get_incidencia_detail_by_id(db: Session, incidencia_id: str) -> BotIncidenci
         fecha_cierre=incidencia.fecha_cierre,
         responsable_actual=responsable_actual,
         ultima_cita=_build_cita_resumen(ultima_cita),
+        presupuestos=[_build_quote_summary(x) for x in presupuestos],
     )
 
 
@@ -624,6 +732,7 @@ def list_proveedores_bot(db: Session) -> BotProveedorListResponse:
 
     return BotProveedorListResponse(ok=True, items=items)
 
+
 def search_localidades_bot(
     db: Session,
     search: str,
@@ -660,6 +769,7 @@ def search_localidades_bot(
         )
 
     return BotLocalidadListResponse(ok=True, items=items)
+
 
 def create_proveedor_bot(
     db: Session,
@@ -726,6 +836,7 @@ def create_proveedor_bot(
         mensaje="Proveedor creado correctamente",
     )
 
+
 def assign_provider_bot(
     db: Session,
     incidencia_id: str,
@@ -779,7 +890,7 @@ def assign_provider_bot(
         )
         repo.update_incidencia_estado(
             incidencia=incidencia,
-            estado="awaiting_provider_assignment" if not payload.proveedor_id else "under_review",
+            estado="under_review",
         )
 
         repo.create_historial_estado(
@@ -1096,3 +1207,487 @@ def tenant_visit_response_bot(
     except Exception:
         repo.rollback()
         raise
+
+
+def register_visit_result_bot(
+    db: Session,
+    incidencia_id: str,
+    payload: BotVisitResultRequest,
+) -> BotVisitResultResponse:
+    repo = IncidenciasBotRepository(db)
+
+    incidencia = repo.get_incidencia_by_id(incidencia_id)
+    if not incidencia:
+        _http_404("Incidencia no encontrada")
+
+    gestor = repo.get_persona_by_id(payload.gestor_persona_id)
+    if not gestor:
+        _http_404("Gestor no encontrado")
+
+    _assert_persona_is_active_gestor_of_contrato(
+        repo,
+        contrato_id=incidencia.contrato_id,
+        gestor_persona_id=payload.gestor_persona_id,
+    )
+
+    cita = repo.get_cita_by_id(payload.cita_id)
+    if not cita or cita.incidencia_id != incidencia.id:
+        _http_404("Cita no encontrada para la incidencia")
+
+    if cita.estado_cita == CITA_ESTADO_CANCELLED:
+        _http_400("No se puede registrar resultado sobre una cita cancelada")
+
+    estado_anterior = incidencia.estado
+    resultado = payload.resultado_visita.strip().lower()
+
+    if resultado == VISIT_RESULT_RESOLVED:
+        nuevo_estado = "pending_follow_up"
+        nuevo_estado_cita = CITA_ESTADO_COMPLETED
+    elif resultado == VISIT_RESULT_REQUIRES_QUOTE:
+        nuevo_estado = "awaiting_quote"
+        nuevo_estado_cita = CITA_ESTADO_COMPLETED
+    elif resultado == VISIT_RESULT_REQUIRES_NEW_VISIT:
+        nuevo_estado = "pending_follow_up"
+        nuevo_estado_cita = CITA_ESTADO_COMPLETED
+    elif resultado == VISIT_RESULT_NO_SHOW:
+        nuevo_estado = "pending_follow_up"
+        nuevo_estado_cita = CITA_ESTADO_MISSED
+    else:
+        _http_400("Resultado de visita no válido")
+
+    try:
+        repo.update_cita_estado(cita, nuevo_estado_cita)
+        repo.update_cita_resultado_visita(cita, resultado)
+
+        repo.update_incidencia_gestor_actual(
+            incidencia=incidencia,
+            gestor_actual_id=payload.gestor_persona_id,
+        )
+        repo.update_incidencia_estado(
+            incidencia=incidencia,
+            estado=nuevo_estado,
+        )
+
+        _create_nota_incidencia(
+            repo,
+            incidencia_id=incidencia.id,
+            autor_persona_id=payload.gestor_persona_id,
+            autor_rol="gestor",
+            tipo_nota="resultado_visita",
+            nota=payload.nota.strip(),
+            visible_para_inquilino=payload.visible_para_inquilino,
+        )
+
+        repo.create_historial_estado(
+            historial_id=generate_historial_estado_id(),
+            incidencia_id=incidencia.id,
+            estado_anterior=estado_anterior,
+            estado_nuevo=nuevo_estado,
+            persona_cambia_id=payload.gestor_persona_id,
+            rol_cambia="gestor",
+            nota=f"Resultado de visita registrado: {resultado}. {payload.nota.strip()}",
+        )
+
+        repo.commit()
+        repo.refresh(incidencia)
+        repo.refresh(cita)
+
+    except IntegrityError as e:
+        repo.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Error de integridad al registrar resultado de visita: {str(e.orig)}",
+        )
+    except Exception:
+        repo.rollback()
+        raise
+
+    cita = repo.get_cita_by_id(cita.id)
+
+    return BotVisitResultResponse(
+        ok=True,
+        incidencia=_build_incidencia_resumen(incidencia),
+        cita=_build_cita_resumen(cita),
+        mensaje="Resultado de visita registrado correctamente",
+    )
+
+
+def create_incident_quote_bot(
+    db: Session,
+    incidencia_id: str,
+    payload: BotCreateIncidentQuoteRequest,
+) -> BotCreateIncidentQuoteResponse:
+    repo = IncidenciasBotRepository(db)
+
+    incidencia = repo.get_incidencia_by_id(incidencia_id)
+    if not incidencia:
+        _http_404("Incidencia no encontrada")
+
+    gestor = repo.get_persona_by_id(payload.gestor_persona_id)
+    if not gestor:
+        _http_404("Gestor no encontrado")
+
+    proveedor = repo.get_proveedor_by_id(payload.proveedor_id)
+    if not proveedor:
+        _http_404("Proveedor no encontrado")
+
+    _assert_persona_is_active_gestor_of_contrato(
+        repo,
+        contrato_id=incidencia.contrato_id,
+        gestor_persona_id=payload.gestor_persona_id,
+    )
+
+    if incidencia.estado != "awaiting_quote":
+        _http_400("La incidencia no está pendiente de presupuesto")
+
+    active_quote = repo.get_active_sent_presupuesto_by_incidencia(incidencia.id)
+    if active_quote:
+        _http_400("Ya existe un presupuesto pendiente de decisión para esta incidencia")
+
+    estado_anterior = incidencia.estado
+
+    try:
+        presupuesto = repo.create_presupuesto_incidencia(
+            presupuesto_id=generate_presupuesto_incidencia_id(),
+            incidencia_id=incidencia.id,
+            proveedor_id=payload.proveedor_id,
+            importe=payload.importe,
+            moneda=payload.moneda.strip(),
+            descripcion=payload.descripcion.strip(),
+            valido_hasta=payload.valido_hasta,
+            estado=QUOTE_STATUS_SENT,
+            enviado_por_persona_id=payload.gestor_persona_id,
+            fecha_envio=datetime.utcnow(),
+        )
+
+        repo.update_incidencia_gestor_actual(
+            incidencia=incidencia,
+            gestor_actual_id=payload.gestor_persona_id,
+        )
+        repo.update_incidencia_proveedor_actual(
+            incidencia=incidencia,
+            proveedor_actual_id=payload.proveedor_id,
+        )
+        repo.update_incidencia_estado(
+            incidencia=incidencia,
+            estado="quote_submitted",
+        )
+
+        _create_nota_incidencia(
+            repo,
+            incidencia_id=incidencia.id,
+            autor_persona_id=payload.gestor_persona_id,
+            autor_rol="gestor",
+            tipo_nota="presupuesto_emitido",
+            nota=payload.nota or f"Presupuesto emitido por importe {payload.importe} {payload.moneda}",
+            visible_para_inquilino=False,
+        )
+
+        repo.create_historial_estado(
+            historial_id=generate_historial_estado_id(),
+            incidencia_id=incidencia.id,
+            estado_anterior=estado_anterior,
+            estado_nuevo="quote_submitted",
+            persona_cambia_id=payload.gestor_persona_id,
+            rol_cambia="gestor",
+            nota=payload.nota or "Presupuesto generado y enviado para aprobación",
+        )
+
+        repo.commit()
+        repo.refresh(incidencia)
+        repo.refresh(presupuesto)
+
+    except IntegrityError as e:
+        repo.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Error de integridad al crear presupuesto: {str(e.orig)}",
+        )
+    except Exception:
+        repo.rollback()
+        raise
+
+    return BotCreateIncidentQuoteResponse(
+        ok=True,
+        incidencia=_build_incidencia_resumen(incidencia),
+        presupuesto=_build_quote_summary(presupuesto),
+        mensaje="Presupuesto creado correctamente",
+    )
+
+
+def decide_incident_quote_bot(
+    db: Session,
+    incidencia_id: str,
+    presupuesto_id: str,
+    payload: BotDecideIncidentQuoteRequest,
+) -> BotDecideIncidentQuoteResponse:
+    repo = IncidenciasBotRepository(db)
+
+    incidencia = repo.get_incidencia_by_id(incidencia_id)
+    if not incidencia:
+        _http_404("Incidencia no encontrada")
+
+    propietario = repo.get_persona_by_id(payload.propietario_persona_id)
+    if not propietario:
+        _http_404("Propietario no encontrado")
+
+    _assert_persona_is_propietario_of_contrato(
+        repo,
+        contrato_id=incidencia.contrato_id,
+        propietario_persona_id=payload.propietario_persona_id,
+    )
+
+    presupuesto = repo.get_presupuesto_by_id(presupuesto_id)
+    if not presupuesto or presupuesto.incidencia_id != incidencia.id:
+        _http_404("Presupuesto no encontrado para la incidencia")
+
+    if presupuesto.estado != QUOTE_STATUS_SENT:
+        _http_400("El presupuesto ya no está pendiente de decisión")
+
+    decision = payload.decision.strip().lower()
+    estado_anterior = incidencia.estado
+
+    try:
+        if decision == QUOTE_STATUS_APPROVED:
+            repo.update_presupuesto_revision(
+                presupuesto=presupuesto,
+                estado=QUOTE_STATUS_APPROVED,
+                revisado_por_persona_id=payload.propietario_persona_id,
+                fecha_revision=datetime.utcnow(),
+                nota_aprobacion=payload.nota.strip(),
+                nota_rechazo=None,
+            )
+            repo.update_incidencia_estado(
+                incidencia=incidencia,
+                estado="quote_approved",
+            )
+
+            _create_nota_incidencia(
+                repo,
+                incidencia_id=incidencia.id,
+                autor_persona_id=payload.propietario_persona_id,
+                autor_rol="propietario",
+                tipo_nota="presupuesto_aprobado",
+                nota=payload.nota.strip(),
+                visible_para_inquilino=False,
+            )
+
+            repo.create_historial_estado(
+                historial_id=generate_historial_estado_id(),
+                incidencia_id=incidencia.id,
+                estado_anterior=estado_anterior,
+                estado_nuevo="quote_approved",
+                persona_cambia_id=payload.propietario_persona_id,
+                rol_cambia="sistema",
+                nota=f"Presupuesto aprobado por propietario. {payload.nota.strip()}",
+            )
+
+        elif decision == QUOTE_STATUS_REJECTED:
+            repo.update_presupuesto_revision(
+                presupuesto=presupuesto,
+                estado=QUOTE_STATUS_REJECTED,
+                revisado_por_persona_id=payload.propietario_persona_id,
+                fecha_revision=datetime.utcnow(),
+                nota_aprobacion=None,
+                nota_rechazo=payload.nota.strip(),
+            )
+            repo.update_incidencia_estado(
+                incidencia=incidencia,
+                estado="awaiting_quote",
+            )
+
+            _create_nota_incidencia(
+                repo,
+                incidencia_id=incidencia.id,
+                autor_persona_id=payload.propietario_persona_id,
+                autor_rol="propietario",
+                tipo_nota="presupuesto_rechazado",
+                nota=payload.nota.strip(),
+                visible_para_inquilino=False,
+            )
+
+            repo.create_historial_estado(
+                historial_id=generate_historial_estado_id(),
+                incidencia_id=incidencia.id,
+                estado_anterior=estado_anterior,
+                estado_nuevo="awaiting_quote",
+                persona_cambia_id=payload.propietario_persona_id,
+                rol_cambia="sistema",
+                nota=f"Presupuesto rechazado por propietario. {payload.nota.strip()}",
+            )
+        else:
+            _http_400("Decisión de presupuesto no válida")
+
+        repo.commit()
+        repo.refresh(incidencia)
+        repo.refresh(presupuesto)
+
+    except IntegrityError as e:
+        repo.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Error de integridad al decidir presupuesto: {str(e.orig)}",
+        )
+    except Exception:
+        repo.rollback()
+        raise
+
+    return BotDecideIncidentQuoteResponse(
+        ok=True,
+        incidencia=_build_incidencia_resumen(incidencia),
+        presupuesto=_build_quote_summary(presupuesto),
+        mensaje="Decisión de presupuesto registrada correctamente",
+    )
+
+
+def confirm_tenant_resolution_bot(
+    db: Session,
+    incidencia_id: str,
+    payload: BotTenantResolutionConfirmationRequest,
+) -> BotTenantResolutionConfirmationResponse:
+    repo = IncidenciasBotRepository(db)
+
+    incidencia = repo.get_incidencia_by_id(incidencia_id)
+    if not incidencia:
+        _http_404("Incidencia no encontrada")
+
+    inquilino = repo.get_persona_by_id(payload.inquilino_persona_id)
+    if not inquilino:
+        _http_404("Inquilino no encontrado")
+
+    _assert_persona_is_inquilino_of_contrato(
+        repo,
+        contrato_id=incidencia.contrato_id,
+        inquilino_persona_id=payload.inquilino_persona_id,
+    )
+
+    if incidencia.estado != "pending_follow_up":
+        _http_400("La incidencia no está pendiente de confirmación/seguimiento")
+
+    estado_anterior = incidencia.estado
+    nuevo_estado = "resolved" if payload.confirmado else "pending_follow_up"
+
+    try:
+        repo.update_incidencia_estado(
+            incidencia=incidencia,
+            estado=nuevo_estado,
+        )
+
+        _create_nota_incidencia(
+            repo,
+            incidencia_id=incidencia.id,
+            autor_persona_id=payload.inquilino_persona_id,
+            autor_rol="inquilino",
+            tipo_nota="confirmacion_inquilino",
+            nota=payload.nota.strip(),
+            visible_para_inquilino=True,
+        )
+
+        repo.create_historial_estado(
+            historial_id=generate_historial_estado_id(),
+            incidencia_id=incidencia.id,
+            estado_anterior=estado_anterior,
+            estado_nuevo=nuevo_estado,
+            persona_cambia_id=payload.inquilino_persona_id,
+            rol_cambia="inquilino",
+            nota=f"Confirmación de inquilino: {'confirmado' if payload.confirmado else 'no confirmado'}. {payload.nota.strip()}",
+        )
+
+        repo.commit()
+        repo.refresh(incidencia)
+
+    except IntegrityError as e:
+        repo.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Error de integridad al confirmar resolución: {str(e.orig)}",
+        )
+    except Exception:
+        repo.rollback()
+        raise
+
+    return BotTenantResolutionConfirmationResponse(
+        ok=True,
+        incidencia=_build_incidencia_resumen(incidencia),
+        mensaje="Confirmación de resolución registrada correctamente",
+    )
+
+
+def close_incident_bot(
+    db: Session,
+    incidencia_id: str,
+    payload: BotCloseIncidentRequest,
+) -> BotCloseIncidentResponse:
+    repo = IncidenciasBotRepository(db)
+
+    incidencia = repo.get_incidencia_by_id(incidencia_id)
+    if not incidencia:
+        _http_404("Incidencia no encontrada")
+
+    gestor = repo.get_persona_by_id(payload.gestor_persona_id)
+    if not gestor:
+        _http_404("Gestor no encontrado")
+
+    _assert_persona_is_active_gestor_of_contrato(
+        repo,
+        contrato_id=incidencia.contrato_id,
+        gestor_persona_id=payload.gestor_persona_id,
+    )
+
+    if incidencia.estado != "resolved":
+        _http_400("Solo se puede cerrar una incidencia que ya esté resuelta")
+
+    estado_anterior = incidencia.estado
+
+    try:
+        repo.update_incidencia_gestor_actual(
+            incidencia=incidencia,
+            gestor_actual_id=payload.gestor_persona_id,
+        )
+        repo.update_incidencia_estado(
+            incidencia=incidencia,
+            estado="closed",
+        )
+        repo.update_incidencia_fecha_cierre(
+            incidencia=incidencia,
+            fecha_cierre=datetime.utcnow(),
+        )
+
+        _create_nota_incidencia(
+            repo,
+            incidencia_id=incidencia.id,
+            autor_persona_id=payload.gestor_persona_id,
+            autor_rol="gestor",
+            tipo_nota="cierre_incidencia",
+            nota=payload.nota.strip(),
+            visible_para_inquilino=False,
+        )
+
+        repo.create_historial_estado(
+            historial_id=generate_historial_estado_id(),
+            incidencia_id=incidencia.id,
+            estado_anterior=estado_anterior,
+            estado_nuevo="closed",
+            persona_cambia_id=payload.gestor_persona_id,
+            rol_cambia="gestor",
+            nota=payload.nota.strip(),
+        )
+
+        repo.commit()
+        repo.refresh(incidencia)
+
+    except IntegrityError as e:
+        repo.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Error de integridad al cerrar incidencia: {str(e.orig)}",
+        )
+    except Exception:
+        repo.rollback()
+        raise
+
+    return BotCloseIncidentResponse(
+        ok=True,
+        incidencia=_build_incidencia_resumen(incidencia),
+        mensaje="Incidencia cerrada correctamente",
+    )

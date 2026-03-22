@@ -27,7 +27,7 @@ Notas de diseño:
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
 from typing import List, Optional
 
 from pydantic import BaseModel, Field
@@ -49,7 +49,8 @@ class GestionCitaIncidenciaResumen(BaseModel):
     estado_cita_label: Optional[str] = None
     estado_inquilino: Optional[str] = None
     estado_inquilino_label: Optional[str] = None
-
+    resultado_visita: Optional[str] = None
+    resultado_visita_label: Optional[str] = None
 
 class GestionHistorialEstadoIncidenciaItem(BaseModel):
     id: str
@@ -80,6 +81,8 @@ class GestionCitaIncidenciaItem(BaseModel):
     confirmada_por_persona_nombre: Optional[str] = None
     fecha_confirmacion: Optional[datetime] = None
     motivo_reprogramacion: Optional[str] = None
+    resultado_visita: Optional[str] = None
+    resultado_visita_label: Optional[str] = None
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
 
@@ -218,4 +221,88 @@ class GestionIncidenciaUpdateRequest(BaseModel):
 class GestionIncidenciaUpdateResponse(BaseModel):
     ok: bool = True
     incidencia: GestionIncidenciaDetailResponse
+    mensaje: Optional[str] = None
+
+class GestionIncidentQuoteSummary(BaseModel):
+    id: str
+    incidencia_id: str
+    proveedor_id: str
+    importe: float
+    moneda: str
+    descripcion: Optional[str] = None
+    valido_hasta: Optional[date] = None
+    estado: str
+    fecha_envio: datetime
+    fecha_revision: Optional[datetime] = None
+    enviado_por_persona_id: Optional[str] = None
+    revisado_por_persona_id: Optional[str] = None
+    nota_aprobacion: Optional[str] = None
+    nota_rechazo: Optional[str] = None
+
+
+class GestionVisitResultRequest(BaseModel):
+    gestor_persona_id: str
+    cita_id: str
+    resultado_visita: str
+    nota: str
+    visible_para_inquilino: bool = False
+
+
+class GestionVisitResultResponse(BaseModel):
+    ok: bool = True
+    incidencia: GestionIncidenciaResumen
+    cita: Optional[GestionCitaIncidenciaResumen] = None
+    mensaje: Optional[str] = None
+
+
+class GestionCreateIncidentQuoteRequest(BaseModel):
+    gestor_persona_id: str
+    proveedor_id: str
+    importe: float
+    moneda: str
+    descripcion: str
+    valido_hasta: Optional[datetime] = None
+    nota: Optional[str] = None
+
+
+class GestionCreateIncidentQuoteResponse(BaseModel):
+    ok: bool = True
+    incidencia: GestionIncidenciaResumen
+    presupuesto: GestionIncidentQuoteSummary
+    mensaje: Optional[str] = None
+
+
+class GestionDecideIncidentQuoteRequest(BaseModel):
+    propietario_persona_id: str
+    decision: str
+    nota: str
+
+
+class GestionDecideIncidentQuoteResponse(BaseModel):
+    ok: bool = True
+    incidencia: GestionIncidenciaResumen
+    presupuesto: GestionIncidentQuoteSummary
+    mensaje: Optional[str] = None
+
+
+class GestionTenantResolutionConfirmationRequest(BaseModel):
+    inquilino_persona_id: str
+    confirmado: bool
+    nota: str
+
+
+class GestionTenantResolutionConfirmationResponse(BaseModel):
+    ok: bool = True
+    incidencia: GestionIncidenciaResumen
+    mensaje: Optional[str] = None
+
+
+class GestionCloseIncidentRequest(BaseModel):
+    gestor_persona_id: str
+    nota: str
+
+
+class GestionCloseIncidentResponse(BaseModel):
+    ok: bool = True
+    incidencia: GestionIncidenciaResumen
     mensaje: Optional[str] = None

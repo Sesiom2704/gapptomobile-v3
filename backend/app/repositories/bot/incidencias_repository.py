@@ -1,6 +1,6 @@
 """
 Ruta: backend/app/repositories/bot/incidencias_repository.py
-Versión: 1.2.0
+Versión: 1.3.0
 Descripción:
 Capa de acceso a datos para incidencias del dominio BOT.
 
@@ -19,6 +19,12 @@ Funcionalidades incluidas:
 - Actualización de estado/confirmación de citas
 - Listado de proveedores
 - Alta mínima de proveedor para flujo BOT
+- Fase 4.3C:
+  - Registro de notas de incidencia
+  - Lectura y alta de presupuestos
+  - Actualización de revisión de presupuesto
+  - Resultado de visita sobre cita
+  - Fecha de cierre de incidencia
 
 Notas de diseño:
 - Esta capa no debe contener reglas de negocio complejas.
@@ -216,8 +222,31 @@ class IncidenciasBotRepository:
         self.db.add(historial)
         return historial
 
+    def create_nota_incidencia(
+        self,
+        *,
+        nota_id: str,
+        incidencia_id: str,
+        autor_persona_id: Optional[str],
+        autor_rol: Optional[str],
+        tipo_nota: str,
+        nota: str,
+        visible_para_inquilino: bool,
+    ) -> models.NotaIncidencia:
+        row = models.NotaIncidencia(
+            id=nota_id,
+            incidencia_id=incidencia_id,
+            autor_persona_id=autor_persona_id,
+            autor_rol=autor_rol,
+            tipo_nota=tipo_nota,
+            nota=nota,
+            visible_para_inquilino=visible_para_inquilino,
+        )
+        self.db.add(row)
+        return row
+
     # ==========================================================
-    # Escritura operativa 4.3A / 4.3B
+    # Escritura operativa 4.3A / 4.3B / 4.3C
     # ==========================================================
 
     def create_cita_incidencia(
@@ -306,6 +335,15 @@ class IncidenciasBotRepository:
         cita.updated_at = datetime.utcnow()
         return cita
 
+    def update_cita_resultado_visita(
+        self,
+        cita: models.CitaIncidencia,
+        resultado_visita: Optional[str],
+    ) -> models.CitaIncidencia:
+        cita.resultado_visita = resultado_visita
+        cita.updated_at = datetime.utcnow()
+        return cita
+
     def close_active_assignments_by_tipo(
         self,
         *,
@@ -367,6 +405,14 @@ class IncidenciasBotRepository:
         incidencia.proveedor_actual_id = proveedor_actual_id
         return incidencia
 
+    def update_incidencia_fecha_cierre(
+        self,
+        incidencia: models.Incidencia,
+        fecha_cierre: Optional[datetime],
+    ) -> models.Incidencia:
+        incidencia.fecha_cierre = fecha_cierre
+        return incidencia
+
     def create_asignacion_incidencia(
         self,
         *,
@@ -397,6 +443,56 @@ class IncidenciasBotRepository:
         )
         self.db.add(asignacion)
         return asignacion
+
+    def create_presupuesto_incidencia(
+        self,
+        *,
+        presupuesto_id: str,
+        incidencia_id: str,
+        proveedor_id: str,
+        importe,
+        moneda: str,
+        descripcion: Optional[str],
+        valido_hasta,
+        estado: str,
+        enviado_por_persona_id: Optional[str],
+        fecha_envio: datetime,
+    ) -> models.PresupuestoIncidencia:
+        presupuesto = models.PresupuestoIncidencia(
+            id=presupuesto_id,
+            incidencia_id=incidencia_id,
+            proveedor_id=proveedor_id,
+            importe=importe,
+            moneda=moneda,
+            descripcion=descripcion,
+            valido_hasta=valido_hasta,
+            estado=estado,
+            enviado_por_persona_id=enviado_por_persona_id,
+            fecha_envio=fecha_envio,
+            revisado_por_persona_id=None,
+            fecha_revision=None,
+            nota_aprobacion=None,
+            nota_rechazo=None,
+        )
+        self.db.add(presupuesto)
+        return presupuesto
+
+    def update_presupuesto_revision(
+        self,
+        *,
+        presupuesto: models.PresupuestoIncidencia,
+        estado: str,
+        revisado_por_persona_id: Optional[str],
+        fecha_revision: Optional[datetime],
+        nota_aprobacion: Optional[str],
+        nota_rechazo: Optional[str],
+    ) -> models.PresupuestoIncidencia:
+        presupuesto.estado = estado
+        presupuesto.revisado_por_persona_id = revisado_por_persona_id
+        presupuesto.fecha_revision = fecha_revision
+        presupuesto.nota_aprobacion = nota_aprobacion
+        presupuesto.nota_rechazo = nota_rechazo
+        return presupuesto
 
     def create_proveedor_bot(
         self,
@@ -563,6 +659,52 @@ class IncidenciasBotRepository:
                 models.CitaIncidencia.estado_cita.in_(["proposed", "confirmed", "rescheduled"]),
             )
             .order_by(models.CitaIncidencia.created_at.desc())
+            .first()
+        )
+
+    def get_cita_by_id(
+        self,
+        cita_id: str,
+    ) -> Optional[models.CitaIncidencia]:
+        return (
+            self.db.query(models.CitaIncidencia)
+            .options(joinedload(models.CitaIncidencia.proveedor))
+            .filter(models.CitaIncidencia.id == cita_id)
+            .first()
+        )
+
+    def list_presupuestos_by_incidencia(
+        self,
+        incidencia_id: str,
+    ) -> list[models.PresupuestoIncidencia]:
+        return (
+            self.db.query(models.PresupuestoIncidencia)
+            .filter(models.PresupuestoIncidencia.incidencia_id == incidencia_id)
+            .order_by(models.PresupuestoIncidencia.fecha_envio.desc())
+            .all()
+        )
+
+    def get_presupuesto_by_id(
+        self,
+        presupuesto_id: str,
+    ) -> Optional[models.PresupuestoIncidencia]:
+        return (
+            self.db.query(models.PresupuestoIncidencia)
+            .filter(models.PresupuestoIncidencia.id == presupuesto_id)
+            .first()
+        )
+
+    def get_active_sent_presupuesto_by_incidencia(
+        self,
+        incidencia_id: str,
+    ) -> Optional[models.PresupuestoIncidencia]:
+        return (
+            self.db.query(models.PresupuestoIncidencia)
+            .filter(
+                models.PresupuestoIncidencia.incidencia_id == incidencia_id,
+                models.PresupuestoIncidencia.estado == "sent",
+            )
+            .order_by(models.PresupuestoIncidencia.fecha_envio.desc())
             .first()
         )
 

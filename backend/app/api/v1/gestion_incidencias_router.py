@@ -1,6 +1,6 @@
 """
 Ruta: backend/app/api/v1/gestion_incidencias_router.py
-Versión: 1.2.0
+Versión: 1.3.0
 Descripción:
 API v1 de gestión de incidencias para GAPPTO.
 
@@ -12,9 +12,16 @@ Funcionalidades incluidas:
 - Asignación de proveedor a incidencia.
 - Programación de visita para incidencia.
 - Actualización controlada de campos editables de incidencia.
-- NUEVO: exposición de referencia de vivienda y dirección completa.
-- NUEVO: validación y actualización controlada de estado.
-- NUEVO: corrección de trazabilidad de historial al cambiar estado.
+- Exposición de referencia de vivienda y dirección completa.
+- Validación y actualización controlada de estado.
+- Corrección de trazabilidad de historial al cambiar estado.
+- Exposición de resultado de visita en resumen y detalle.
+- Exposición de presupuestos asociados a la incidencia.
+- Registro de resultado de visita desde GAPPTO como apoyo operativo.
+- Creación de presupuesto asociado a incidencia.
+- Decisión de presupuesto por propietario autenticado.
+- Confirmación de resolución por inquilino autenticado.
+- Cierre formal de incidencia por gestor autenticado.
 
 Notas de diseño:
 - Esta capa está pensada para GAPPTO Mobile / backoffice, no para BOT.
@@ -24,6 +31,8 @@ Notas de diseño:
   - se intenta resolver una persona gestora activa del contrato perteneciente al usuario;
   - si no existe una única persona gestora clara, se devuelve error funcional explícito.
 - La edición controlada no permite cambios de proveedor/cita por este endpoint.
+- GAPPTO sigue siendo canal de consulta y apoyo; estos endpoints se exponen
+  para mantener coherencia funcional y reutilización de lógica de dominio.
 """
 
 from __future__ import annotations
@@ -41,7 +50,14 @@ from backend.app.db import models
 from backend.app.schemas.gestion_incidencias import (
     GestionCitaIncidenciaItem,
     GestionCitaIncidenciaResumen,
+    GestionCloseIncidentRequest,
+    GestionCloseIncidentResponse,
+    GestionCreateIncidentQuoteRequest,
+    GestionCreateIncidentQuoteResponse,
+    GestionDecideIncidentQuoteRequest,
+    GestionDecideIncidentQuoteResponse,
     GestionHistorialEstadoIncidenciaItem,
+    GestionIncidentQuoteSummary,
     GestionIncidenciaActionResponse,
     GestionIncidenciaAssignProviderRequest,
     GestionIncidenciaDetailResponse,
@@ -55,11 +71,17 @@ from backend.app.schemas.gestion_incidencias import (
     GestionProveedorListItem,
     GestionProveedorListResponse,
     GestionResponsableActual,
+    GestionTenantResolutionConfirmationRequest,
+    GestionTenantResolutionConfirmationResponse,
+    GestionVisitResultRequest,
+    GestionVisitResultResponse,
 )
 from backend.app.utils.bot.ids import (
     generate_asignacion_incidencia_id,
     generate_cita_incidencia_id,
     generate_historial_estado_id,
+    generate_nota_incidencia_id,
+    generate_presupuesto_incidencia_id,
 )
 
 router = APIRouter(
@@ -83,7 +105,17 @@ ASIGNACION_ESTADO_ACTIVE = "active"
 ASIGNACION_ESTADO_INACTIVE = "inactive"
 
 CITA_ESTADO_PROPOSED = "proposed"
+CITA_ESTADO_COMPLETED = "completed"
+CITA_ESTADO_MISSED = "missed"
+
 CITA_INQUILINO_PENDING_CONFIRMATION = "pending_confirmation"
+
+VISIT_RESULT_LABELS = {
+    "resolved_on_visit": "Resuelto en visita",
+    "requires_quote": "Requiere presupuesto",
+    "requires_new_visit": "Requiere nueva visita",
+    "no_show": "No asistencia",
+}
 
 ESTADO_LABELS = {
     "new": "Nueva",
@@ -169,6 +201,12 @@ def _estado_inquilino_label(value: Optional[str]) -> str:
     return ESTADO_INQUILINO_LABELS.get(value, value)
 
 
+def _resultado_visita_label(value: Optional[str]) -> Optional[str]:
+    if not value:
+        return None
+    return VISIT_RESULT_LABELS.get(value, value)
+
+
 def _validate_estado_incidencia(value: Optional[str]) -> str:
     normalized = str(value or "").strip().lower()
     if normalized not in ALLOWED_ESTADOS:
@@ -246,6 +284,7 @@ def _get_owned_incidencia_with_context(
             joinedload(models.Incidencia.citas).joinedload(models.CitaIncidencia.proveedor),
             joinedload(models.Incidencia.citas).joinedload(models.CitaIncidencia.propuesta_por),
             joinedload(models.Incidencia.citas).joinedload(models.CitaIncidencia.confirmada_por),
+            joinedload(models.Incidencia.presupuestos),
         )
         .join(models.Contrato, models.Contrato.id == models.Incidencia.contrato_id)
         .filter(
@@ -335,6 +374,92 @@ def _resolve_actor_persona_for_contrato(
     )
 
 
+def _resolve_owner_persona_for_contrato(
+    db: Session,
+    contrato_id: str,
+    current_user: models.User,
+) -> models.Persona:
+    rows = (
+        db.query(models.Persona)
+        .join(
+            models.ContratoParticipante,
+            models.ContratoParticipante.persona_id == models.Persona.id,
+        )
+        .filter(
+            models.Persona.user_id == current_user.id,
+            models.Persona.inactivatedon.is_(None),
+            models.ContratoParticipante.contrato_id == contrato_id,
+            models.ContratoParticipante.rol == "propietario",
+            models.ContratoParticipante.inactivatedon.is_(None),
+        )
+        .order_by(models.Persona.createon.asc())
+        .all()
+    )
+
+    if len(rows) == 1:
+        return rows[0]
+
+    if len(rows) == 0:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                "No se ha podido resolver una persona propietaria activa del contrato "
+                "para el usuario autenticado."
+            ),
+        )
+
+    raise HTTPException(
+        status_code=status.HTTP_400_BAD_REQUEST,
+        detail=(
+            "Hay más de una persona propietaria activa del contrato asociada al usuario. "
+            "No se puede decidir automáticamente cuál usar para trazabilidad."
+        ),
+    )
+
+
+def _resolve_tenant_persona_for_contrato(
+    db: Session,
+    contrato_id: str,
+    current_user: models.User,
+) -> models.Persona:
+    rows = (
+        db.query(models.Persona)
+        .join(
+            models.ContratoParticipante,
+            models.ContratoParticipante.persona_id == models.Persona.id,
+        )
+        .filter(
+            models.Persona.user_id == current_user.id,
+            models.Persona.inactivatedon.is_(None),
+            models.ContratoParticipante.contrato_id == contrato_id,
+            models.ContratoParticipante.rol == "inquilino",
+            models.ContratoParticipante.inactivatedon.is_(None),
+        )
+        .order_by(models.Persona.createon.asc())
+        .all()
+    )
+
+    if len(rows) == 1:
+        return rows[0]
+
+    if len(rows) == 0:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                "No se ha podido resolver una persona inquilina activa del contrato "
+                "para el usuario autenticado."
+            ),
+        )
+
+    raise HTTPException(
+        status_code=status.HTTP_400_BAD_REQUEST,
+        detail=(
+            "Hay más de una persona inquilina activa del contrato asociada al usuario. "
+            "No se puede decidir automáticamente cuál usar para trazabilidad."
+        ),
+    )
+
+
 def _build_incidencia_resumen(incidencia: models.Incidencia) -> GestionIncidenciaResumen:
     patrimonio = getattr(incidencia, "patrimonio", None)
 
@@ -373,6 +498,8 @@ def _build_cita_resumen(
         estado_cita_label=_estado_cita_label(cita.estado_cita),
         estado_inquilino=cita.estado_inquilino,
         estado_inquilino_label=_estado_inquilino_label(cita.estado_inquilino),
+        resultado_visita=getattr(cita, "resultado_visita", None),
+        resultado_visita_label=_resultado_visita_label(getattr(cita, "resultado_visita", None)),
     )
 
 
@@ -418,8 +545,31 @@ def _build_cita_item(
         confirmada_por_persona_nombre=confirmada_por.nombre_completo if confirmada_por else None,
         fecha_confirmacion=cita.fecha_confirmacion,
         motivo_reprogramacion=cita.motivo_reprogramacion,
+        resultado_visita=getattr(cita, "resultado_visita", None),
+        resultado_visita_label=_resultado_visita_label(getattr(cita, "resultado_visita", None)),
         created_at=cita.created_at,
         updated_at=cita.updated_at,
+    )
+
+
+def _build_quote_summary(
+    presupuesto: models.PresupuestoIncidencia,
+) -> GestionIncidentQuoteSummary:
+    return GestionIncidentQuoteSummary(
+        id=presupuesto.id,
+        incidencia_id=presupuesto.incidencia_id,
+        proveedor_id=presupuesto.proveedor_id,
+        importe=float(presupuesto.importe),
+        moneda=presupuesto.moneda,
+        descripcion=presupuesto.descripcion,
+        valido_hasta=presupuesto.valido_hasta,
+        estado=presupuesto.estado,
+        fecha_envio=presupuesto.fecha_envio,
+        fecha_revision=presupuesto.fecha_revision,
+        enviado_por_persona_id=presupuesto.enviado_por_persona_id,
+        revisado_por_persona_id=presupuesto.revisado_por_persona_id,
+        nota_aprobacion=presupuesto.nota_aprobacion,
+        nota_rechazo=presupuesto.nota_rechazo,
     )
 
 
@@ -433,6 +583,71 @@ def _get_last_cita_by_incidencia(
         .filter(models.CitaIncidencia.incidencia_id == incidencia_id)
         .order_by(models.CitaIncidencia.created_at.desc())
         .first()
+    )
+
+
+def _get_quote_by_id_and_incidencia(
+    db: Session,
+    incidencia_id: str,
+    presupuesto_id: str,
+) -> models.PresupuestoIncidencia:
+    row = (
+        db.query(models.PresupuestoIncidencia)
+        .filter(
+            models.PresupuestoIncidencia.id == presupuesto_id,
+            models.PresupuestoIncidencia.incidencia_id == incidencia_id,
+        )
+        .first()
+    )
+    if not row:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Presupuesto no encontrado",
+        )
+    return row
+
+
+def _insert_nota_incidencia(
+    db: Session,
+    incidencia_id: str,
+    autor_persona_id: Optional[str],
+    autor_rol: Optional[str],
+    tipo_nota: str,
+    nota: str,
+    visible_para_inquilino: bool = False,
+) -> None:
+    db.add(
+        models.NotaIncidencia(
+            id=generate_nota_incidencia_id(),
+            incidencia_id=incidencia_id,
+            autor_persona_id=autor_persona_id,
+            autor_rol=autor_rol,
+            tipo_nota=tipo_nota,
+            nota=nota,
+            visible_para_inquilino=visible_para_inquilino,
+        )
+    )
+
+
+def _insert_historial_estado(
+    db: Session,
+    incidencia_id: str,
+    estado_anterior: Optional[str],
+    estado_nuevo: str,
+    persona_cambia_id: Optional[str],
+    rol_cambia: Optional[str],
+    nota: str,
+) -> None:
+    db.add(
+        models.HistorialEstadoIncidencia(
+            id=generate_historial_estado_id(),
+            incidencia_id=incidencia_id,
+            estado_anterior=estado_anterior,
+            estado_nuevo=estado_nuevo,
+            persona_cambia_id=persona_cambia_id,
+            rol_cambia=rol_cambia,
+            nota=nota,
+        )
     )
 
 
@@ -474,6 +689,12 @@ def _build_incidencia_detail_response(
         reverse=True,
     )
 
+    presupuestos_sorted = sorted(
+        list(getattr(incidencia, "presupuestos", []) or []),
+        key=lambda x: x.fecha_envio or datetime.min,
+        reverse=True,
+    )
+
     patrimonio = getattr(incidencia, "patrimonio", None)
 
     return GestionIncidenciaDetailResponse(
@@ -502,6 +723,7 @@ def _build_incidencia_detail_response(
         ultima_cita=_build_cita_resumen(ultima_cita),
         historial=[_build_historial_item(x) for x in historial_sorted],
         citas=[_build_cita_item(x) for x in citas_sorted],
+        presupuestos=[_build_quote_summary(x) for x in presupuestos_sorted],
     )
 
 
@@ -947,4 +1169,467 @@ def schedule_visit(
         incidencia=_build_incidencia_resumen(incidencia),
         cita=_build_cita_resumen(cita),
         mensaje="Visita programada correctamente",
+    )
+
+
+@router.post(
+    "/incidencias/{incidencia_id}/visit-results",
+    response_model=GestionVisitResultResponse,
+    summary="Registrar resultado de visita para una incidencia",
+)
+def register_visit_result(
+    incidencia_id: str,
+    payload: GestionVisitResultRequest,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(require_user),
+):
+    incidencia = _get_owned_incidencia_with_context(db, incidencia_id, current_user)
+    actor_persona = _resolve_actor_persona_for_contrato(db, incidencia.contrato_id, current_user)
+
+    if actor_persona.id != payload.gestor_persona_id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="La persona gestora indicada no corresponde con el usuario autenticado",
+        )
+
+    cita = (
+        db.query(models.CitaIncidencia)
+        .options(joinedload(models.CitaIncidencia.proveedor))
+        .filter(
+            models.CitaIncidencia.id == payload.cita_id,
+            models.CitaIncidencia.incidencia_id == incidencia_id,
+        )
+        .first()
+    )
+    if not cita:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Cita no encontrada para la incidencia",
+        )
+
+    if cita.estado_cita == "cancelled":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="No se puede registrar resultado sobre una cita cancelada",
+        )
+
+    estado_anterior = incidencia.estado
+
+    if payload.resultado_visita == "resolved_on_visit":
+        nuevo_estado = "pending_follow_up"
+        nuevo_estado_cita = CITA_ESTADO_COMPLETED
+    elif payload.resultado_visita == "requires_quote":
+        nuevo_estado = "awaiting_quote"
+        nuevo_estado_cita = CITA_ESTADO_COMPLETED
+    elif payload.resultado_visita == "requires_new_visit":
+        nuevo_estado = "pending_follow_up"
+        nuevo_estado_cita = CITA_ESTADO_COMPLETED
+    elif payload.resultado_visita == "no_show":
+        nuevo_estado = "pending_follow_up"
+        nuevo_estado_cita = CITA_ESTADO_MISSED
+    else:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Resultado de visita no válido",
+        )
+
+    try:
+        cita.estado_cita = nuevo_estado_cita
+        cita.resultado_visita = payload.resultado_visita
+
+        incidencia.estado = nuevo_estado
+        incidencia.gestor_actual_id = actor_persona.id
+
+        _insert_nota_incidencia(
+            db=db,
+            incidencia_id=incidencia.id,
+            autor_persona_id=actor_persona.id,
+            autor_rol="gestor",
+            tipo_nota="resultado_visita",
+            nota=payload.nota,
+            visible_para_inquilino=payload.visible_para_inquilino,
+        )
+
+        _insert_historial_estado(
+            db=db,
+            incidencia_id=incidencia.id,
+            estado_anterior=estado_anterior,
+            estado_nuevo=nuevo_estado,
+            persona_cambia_id=actor_persona.id,
+            rol_cambia="gestor",
+            nota=f"Resultado de visita registrado: {payload.resultado_visita}. {payload.nota}",
+        )
+
+        db.commit()
+        db.refresh(incidencia)
+        db.refresh(cita)
+
+    except IntegrityError as e:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Error de integridad al registrar resultado de visita: {str(e.orig)}",
+        )
+    except Exception:
+        db.rollback()
+        raise
+
+    incidencia = _get_owned_incidencia_with_context(db, incidencia_id, current_user)
+
+    return GestionVisitResultResponse(
+        ok=True,
+        incidencia=_build_incidencia_resumen(incidencia),
+        cita=_build_cita_resumen(cita),
+        mensaje="Resultado de visita registrado correctamente",
+    )
+
+
+@router.post(
+    "/incidencias/{incidencia_id}/quotes",
+    response_model=GestionCreateIncidentQuoteResponse,
+    summary="Crear presupuesto para una incidencia",
+)
+def create_incident_quote(
+    incidencia_id: str,
+    payload: GestionCreateIncidentQuoteRequest,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(require_user),
+):
+    incidencia = _get_owned_incidencia_with_context(db, incidencia_id, current_user)
+    actor_persona = _resolve_actor_persona_for_contrato(db, incidencia.contrato_id, current_user)
+    _get_owned_proveedor(db, payload.proveedor_id, current_user)
+
+    if actor_persona.id != payload.gestor_persona_id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="La persona gestora indicada no corresponde con el usuario autenticado",
+        )
+
+    if incidencia.estado != "awaiting_quote":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="La incidencia no está en estado pendiente de presupuesto",
+        )
+
+    active_sent_quote = (
+        db.query(models.PresupuestoIncidencia)
+        .filter(
+            models.PresupuestoIncidencia.incidencia_id == incidencia_id,
+            models.PresupuestoIncidencia.estado == "sent",
+        )
+        .first()
+    )
+    if active_sent_quote:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Ya existe un presupuesto enviado pendiente de decisión",
+        )
+
+    estado_anterior = incidencia.estado
+
+    try:
+        presupuesto = models.PresupuestoIncidencia(
+            id=generate_presupuesto_incidencia_id(),
+            incidencia_id=incidencia.id,
+            proveedor_id=payload.proveedor_id,
+            importe=payload.importe,
+            moneda=payload.moneda,
+            descripcion=payload.descripcion,
+            valido_hasta=payload.valido_hasta,
+            estado="sent",
+            enviado_por_persona_id=actor_persona.id,
+            fecha_envio=datetime.utcnow(),
+            revisado_por_persona_id=None,
+            fecha_revision=None,
+            nota_aprobacion=None,
+            nota_rechazo=None,
+        )
+        db.add(presupuesto)
+
+        incidencia.estado = "quote_submitted"
+        incidencia.gestor_actual_id = actor_persona.id
+        incidencia.proveedor_actual_id = payload.proveedor_id
+
+        _insert_nota_incidencia(
+            db=db,
+            incidencia_id=incidencia.id,
+            autor_persona_id=actor_persona.id,
+            autor_rol="gestor",
+            tipo_nota="presupuesto_emitido",
+            nota=payload.nota or f"Presupuesto emitido por importe {payload.importe} {payload.moneda}",
+            visible_para_inquilino=False,
+        )
+
+        _insert_historial_estado(
+            db=db,
+            incidencia_id=incidencia.id,
+            estado_anterior=estado_anterior,
+            estado_nuevo="quote_submitted",
+            persona_cambia_id=actor_persona.id,
+            rol_cambia="gestor",
+            nota=payload.nota or "Presupuesto generado y enviado para aprobación",
+        )
+
+        db.commit()
+        db.refresh(incidencia)
+        db.refresh(presupuesto)
+
+    except IntegrityError as e:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Error de integridad al crear presupuesto: {str(e.orig)}",
+        )
+    except Exception:
+        db.rollback()
+        raise
+
+    incidencia = _get_owned_incidencia_with_context(db, incidencia_id, current_user)
+
+    return GestionCreateIncidentQuoteResponse(
+        ok=True,
+        incidencia=_build_incidencia_resumen(incidencia),
+        presupuesto=_build_quote_summary(presupuesto),
+        mensaje="Presupuesto creado correctamente",
+    )
+
+
+@router.post(
+    "/incidencias/{incidencia_id}/quotes/{presupuesto_id}/decision",
+    response_model=GestionDecideIncidentQuoteResponse,
+    summary="Aprobar o rechazar presupuesto de una incidencia",
+)
+def decide_incident_quote(
+    incidencia_id: str,
+    presupuesto_id: str,
+    payload: GestionDecideIncidentQuoteRequest,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(require_user),
+):
+    incidencia = _get_owned_incidencia_with_context(db, incidencia_id, current_user)
+    owner_persona = _resolve_owner_persona_for_contrato(db, incidencia.contrato_id, current_user)
+
+    if owner_persona.id != payload.propietario_persona_id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="La persona propietaria indicada no corresponde con el usuario autenticado",
+        )
+
+    presupuesto = _get_quote_by_id_and_incidencia(db, incidencia_id, presupuesto_id)
+
+    if presupuesto.estado != "sent":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="El presupuesto ya no está pendiente de decisión",
+        )
+
+    estado_anterior = incidencia.estado
+
+    try:
+        presupuesto.revisado_por_persona_id = owner_persona.id
+        presupuesto.fecha_revision = datetime.utcnow()
+
+        if payload.decision == "approved":
+            presupuesto.estado = "approved"
+            presupuesto.nota_aprobacion = payload.nota
+            incidencia.estado = "quote_approved"
+            nuevo_estado = "quote_approved"
+            tipo_nota = "presupuesto_aprobado"
+        else:
+            presupuesto.estado = "rejected"
+            presupuesto.nota_rechazo = payload.nota
+            incidencia.estado = "awaiting_quote"
+            nuevo_estado = "awaiting_quote"
+            tipo_nota = "presupuesto_rechazado"
+
+        _insert_nota_incidencia(
+            db=db,
+            incidencia_id=incidencia.id,
+            autor_persona_id=owner_persona.id,
+            autor_rol="propietario",
+            tipo_nota=tipo_nota,
+            nota=payload.nota,
+            visible_para_inquilino=False,
+        )
+
+        _insert_historial_estado(
+            db=db,
+            incidencia_id=incidencia.id,
+            estado_anterior=estado_anterior,
+            estado_nuevo=nuevo_estado,
+            persona_cambia_id=owner_persona.id,
+            rol_cambia="inquilino" if False else "supervisor",
+            nota=f"Decisión sobre presupuesto: {payload.decision}. {payload.nota}",
+        )
+
+        db.commit()
+        db.refresh(incidencia)
+        db.refresh(presupuesto)
+
+    except IntegrityError as e:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Error de integridad al decidir presupuesto: {str(e.orig)}",
+        )
+    except Exception:
+        db.rollback()
+        raise
+
+    incidencia = _get_owned_incidencia_with_context(db, incidencia_id, current_user)
+
+    return GestionDecideIncidentQuoteResponse(
+        ok=True,
+        incidencia=_build_incidencia_resumen(incidencia),
+        presupuesto=_build_quote_summary(presupuesto),
+        mensaje="Decisión de presupuesto registrada correctamente",
+    )
+
+
+@router.post(
+    "/incidencias/{incidencia_id}/tenant-confirmation",
+    response_model=GestionTenantResolutionConfirmationResponse,
+    summary="Confirmar resolución de incidencia por inquilino",
+)
+def confirm_tenant_resolution(
+    incidencia_id: str,
+    payload: GestionTenantResolutionConfirmationRequest,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(require_user),
+):
+    incidencia = _get_owned_incidencia_with_context(db, incidencia_id, current_user)
+    tenant_persona = _resolve_tenant_persona_for_contrato(db, incidencia.contrato_id, current_user)
+
+    if tenant_persona.id != payload.inquilino_persona_id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="La persona inquilina indicada no corresponde con el usuario autenticado",
+        )
+
+    if incidencia.estado != "pending_follow_up":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="La incidencia no está pendiente de confirmación/seguimiento",
+        )
+
+    estado_anterior = incidencia.estado
+    nuevo_estado = "resolved" if payload.confirmado else "pending_follow_up"
+
+    try:
+        incidencia.estado = nuevo_estado
+
+        _insert_nota_incidencia(
+            db=db,
+            incidencia_id=incidencia.id,
+            autor_persona_id=tenant_persona.id,
+            autor_rol="inquilino",
+            tipo_nota="confirmacion_inquilino",
+            nota=payload.nota,
+            visible_para_inquilino=True,
+        )
+
+        _insert_historial_estado(
+            db=db,
+            incidencia_id=incidencia.id,
+            estado_anterior=estado_anterior,
+            estado_nuevo=nuevo_estado,
+            persona_cambia_id=tenant_persona.id,
+            rol_cambia="inquilino",
+            nota=f"Confirmación de inquilino: {'confirmado' if payload.confirmado else 'no confirmado'}. {payload.nota}",
+        )
+
+        db.commit()
+        db.refresh(incidencia)
+
+    except IntegrityError as e:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Error de integridad al confirmar resolución: {str(e.orig)}",
+        )
+    except Exception:
+        db.rollback()
+        raise
+
+    incidencia = _get_owned_incidencia_with_context(db, incidencia_id, current_user)
+
+    return GestionTenantResolutionConfirmationResponse(
+        ok=True,
+        incidencia=_build_incidencia_resumen(incidencia),
+        mensaje="Confirmación de resolución registrada correctamente",
+    )
+
+
+@router.post(
+    "/incidencias/{incidencia_id}/close",
+    response_model=GestionCloseIncidentResponse,
+    summary="Cerrar formalmente una incidencia por gestor",
+)
+def close_incident(
+    incidencia_id: str,
+    payload: GestionCloseIncidentRequest,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(require_user),
+):
+    incidencia = _get_owned_incidencia_with_context(db, incidencia_id, current_user)
+    actor_persona = _resolve_actor_persona_for_contrato(db, incidencia.contrato_id, current_user)
+
+    if actor_persona.id != payload.gestor_persona_id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="La persona gestora indicada no corresponde con el usuario autenticado",
+        )
+
+    if incidencia.estado != "resolved":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Solo se puede cerrar una incidencia que ya esté resuelta",
+        )
+
+    estado_anterior = incidencia.estado
+
+    try:
+        incidencia.estado = "closed"
+        incidencia.fecha_cierre = datetime.utcnow()
+        incidencia.gestor_actual_id = actor_persona.id
+
+        _insert_nota_incidencia(
+            db=db,
+            incidencia_id=incidencia.id,
+            autor_persona_id=actor_persona.id,
+            autor_rol="gestor",
+            tipo_nota="cierre_incidencia",
+            nota=payload.nota,
+            visible_para_inquilino=False,
+        )
+
+        _insert_historial_estado(
+            db=db,
+            incidencia_id=incidencia.id,
+            estado_anterior=estado_anterior,
+            estado_nuevo="closed",
+            persona_cambia_id=actor_persona.id,
+            rol_cambia="gestor",
+            nota=payload.nota,
+        )
+
+        db.commit()
+        db.refresh(incidencia)
+
+    except IntegrityError as e:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Error de integridad al cerrar incidencia: {str(e.orig)}",
+        )
+    except Exception:
+        db.rollback()
+        raise
+
+    incidencia = _get_owned_incidencia_with_context(db, incidencia_id, current_user)
+
+    return GestionCloseIncidentResponse(
+        ok=True,
+        incidencia=_build_incidencia_resumen(incidencia),
+        mensaje="Incidencia cerrada correctamente",
     )

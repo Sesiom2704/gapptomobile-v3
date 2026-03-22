@@ -2,7 +2,7 @@
 
 """
 Ruta: backend/app/db/models.py
-Versión: 1.4.0
+Versión: 1.5.0
 Descripción:
 Modelos SQLAlchemy unificados de GapptoMobile.
 
@@ -18,6 +18,7 @@ Cambios de esta versión:
 - NUEVO: FK `proveedores.subsegmento_id` enlazada ORM con la nueva tabla
 - NUEVO: relación `subsegmento_rel` en Proveedor
 - NUEVO: relación inversa `proveedores` en TipoSubsegmentoProveedor
+- NUEVO: NotaIncidencia, PresupuestoIncidencia, CitaIncidencia.resultado_visita
 
 Notas:
 - Se mantiene el campo legado `subsegmento` en Proveedor como texto libre
@@ -271,6 +272,12 @@ def gen_contrato_id() -> str:
 def gen_contrato_participante_id() -> str:
     return "CPR-" + uuid4().hex[:10].upper()
 
+def gen_nota_incidencia_id() -> str:
+    return "NOT-" + uuid4().hex[:12].upper()
+
+
+def gen_presupuesto_incidencia_id() -> str:
+    return "PRE-" + uuid4().hex[:12].upper()
 
 class RendimientoPatrimonio(Base):
     __tablename__ = "rendimiento_patrimonio"
@@ -400,6 +407,24 @@ class Persona(Base):
         "CitaIncidencia",
         foreign_keys="CitaIncidencia.confirmada_por_persona_id",
         back_populates="confirmada_por",
+    )
+
+    notas_incidencia = relationship(
+        "NotaIncidencia",
+        foreign_keys="NotaIncidencia.autor_persona_id",
+        back_populates="autor_persona",
+    )
+
+    presupuestos_enviados = relationship(
+        "PresupuestoIncidencia",
+        foreign_keys="PresupuestoIncidencia.enviado_por_persona_id",
+        back_populates="enviado_por_persona",
+    )
+
+    presupuestos_revisados = relationship(
+        "PresupuestoIncidencia",
+        foreign_keys="PresupuestoIncidencia.revisado_por_persona_id",
+        back_populates="revisado_por_persona",
     )
 
 
@@ -607,6 +632,12 @@ class Proveedor(Base):
     citas_incidencia = relationship(
         "CitaIncidencia",
         foreign_keys="CitaIncidencia.proveedor_id",
+        back_populates="proveedor",
+    )
+
+    presupuestos_incidencia = relationship(
+        "PresupuestoIncidencia",
+        foreign_keys="PresupuestoIncidencia.proveedor_id",
         back_populates="proveedor",
     )
 
@@ -986,6 +1017,18 @@ class Incidencia(Base):
         cascade="all, delete-orphan",
     )
 
+    notas = relationship(
+        "NotaIncidencia",
+        back_populates="incidencia",
+        cascade="all, delete-orphan",
+    )
+
+    presupuestos = relationship(
+        "PresupuestoIncidencia",
+        back_populates="incidencia",
+        cascade="all, delete-orphan",
+    )
+
 
 class HistorialEstadoIncidencia(Base):
     """
@@ -1111,6 +1154,8 @@ class CitaIncidencia(Base):
 
     fecha_confirmacion = Column(DateTime(timezone=True), nullable=True)
     motivo_reprogramacion = Column(Text, nullable=True)
+    
+    resultado_visita = Column(String, nullable=True, index=True)
 
     created_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
     updated_at = Column(
@@ -1140,6 +1185,76 @@ class CitaIncidencia(Base):
         back_populates="citas_incidencia_confirmadas",
     )
 
+class NotaIncidencia(Base):
+    """
+    Nota operativa o funcional asociada a una incidencia.
+    """
+    __tablename__ = "notas_incidencias"
+    __table_args__ = {"extend_existing": True}
+
+    id = Column(String, primary_key=True, index=True, default=gen_nota_incidencia_id)
+
+    incidencia_id = Column(String, ForeignKey("incidencias.id"), nullable=False, index=True)
+    autor_persona_id = Column(String, ForeignKey("personas.id"), nullable=True, index=True)
+
+    autor_rol = Column(String, nullable=True, index=True)
+    tipo_nota = Column(String, nullable=False, index=True)
+    nota = Column(Text, nullable=False)
+    visible_para_inquilino = Column(Boolean, nullable=False, server_default=text("false"))
+
+    fecha_creacion = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+    incidencia = relationship("Incidencia", back_populates="notas")
+    autor_persona = relationship(
+        "Persona",
+        foreign_keys=[autor_persona_id],
+        back_populates="notas_incidencia",
+    )
+
+class PresupuestoIncidencia(Base):
+    """
+    Presupuesto asociado a una incidencia.
+    """
+    __tablename__ = "presupuestos_incidencias"
+    __table_args__ = {"extend_existing": True}
+
+    id = Column(String, primary_key=True, index=True, default=gen_presupuesto_incidencia_id)
+
+    incidencia_id = Column(String, ForeignKey("incidencias.id"), nullable=False, index=True)
+    proveedor_id = Column(String, ForeignKey("proveedores.id"), nullable=False, index=True)
+
+    importe = Column(Numeric(12, 2), nullable=False)
+    moneda = Column(String, nullable=False)
+    descripcion = Column(Text, nullable=True)
+    valido_hasta = Column(Date, nullable=True)
+
+    estado = Column(String, nullable=False, index=True)
+
+    enviado_por_persona_id = Column(String, ForeignKey("personas.id"), nullable=True, index=True)
+    fecha_envio = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+    revisado_por_persona_id = Column(String, ForeignKey("personas.id"), nullable=True, index=True)
+    fecha_revision = Column(DateTime(timezone=True), nullable=True)
+
+    nota_aprobacion = Column(Text, nullable=True)
+    nota_rechazo = Column(Text, nullable=True)
+
+    incidencia = relationship("Incidencia", back_populates="presupuestos")
+    proveedor = relationship(
+        "Proveedor",
+        foreign_keys=[proveedor_id],
+        back_populates="presupuestos_incidencia",
+    )
+    enviado_por_persona = relationship(
+        "Persona",
+        foreign_keys=[enviado_por_persona_id],
+        back_populates="presupuestos_enviados",
+    )
+    revisado_por_persona = relationship(
+        "Persona",
+        foreign_keys=[revisado_por_persona_id],
+        back_populates="presupuestos_revisados",
+    )
 
 # =============================================
 # 4.1 ROLES
