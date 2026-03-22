@@ -59,12 +59,13 @@ PRIORITY = [
     # Catálogos / tipos
     "public.tipo_segmentos_gasto",
     "public.tipo_ramas_proveedores",
+    "public.tipo_subsegmentos_proveedores",   # <-- FALTABA ESTA
     "public.tipo_ramas_gasto",
     "public.tipo_ramas_ingreso",
     "public.tipo_ingreso",
     "public.tipo_gasto",
 
-    # ✅ Ubicaciones (FK de proveedores.localidad_id -> localidades.id)
+    # Ubicaciones
     "public.paises",
     "public.regiones",
     "public.localidades",
