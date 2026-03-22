@@ -1,70 +1,79 @@
-""""
+"""
+/**
  * Ruta: backend/app/api/v1/ubicaciones_router.py
- * Versión: 2.1.1
+ * Versión: 2.1.3
  * Descripción:
- * Router de ubicaciones (Países / Regiones / Localidades) de GapptoMobile v3.
+ * Router centralizado de ubicaciones de GapptoMobile v3.
  *
  * Responsabilidades:
  * - Listar y crear países, regiones y localidades.
- * - Mantener idempotencia por nombre y relación.
- * - Diagnosticar la base de datos activa.
- * - Reparar la secuencia de localidades si hay colisión de PK.
+ * - Mantener idempotencia por nombre y relación jerárquica.
+ * - Mapear errores de integridad a respuestas HTTP controladas.
+ * - Diagnosticar qué base de datos está usando el backend.
+ * - Re-sincronizar la secuencia de localidades ante colisión de PK.
  * - Devolver localidades con contexto completo (región y país).
- 
-Router: Ubicaciones (Países / Regiones / Localidades)
-
-Ajuste principal de esta versión:
-- Compatibilidad correcta con SQLAlchemy al ejecutar SQL textual usando text(...).
-
-Motivo:
-- En create_localidad, si hay colisión de PK y entra el autofix de secuencia,
-  el uso de db.execute("SELECT ...") con strings puede provocar un 500
-  en lugar de reparar o devolver un error controlado.
+ *
+ * Notas:
+ * - Mantiene la funcionalidad ya implementada en países, regiones y localidades.
+ * - Añade compatibilidad correcta con SQLAlchemy para SQL textual usando text(...).
+ * - Añade trazas controladas para aislar errores no capturados en create_localidad.
+ * - Conserva la idempotencia por (nombre, region_id) y el refetch con contexto.
+ * - Añade refresh() tras commit en localidad para asegurar id disponible y sesión consistente.
+ */
 """
 
 from typing import List, Optional
+import traceback
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import text
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session, joinedload
-from sqlalchemy.exc import IntegrityError
 
-from backend.app.db.session import get_db
-from backend.app.db import models
 from backend.app.api.v1.auth_router import require_user
-
+from backend.app.db import models
+from backend.app.db.session import get_db
+from backend.app.schemas.localidad import LocalidadCreate, LocalidadWithContext
 from backend.app.schemas.pais import Pais, PaisCreate
 from backend.app.schemas.region import Region, RegionCreate
-from backend.app.schemas.localidad import LocalidadWithContext, LocalidadCreate
 
 
 router = APIRouter(prefix="/ubicaciones", tags=["ubicaciones"])
 
 
-# -------------------------
+# =========================
 # Helpers
-# -------------------------
+# =========================
+
 def _norm(s: Optional[str]) -> str:
-    """Normaliza texto: trim + upper."""
+    """
+    Normaliza texto para comparaciones/altas:
+    - trim
+    - upper
+
+    Se mantiene para:
+    - idempotencia consistente
+    - evitar duplicados por mayúsculas/minúsculas
+    """
     return (s or "").strip().upper()
 
 
 def _is_duplicate_integrity_error(e: IntegrityError) -> bool:
     """
-    Heurística: detecta duplicados UNIQUE/PK por texto del driver.
+    Heurística multi-motor para detectar duplicados UNIQUE/PK.
     """
     raw = str(getattr(e, "orig", e)).lower()
     return (
-        ("duplicate key" in raw and "unique" in raw)  # Postgres
-        or ("unique constraint" in raw)              # SQLite
-        or ("duplicate entry" in raw)                # MySQL
+        ("duplicate key" in raw and "unique" in raw)   # Postgres
+        or ("unique constraint" in raw)                # SQLite
+        or ("duplicate entry" in raw)                  # MySQL
     )
 
 
 def _is_localidades_pk_collision(e: IntegrityError) -> bool:
     """
-    Detecta específicamente la colisión por PRIMARY KEY de localidades.
-    Ejemplo:
+    Detecta específicamente colisión de PK de localidades.
+    Ejemplo Postgres:
       duplicate key value violates unique constraint "localidades_pkey"
       DETAIL: Key (id)=(3) already exists.
     """
@@ -72,7 +81,7 @@ def _is_localidades_pk_collision(e: IntegrityError) -> bool:
     return "localidades_pkey" in raw and "key (id)=" in raw
 
 
-def _integrity_to_http(e: IntegrityError, duplicate_msg: str):
+def _integrity_to_http(e: IntegrityError, duplicate_msg: str) -> None:
     """
     Mapea IntegrityError a HTTP controlado:
     - 409 si es duplicado
@@ -89,42 +98,54 @@ def _integrity_to_http(e: IntegrityError, duplicate_msg: str):
 
 def _debug_db_identity(db: Session) -> None:
     """
-    Diagnóstico mínimo: confirma qué DB está usando el backend.
+    Diagnóstico mínimo para confirmar qué base de datos está usando el backend.
 
-    Si esto no coincide con donde ejecutaste tus queries manuales,
-    ya tienes la causa del problema.
+    Esto es útil cuando:
+    - el móvil apunta a staging
+    - las queries manuales se ejecutan en otra base
+    - parece que la secuencia o los ids no cuadran
     """
     try:
         row = db.execute(
             text(
-                "SELECT current_database() AS db, inet_server_addr() AS addr, inet_server_port() AS port"
+                """
+                SELECT
+                    current_database() AS db,
+                    inet_server_addr() AS addr,
+                    inet_server_port() AS port
+                """
             )
         ).mappings().first()
+
         if row:
-            print(f"[ubicaciones][db] current_database={row['db']} addr={row['addr']} port={row['port']}")
+            print(
+                f"[ubicaciones][db] current_database={row['db']} "
+                f"addr={row['addr']} port={row['port']}"
+            )
     except Exception as ex:
-        # No romper nada por logging
-        print("[ubicaciones][db] No se pudo obtener identidad BD:", ex)
+        # No romper el flujo por logging diagnóstico
+        print("[ubicaciones][db] No se pudo obtener identidad BD:", repr(ex))
+        traceback.print_exc()
 
 
 def _heal_localidades_sequence(db: Session) -> None:
     """
-    Repara la secuencia de localidades para que el próximo nextval sea MAX(id)+1.
+    Repara la secuencia de localidades para que nextval() devuelva MAX(id)+1.
 
-    Esto es seguro y estándar cuando hay imports/restores que desincronizan secuencias.
-
-    Importante:
-    - Usamos public.localidades_id_seq según tu query 2.
-    - Ajusta si tu secuencia real difiere.
+    Es útil cuando hubo:
+    - imports manuales
+    - restores
+    - inserts históricos con ids forzados
+    - desincronización entre tabla y secuencia
     """
-    max_id = db.execute(
+    max_id_row = db.execute(
         text("SELECT COALESCE(MAX(id), 0) AS m FROM localidades")
-    ).mappings().first()["m"]
+    ).mappings().first()
+    max_id = int(max_id_row["m"] if max_id_row and max_id_row["m"] is not None else 0)
 
-    # setval(seq, value, is_called=true) => next nextval() devolverá value+1
     db.execute(
         text("SELECT setval('public.localidades_id_seq', :v, true)"),
-        {"v": int(max_id)},
+        {"v": max_id},
     )
 
     print(f"[ubicaciones] Heal sequence localidades_id_seq -> setval({max_id}, true)")
@@ -171,6 +192,7 @@ def create_pais(
         db.commit()
     except IntegrityError as e:
         db.rollback()
+
         existente = db.query(models.Pais).filter(models.Pais.nombre == nombre).first()
         if existente:
             return existente
@@ -240,6 +262,7 @@ def create_region(
         db.commit()
     except IntegrityError as e:
         db.rollback()
+
         existente = (
             db.query(models.Region)
             .filter(models.Region.nombre == nombre, models.Region.pais_id == payload.pais_id)
@@ -303,110 +326,163 @@ def create_localidad(
     user=Depends(require_user),
 ):
     """
-    Crea localidad (idempotente por nombre+region_id).
+    Crea localidad de forma idempotente por (nombre, region_id).
 
-    Protección adicional:
-    - Si detectamos colisión PK (localidades_pkey), reparamos secuencia y reintentamos 1 vez.
-    - Además imprimimos la identidad de BD (para descartar DB equivocada).
+    Comportamiento conservado:
+    - si ya existe la localidad en esa región, devuelve la existente
+    - si hay colisión de PK, intenta reparar la secuencia y reintenta una vez
+    - devuelve la localidad con contexto completo (region + pais)
+
+    Mejora añadida:
+    - captura y loguea SQLAlchemyError y Exception para que staging no oculte la causa real
     """
-    _debug_db_identity(db)
-
-    nombre = _norm(payload.nombre)
-    if not nombre:
-        raise HTTPException(status_code=422, detail="El nombre de la localidad es obligatorio.")
-
-    # Región debe existir
-    region = (
-        db.query(models.Region)
-        .options(joinedload(models.Region.pais))
-        .filter(models.Region.id == payload.region_id)
-        .first()
-    )
-    if not region:
-        raise HTTPException(status_code=404, detail="Región no encontrada.")
-
-    # Idempotencia por (nombre, region_id)
-    existente = (
-        db.query(models.Localidad)
-        .filter(models.Localidad.nombre == nombre, models.Localidad.region_id == payload.region_id)
-        .first()
-    )
-    if existente:
-        return (
-            db.query(models.Localidad)
-            .options(joinedload(models.Localidad.region).joinedload(models.Region.pais))
-            .filter(models.Localidad.id == existente.id)
-            .first()
-        )
-
-    def _insert_once() -> models.Localidad:
-        obj = models.Localidad(nombre=nombre, region_id=payload.region_id)
-        # Aseguramos que NUNCA se fuerza id desde Python
-        obj.id = None  # defensivo
-        db.add(obj)
-        db.commit()
-        return obj
-
     try:
-        obj = _insert_once()
-    except IntegrityError as e:
-        db.rollback()
+        _debug_db_identity(db)
 
-        # Carrera concurrente: puede existir ahora
-        existente2 = (
-            db.query(models.Localidad)
-            .filter(models.Localidad.nombre == nombre, models.Localidad.region_id == payload.region_id)
+        nombre = _norm(payload.nombre)
+        if not nombre:
+            raise HTTPException(status_code=422, detail="El nombre de la localidad es obligatorio.")
+
+        # Verificación de región existente
+        region = (
+            db.query(models.Region)
+            .options(joinedload(models.Region.pais))
+            .filter(models.Region.id == payload.region_id)
             .first()
         )
-        if existente2:
+        if not region:
+            raise HTTPException(status_code=404, detail="Región no encontrada.")
+
+        # Idempotencia por (nombre, region_id)
+        existente = (
+            db.query(models.Localidad)
+            .filter(
+                models.Localidad.nombre == nombre,
+                models.Localidad.region_id == payload.region_id,
+            )
+            .first()
+        )
+        if existente:
             return (
                 db.query(models.Localidad)
                 .options(joinedload(models.Localidad.region).joinedload(models.Region.pais))
-                .filter(models.Localidad.id == existente2.id)
+                .filter(models.Localidad.id == existente.id)
                 .first()
             )
 
-        # Caso especial: colisión PK => secuencia desincronizada o BD distinta
-        if _is_localidades_pk_collision(e):
-            print(
-                "[ubicaciones] IntegrityError create_localidad (PK collision):",
-                str(getattr(e, "orig", e)),
-                "payload=",
-                payload,
+        def _insert_once() -> models.Localidad:
+            """
+            Inserta una localidad una sola vez.
+            Se mantiene la defensa para no forzar id desde Python.
+            """
+            obj = models.Localidad(nombre=nombre, region_id=payload.region_id)
+            obj.id = None  # defensivo
+            db.add(obj)
+            db.commit()
+            db.refresh(obj)
+            return obj
+
+        try:
+            obj = _insert_once()
+
+        except IntegrityError as e:
+            db.rollback()
+
+            # Puede haberse creado en una carrera concurrente
+            existente2 = (
+                db.query(models.Localidad)
+                .filter(
+                    models.Localidad.nombre == nombre,
+                    models.Localidad.region_id == payload.region_id,
+                )
+                .first()
             )
+            if existente2:
+                return (
+                    db.query(models.Localidad)
+                    .options(joinedload(models.Localidad.region).joinedload(models.Region.pais))
+                    .filter(models.Localidad.id == existente2.id)
+                    .first()
+                )
 
-            # Diagnóstico adicional: nextval real desde ESTA conexión
-            try:
-                nxt = db.execute(
-                    text("SELECT nextval('public.localidades_id_seq') AS n")
-                ).mappings().first()["n"]
-                print(f"[ubicaciones] Debug nextval(public.localidades_id_seq) (antes heal) -> {nxt}")
-            except Exception as ex:
-                print("[ubicaciones] No se pudo ejecutar nextval diagnóstico:", ex)
+            # Caso especial: colisión PK => intentamos reparar secuencia y reintentar una vez
+            if _is_localidades_pk_collision(e):
+                print(
+                    "[ubicaciones] IntegrityError create_localidad (PK collision):",
+                    str(getattr(e, "orig", e)),
+                    "payload=",
+                    payload,
+                )
 
-            # Heal sequence y reintento 1 vez
-            _heal_localidades_sequence(db)
-            try:
-                obj = _insert_once()
-            except IntegrityError as e2:
-                db.rollback()
-                print("[ubicaciones] IntegrityError tras heal+retry:", str(getattr(e2, "orig", e2)), "payload=", payload)
-                _integrity_to_http(e2, "No se ha podido crear la localidad (conflicto de datos).")
-        else:
-            print("[ubicaciones] IntegrityError create_localidad:", str(getattr(e, "orig", e)), "payload=", payload)
-            _integrity_to_http(e, "Ya existe una localidad con ese nombre en esa región.")
+                try:
+                    nxt_row = db.execute(
+                        text("SELECT nextval('public.localidades_id_seq') AS n")
+                    ).mappings().first()
+                    nxt = nxt_row["n"] if nxt_row else None
+                    print(f"[ubicaciones] Debug nextval(public.localidades_id_seq) (antes heal) -> {nxt}")
+                except Exception as ex:
+                    print("[ubicaciones] No se pudo ejecutar nextval diagnóstico:", repr(ex))
+                    traceback.print_exc()
 
-    # Refetch con contexto
-    created = (
-        db.query(models.Localidad)
-        .options(joinedload(models.Localidad.region).joinedload(models.Region.pais))
-        .filter(models.Localidad.id == obj.id)
-        .first()
-    )
-    if not created:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Localidad creada pero no se ha podido recuperar su contexto.",
+                _heal_localidades_sequence(db)
+
+                try:
+                    obj = _insert_once()
+                except IntegrityError as e2:
+                    db.rollback()
+                    print(
+                        "[ubicaciones] IntegrityError tras heal+retry:",
+                        str(getattr(e2, "orig", e2)),
+                        "payload=",
+                        payload,
+                    )
+                    _integrity_to_http(e2, "No se ha podido crear la localidad (conflicto de datos).")
+            else:
+                print(
+                    "[ubicaciones] IntegrityError create_localidad:",
+                    str(getattr(e, "orig", e)),
+                    "payload=",
+                    payload,
+                )
+                _integrity_to_http(e, "Ya existe una localidad con ese nombre en esa región.")
+
+        print(f"[ubicaciones] create_localidad commit OK -> obj.id={getattr(obj, 'id', None)}")
+
+        # Refetch con contexto completo para cumplir response_model y contrato frontend
+        created = (
+            db.query(models.Localidad)
+            .options(joinedload(models.Localidad.region).joinedload(models.Region.pais))
+            .filter(models.Localidad.id == obj.id)
+            .first()
         )
 
-    return created
+        print(f"[ubicaciones] create_localidad refetch -> found={created is not None}")
+
+        if not created:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Localidad creada pero no se ha podido recuperar su contexto.",
+            )
+
+        return created
+
+    except HTTPException:
+        raise
+
+    except SQLAlchemyError as e:
+        db.rollback()
+        print("[ubicaciones] SQLAlchemyError create_localidad:", repr(e))
+        traceback.print_exc()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error de base de datos al crear localidad: {type(e).__name__}",
+        )
+
+    except Exception as e:
+        db.rollback()
+        print("[ubicaciones] Exception create_localidad:", repr(e))
+        traceback.print_exc()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error inesperado al crear localidad: {type(e).__name__}",
+        )
