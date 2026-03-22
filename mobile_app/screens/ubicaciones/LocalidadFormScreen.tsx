@@ -537,14 +537,6 @@ export default function LocalidadFormScreen({ navigation, route }: Props) {
               </View>
             ) : null}
           </View>
-
-          <TouchableOpacity style={styles.saveButton} onPress={confirmCreateLocalidad}>
-            <Text style={styles.saveButtonText}>Crear y usar localidad</Text>
-          </TouchableOpacity>
-
-          <TouchableOpacity style={styles.secondaryButton} onPress={closeCreate}>
-            <Text style={styles.secondaryButtonText}>Cancelar</Text>
-          </TouchableOpacity>
         </FormSection>
       ) : null}
     </FormScreen>

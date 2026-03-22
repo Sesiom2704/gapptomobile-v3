@@ -1,24 +1,31 @@
-# backend/app/api/v1/ubicaciones_router.py
-"""
+""""
+ * Ruta: backend/app/api/v1/ubicaciones_router.py
+ * Versión: 2.1.1
+ * Descripción:
+ * Router de ubicaciones (Países / Regiones / Localidades) de GapptoMobile v3.
+ *
+ * Responsabilidades:
+ * - Listar y crear países, regiones y localidades.
+ * - Mantener idempotencia por nombre y relación.
+ * - Diagnosticar la base de datos activa.
+ * - Reparar la secuencia de localidades si hay colisión de PK.
+ * - Devolver localidades con contexto completo (región y país).
+ 
 Router: Ubicaciones (Países / Regiones / Localidades)
 
-Mejoras principales:
-1) Diagnóstico: imprime qué base de datos está usando el backend (current_database).
-2) Autofix: si al crear Localidad hay colisión de PK (localidades_pkey),
-   re-sincroniza la secuencia a MAX(id) y reintenta 1 vez.
-3) Mantiene idempotencia por (nombre, region_id) y el comportamiento previo.
+Ajuste principal de esta versión:
+- Compatibilidad correcta con SQLAlchemy al ejecutar SQL textual usando text(...).
 
-Nota sobre el bug observado:
-- Tus consultas SQL muestran secuencia correcta (last_value=17 => nextval debería ser 18).
-- Si el backend intenta insertar id=3, en práctica suele ser:
-    a) backend conectado a otra BD
-    b) secuencia en esa BD está desincronizada
-- Este código te lo confirma en logs, y lo repara si aplica.
+Motivo:
+- En create_localidad, si hay colisión de PK y entra el autofix de secuencia,
+  el uso de db.execute("SELECT ...") con strings puede provocar un 500
+  en lugar de reparar o devolver un error controlado.
 """
 
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
+from sqlalchemy import text
 from sqlalchemy.orm import Session, joinedload
 from sqlalchemy.exc import IntegrityError
 
@@ -89,7 +96,9 @@ def _debug_db_identity(db: Session) -> None:
     """
     try:
         row = db.execute(
-            "SELECT current_database() AS db, inet_server_addr() AS addr, inet_server_port() AS port"
+            text(
+                "SELECT current_database() AS db, inet_server_addr() AS addr, inet_server_port() AS port"
+            )
         ).mappings().first()
         if row:
             print(f"[ubicaciones][db] current_database={row['db']} addr={row['addr']} port={row['port']}")
@@ -108,9 +117,16 @@ def _heal_localidades_sequence(db: Session) -> None:
     - Usamos public.localidades_id_seq según tu query 2.
     - Ajusta si tu secuencia real difiere.
     """
-    max_id = db.execute("SELECT COALESCE(MAX(id), 0) AS m FROM localidades").mappings().first()["m"]
+    max_id = db.execute(
+        text("SELECT COALESCE(MAX(id), 0) AS m FROM localidades")
+    ).mappings().first()["m"]
+
     # setval(seq, value, is_called=true) => next nextval() devolverá value+1
-    db.execute("SELECT setval('public.localidades_id_seq', :v, true)", {"v": int(max_id)})
+    db.execute(
+        text("SELECT setval('public.localidades_id_seq', :v, true)"),
+        {"v": int(max_id)},
+    )
+
     print(f"[ubicaciones] Heal sequence localidades_id_seq -> setval({max_id}, true)")
 
 
@@ -361,7 +377,9 @@ def create_localidad(
 
             # Diagnóstico adicional: nextval real desde ESTA conexión
             try:
-                nxt = db.execute("SELECT nextval('public.localidades_id_seq') AS n").mappings().first()["n"]
+                nxt = db.execute(
+                    text("SELECT nextval('public.localidades_id_seq') AS n")
+                ).mappings().first()["n"]
                 print(f"[ubicaciones] Debug nextval(public.localidades_id_seq) (antes heal) -> {nxt}")
             except Exception as ex:
                 print("[ubicaciones] No se pudo ejecutar nextval diagnóstico:", ex)
