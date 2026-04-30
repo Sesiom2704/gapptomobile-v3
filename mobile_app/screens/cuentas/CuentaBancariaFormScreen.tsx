@@ -1,6 +1,6 @@
 /**
  * Ruta: mobile_app/screens/cuentas/CuentaBancariaFormScreen.tsx
- * Versión: 2.1.0
+ * Versión: 2.2.0
  * Descripción:
  * Formulario de creación y edición de cuentas bancarias.
  *
@@ -11,6 +11,12 @@
  * - Recuperar el proveedor creado y dejarlo seleccionado automáticamente.
  * - Mostrar botón de relaciones cuando exista associatedCount > 0.
  * - Renderizar el detalle de relaciones solo si realmente existe relationCounts.
+ * - Permitir informar participación de cuenta.
+ *
+ * Regla de participación:
+ * - 100 = cuenta propia completa.
+ * - 50 = cuenta compartida al 50%.
+ * - Este valor solo afecta a métricas de liquidez/patrimonio, no a movimientos reales.
  */
 
 import React, { useEffect, useMemo, useState } from 'react';
@@ -40,6 +46,17 @@ type RelationCountItem = {
   count: number;
 };
 
+function parsePercentText(raw: string): number | null {
+  const cleaned = String(raw ?? '').replace('%', '').replace(',', '.').trim();
+
+  if (!cleaned) return null;
+
+  const parsed = Number(cleaned);
+  if (!Number.isFinite(parsed)) return null;
+
+  return parsed;
+}
+
 export const CuentaBancariaFormScreen: React.FC<Props> = ({ navigation, route }) => {
   const styles = commonFormStyles;
 
@@ -53,24 +70,23 @@ export const CuentaBancariaFormScreen: React.FC<Props> = ({ navigation, route })
   const [liquidezInicialText, setLiquidezInicialText] = useState(
     String(editing?.liquidezInicial ?? '')
   );
+  const [participacionPctText, setParticipacionPctText] = useState(
+    String(editing?.participacionPct ?? 100)
+  );
   const [activo, setActivo] = useState<boolean>(editing?.activo ?? true);
 
   const [bancoId, setBancoId] = useState<string | null>(editing?.bancoId ?? null);
   const [bancos, setBancos] = useState<Proveedor[]>([]);
   const [bancoQuery, setBancoQuery] = useState('');
 
-  /**
-   * Rama de proveedores para bancos.
-   * Se mantiene el ID actual del proyecto.
-   */
   const BANCOS_RAMA_ID = 'BAN-TIPORAMAPROVEEDOR-8D1302BD';
 
   const relationItems = useMemo<RelationCountItem[]>(() => {
     const raw = Array.isArray((editing as any)?.relationCounts)
       ? ((editing as any).relationCounts as RelationCountItem[])
       : Array.isArray((editing as any)?.relation_counts)
-      ? ((editing as any).relation_counts as RelationCountItem[])
-      : [];
+        ? ((editing as any).relation_counts as RelationCountItem[])
+        : [];
 
     return raw.filter((rel) => Number(rel?.count ?? 0) > 0);
   }, [editing]);
@@ -104,11 +120,6 @@ export const CuentaBancariaFormScreen: React.FC<Props> = ({ navigation, route })
     void loadBancos();
   }, []);
 
-  /**
-   * Recupera resultados de formularios hijos.
-   * Caso soportado:
-   * - creación de proveedor banco desde el "+"
-   */
   useEffect(() => {
     const auxResult = route?.params?.auxResult;
     if (!auxResult) return;
@@ -150,6 +161,16 @@ export const CuentaBancariaFormScreen: React.FC<Props> = ({ navigation, route })
     return `${ref} - ${bankName}`;
   }, [referencia, bancoSelected?.nombre]);
 
+  const liquidezPonderadaPreview = useMemo(() => {
+    const liquidez = parseImporte(liquidezInicialText || '0');
+    const pct = parsePercentText(participacionPctText);
+
+    if (liquidez == null || Number.isNaN(liquidez)) return null;
+    if (pct == null || Number.isNaN(pct)) return null;
+
+    return liquidez * (pct / 100);
+  }, [liquidezInicialText, participacionPctText]);
+
   const bancosFiltrados = useMemo(() => {
     const term = bancoQuery.trim().toLowerCase();
     if (!term) return bancos.slice(0, 50);
@@ -174,6 +195,7 @@ export const CuentaBancariaFormScreen: React.FC<Props> = ({ navigation, route })
       bancoId,
       referencia,
       liquidezInicialText,
+      participacionPctText,
       activo,
     });
 
@@ -189,14 +211,25 @@ export const CuentaBancariaFormScreen: React.FC<Props> = ({ navigation, route })
       return;
     }
 
-    const parsed = parseImporte(liquidezInicialText || '0');
-    if (parsed == null || isNaN(parsed)) {
+    const parsedLiquidez = parseImporte(liquidezInicialText || '0');
+    if (parsedLiquidez == null || isNaN(parsedLiquidez)) {
       Alert.alert('Valor inválido', 'Liquidez inicial no válida.');
       return;
     }
 
-    if (parsed < 0) {
+    if (parsedLiquidez < 0) {
       Alert.alert('Valor inválido', 'Liquidez inicial no puede ser negativa.');
+      return;
+    }
+
+    const parsedParticipacion = parsePercentText(participacionPctText);
+    if (parsedParticipacion == null || isNaN(parsedParticipacion)) {
+      Alert.alert('Valor inválido', 'Participación no válida. Ejemplo: 100 o 50.');
+      return;
+    }
+
+    if (parsedParticipacion <= 0 || parsedParticipacion > 100) {
+      Alert.alert('Valor inválido', 'La participación debe estar entre 0,01% y 100%.');
       return;
     }
 
@@ -205,14 +238,16 @@ export const CuentaBancariaFormScreen: React.FC<Props> = ({ navigation, route })
         console.log('[CuentaBancariaForm] updateCuenta payload ->', {
           banco_id: bancoId,
           referencia: refFinal,
-          liquidez_inicial: parsed,
+          liquidez_inicial: parsedLiquidez,
+          participacion_pct: parsedParticipacion,
           activo,
         });
 
         await updateCuenta(editing.id, {
           banco_id: bancoId,
           referencia: refFinal,
-          liquidez_inicial: parsed,
+          liquidez_inicial: parsedLiquidez,
+          participacion_pct: parsedParticipacion,
           activo,
         });
 
@@ -224,14 +259,16 @@ export const CuentaBancariaFormScreen: React.FC<Props> = ({ navigation, route })
       console.log('[CuentaBancariaForm] createCuenta payload ->', {
         banco_id: bancoId,
         referencia: refFinal,
-        liquidez_inicial: parsed,
+        liquidez_inicial: parsedLiquidez,
+        participacion_pct: parsedParticipacion,
         activo,
       });
 
       await createCuenta({
         banco_id: bancoId,
         referencia: refFinal,
-        liquidez_inicial: parsed,
+        liquidez_inicial: parsedLiquidez,
+        participacion_pct: parsedParticipacion,
         activo,
       });
 
@@ -352,6 +389,32 @@ export const CuentaBancariaFormScreen: React.FC<Props> = ({ navigation, route })
           />
         </View>
 
+        <View style={styles.field}>
+          <Text style={styles.label}>Participación (%)</Text>
+          <TextInput
+            style={[styles.input, participacionPctText.trim() !== '' ? styles.inputFilled : null]}
+            placeholder="Ej: 100 o 50"
+            value={participacionPctText}
+            onChangeText={setParticipacionPctText}
+            keyboardType="decimal-pad"
+          />
+          <Text style={styles.helperText}>
+            100% si la cuenta es solo tuya. 50% si la cuenta es compartida a medias.
+          </Text>
+        </View>
+
+        {liquidezPonderadaPreview != null ? (
+          <View style={ui.previewBox}>
+            <Text style={ui.previewLabel}>Liquidez computable en Home</Text>
+            <Text style={ui.previewValue}>
+              {liquidezPonderadaPreview.toFixed(2).replace('.', ',')} €
+            </Text>
+            <Text style={ui.previewHelp}>
+              Este cálculo solo afecta a métricas. Los movimientos reales siguen usando el 100%.
+            </Text>
+          </View>
+        ) : null}
+
         <View
           style={[
             styles.field,
@@ -413,6 +476,30 @@ const ui = StyleSheet.create({
     color: colors.textPrimary,
     fontWeight: '600',
     fontSize: 15,
+  },
+  previewBox: {
+    marginBottom: spacing.md,
+    padding: spacing.md,
+    borderRadius: radius.lg,
+    borderWidth: 1,
+    borderColor: colors.border,
+    backgroundColor: colors.primarySoft,
+  },
+  previewLabel: {
+    fontSize: 12,
+    color: colors.textSecondary,
+    fontWeight: '600',
+  },
+  previewValue: {
+    marginTop: 4,
+    fontSize: 18,
+    fontWeight: '800',
+    color: colors.textPrimary,
+  },
+  previewHelp: {
+    marginTop: 4,
+    fontSize: 11,
+    color: colors.textSecondary,
   },
   relationRow: {
     flexDirection: 'row',

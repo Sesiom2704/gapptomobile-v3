@@ -1,6 +1,6 @@
 /**
  * Ruta: mobile_app/screens/auxiliares/AuxEntityFormScreen.tsx
- * Versión: 2.3.3
+ * Versión: 2.4.1
  * Descripción:
  * Formulario genérico para creación y edición de auxiliares y proveedores.
  *
@@ -11,6 +11,12 @@
  * - El botón de relaciones se muestra cuando existe associated_count > 0,
  *   aunque el detalle relation_counts no venga embebido todavía.
  * - La tabla solo se renderiza cuando existe detalle real cargado.
+ * - Se centraliza la creación jerárquica de ubicación usando ubicacionesFlow:
+ *   país -> comunidad/región -> localidad.
+ * - Se mantiene intacta la funcionalidad de auxiliares:
+ *   tipo_gasto, tipo_ingreso, tipo_ramas_proveedores y tipo_subsegmento_proveedor.
+ * - Se mantiene intacta la funcionalidad de proveedor:
+ *   rama, subsegmento, contacto, fiscal, ubicación, operativa, relaciones, guardar y eliminar.
  */
 
 import React, { useEffect, useMemo, useState } from 'react';
@@ -36,15 +42,18 @@ import {
 
 import {
   listLocalidades,
-  createPais,
-  createRegion,
-  createLocalidad,
   listPaises,
   listRegiones,
   LocalidadWithContext,
   Pais as PaisApi,
   Region as RegionApi,
 } from '../../services/ubicacionesApi';
+
+import {
+  ensurePaisFlow,
+  ensureRegionFlow,
+  ensureLocalidadFlow,
+} from '../../services/ubicacionesFlow';
 
 import { listRamasProveedores, RamaProveedor } from '../../services/ramasProveedoresApi';
 
@@ -847,100 +856,130 @@ export const AuxEntityFormScreen: React.FC<Props> = ({ navigation, route }) => {
     setBusquedaPais('');
   };
 
-  const ensurePaisCreatedIfNeeded = async (): Promise<number | null> => {
-    if (paisId) return paisId;
+    const ensurePaisCreatedIfNeeded = async (): Promise<number | null> => {
+    const result: any = await ensurePaisFlow({
+      paisId,
+      creatingPais,
+      newPaisText,
+      existingPaisText: pais,
+      setPaisId,
+      setPaisNombre: setPais,
+    } as any);
 
-    const nombrePais = (creatingPais ? newPaisText : pais).trim();
-    if (!nombrePais) return null;
+    const finalId = Number(result?.id ?? result?.paisId ?? result ?? 0);
+    const finalNombre = String(result?.nombre ?? result?.paisNombre ?? (newPaisText || pais || '')).trim();
 
-    const creado = await createPais({ nombre: nombrePais, codigo_iso: null });
-    setPaisId(creado.id);
-    setPais(creado.nombre);
+    if (!finalId) return null;
+
+    setPaisId(finalId);
+    if (finalNombre) setPais(finalNombre);
+
     setCreatingPais(false);
     setNewPaisText('');
 
     setPaisOptions((prev) => {
-      const m = new Map<number, PaisOption>();
-      for (const x of prev) m.set(x.id, x);
-      m.set(creado.id, { id: creado.id, nombre: creado.nombre });
-      return Array.from(m.values()).sort((a, b) => a.nombre.localeCompare(b.nombre));
+      const nombrePais = finalNombre || (newPaisText || pais).trim().toUpperCase();
+      const exists = prev.some((x) => x.id === finalId);
+
+      if (exists) {
+        return prev.map((x) => (x.id === finalId ? { ...x, nombre: x.nombre || nombrePais } : x));
+      }
+
+      return [...prev, { id: finalId, nombre: nombrePais }].sort((a, b) =>
+        a.nombre.localeCompare(b.nombre)
+      );
     });
 
-    return creado.id;
+    return finalId;
   };
 
   const ensureRegionCreatedIfNeeded = async (): Promise<number | null> => {
-    if (regionId) return regionId;
+    const result: any = await ensureRegionFlow({
+      regionId,
+      creatingRegion,
+      newRegionText,
+      existingRegionText: comunidad,
+      paisId,
+      ensurePais: ensurePaisCreatedIfNeeded,
+      setRegionId,
+      setRegionNombre: setComunidad,
+      setPaisId,
+      setPaisNombre: setPais,
+    } as any);
 
-    const nombreRegion = (creatingRegion ? newRegionText : comunidad).trim();
-    if (!nombreRegion) return null;
+    const finalId = Number(result?.id ?? result?.regionId ?? result ?? 0);
+    const finalNombre = String(result?.nombre ?? result?.regionNombre ?? (newRegionText || comunidad || '')).trim();
+    const finalPaisId = Number(result?.pais_id ?? result?.paisId ?? paisId ?? 0) || null;
+    const finalPaisNombre = String(result?.pais?.nombre ?? result?.paisNombre ?? pais ?? '').trim();
 
-    const pid = await ensurePaisCreatedIfNeeded();
-    if (!pid) {
-      Alert.alert('Campo requerido', 'Para crear una región debes indicar un país.');
-      return null;
-    }
+    if (!finalId) return null;
 
-    const creado = await createRegion({ nombre: nombreRegion, pais_id: pid });
-    setRegionId(creado.id);
-    setComunidad(creado.nombre);
-    setPaisId(creado.pais_id);
-    if ((creado as any)?.pais?.nombre) setPais((creado as any).pais.nombre);
+    setRegionId(finalId);
+    if (finalNombre) setComunidad(finalNombre);
+    if (finalPaisId) setPaisId(finalPaisId);
+    if (finalPaisNombre) setPais(finalPaisNombre);
 
     setCreatingRegion(false);
     setNewRegionText('');
 
     setRegionOptions((prev) => {
-      const m = new Map<number, RegionOption>();
-      for (const x of prev) m.set(x.id, x);
-      m.set(creado.id, {
-        id: creado.id,
-        nombre: creado.nombre,
-        paisId: creado.pais_id ?? null,
-        paisNombre: (creado as any)?.pais?.nombre ?? null,
-      });
-      return Array.from(m.values()).sort((a, b) => a.nombre.localeCompare(b.nombre));
+      const nombreRegion = finalNombre || (newRegionText || comunidad).trim().toUpperCase();
+      const nombrePais = finalPaisNombre || pais.trim().toUpperCase();
+      const exists = prev.some((x) => x.id === finalId);
+
+      if (exists) {
+        return prev.map((x) =>
+          x.id === finalId
+            ? {
+                ...x,
+                nombre: x.nombre || nombreRegion,
+                paisId: finalPaisId ?? x.paisId,
+                paisNombre: nombrePais || x.paisNombre,
+              }
+            : x
+        );
+      }
+
+      return [
+        ...prev,
+        {
+          id: finalId,
+          nombre: nombreRegion,
+          paisId: finalPaisId,
+          paisNombre: nombrePais || null,
+        },
+      ].sort((a, b) => a.nombre.localeCompare(b.nombre));
     });
 
-    return creado.id;
+    return finalId;
   };
 
   const ensureLocalidadCreatedIfNeeded = async (): Promise<number | null> => {
-    if (localidadId) return localidadId;
+    const result: any = await ensureLocalidadFlow({
+      localidadId,
+      creatingLocalidad,
+      newLocalidadText,
+      existingLocalidadText: localidad,
+      ensureRegion: ensureRegionCreatedIfNeeded,
+      setLocalidadId,
+      setLocalidadNombre: setLocalidad,
+      setRegionId,
+      setRegionNombre: setComunidad,
+      setPaisId,
+      setPaisNombre: setPais,
+    } as any);
 
-    const nombreLoc = (creatingLocalidad ? newLocalidadText : localidad).trim();
-    if (!nombreLoc) return null;
+    const finalId = Number(result?.id ?? result?.localidadId ?? result ?? 0);
 
-    const rid = await ensureRegionCreatedIfNeeded();
-    if (!rid) {
-      Alert.alert('Campo requerido', 'Para crear una localidad debes indicar una región.');
-      return null;
-    }
-
-    const creado = await createLocalidad({ nombre: nombreLoc, region_id: rid });
-
-    setLocalidadId(creado.id);
-    setLocalidad(creado.nombre);
-
-    const regionNombre = (creado as any)?.region?.nombre ?? '';
-    const paisNombre = (creado as any)?.region?.pais?.nombre ?? '';
-
-    setRegionId((creado as any)?.region?.id ?? rid);
-    setComunidad(regionNombre);
-    setPaisId((creado as any)?.region?.pais?.id ?? paisId ?? null);
-    setPais(paisNombre);
+    if (!finalId) return null;
 
     setCreatingLocalidad(false);
     setNewLocalidadText('');
+    setBusquedaLocalidad('');
+    setBusquedaRegion('');
+    setBusquedaPais('');
 
-    setLocalidadOptions((prev) => {
-      const exists = prev.some((x) => x.id === creado.id);
-      if (exists) return prev;
-      return [creado, ...prev].slice(0, 800);
-    });
-
-    buildRegionAndPaisOptionsFromLocalidades([creado]);
-    return creado.id;
+    return finalId;
   };
 
   const confirmNewPais = async () => {
@@ -1893,6 +1932,36 @@ export const AuxEntityFormScreen: React.FC<Props> = ({ navigation, route }) => {
               />
 
               {loadingRegiones ? <Text style={styles.helperText}>Cargando regiones...</Text> : null}
+
+              {creatingRegion ? (
+                <View style={{ marginTop: spacing.sm }}>
+                  <Text style={styles.helperText}>
+                    Nueva comunidad / región. Debes seleccionar o crear antes un país.
+                  </Text>
+
+                  <TextInput
+                    style={[styles.input, newRegionText.trim() !== '' ? styles.inputFilled : null]}
+                    placeholder="Ej: COMUNIDAD DE MADRID"
+                    value={newRegionText}
+                    onChangeText={setNewRegionText}
+                  />
+
+                  <View style={{ flexDirection: 'row', marginTop: spacing.sm, gap: 10 }}>
+                    <TouchableOpacity style={ui.inlinePrimaryBtn} onPress={confirmNewRegion}>
+                      <Text style={ui.inlinePrimaryText}>Crear región</Text>
+                    </TouchableOpacity>
+                    <TouchableOpacity
+                      style={ui.inlineSecondaryBtn}
+                      onPress={() => {
+                        setCreatingRegion(false);
+                        setNewRegionText('');
+                      }}
+                    >
+                      <Text style={ui.inlineSecondaryText}>Cancelar</Text>
+                    </TouchableOpacity>
+                  </View>
+                </View>
+              ) : null}
             </View>
 
             <View style={styles.field}>
@@ -1923,6 +1992,34 @@ export const AuxEntityFormScreen: React.FC<Props> = ({ navigation, route }) => {
               />
 
               {loadingPaises ? <Text style={styles.helperText}>Cargando países...</Text> : null}
+
+              {creatingPais ? (
+                <View style={{ marginTop: spacing.sm }}>
+                  <Text style={styles.helperText}>Nuevo país.</Text>
+
+                  <TextInput
+                    style={[styles.input, newPaisText.trim() !== '' ? styles.inputFilled : null]}
+                    placeholder="Ej: ESPAÑA"
+                    value={newPaisText}
+                    onChangeText={setNewPaisText}
+                  />
+
+                  <View style={{ flexDirection: 'row', marginTop: spacing.sm, gap: 10 }}>
+                    <TouchableOpacity style={ui.inlinePrimaryBtn} onPress={confirmNewPais}>
+                      <Text style={ui.inlinePrimaryText}>Crear país</Text>
+                    </TouchableOpacity>
+                    <TouchableOpacity
+                      style={ui.inlineSecondaryBtn}
+                      onPress={() => {
+                        setCreatingPais(false);
+                        setNewPaisText('');
+                      }}
+                    >
+                      <Text style={ui.inlineSecondaryText}>Cancelar</Text>
+                    </TouchableOpacity>
+                  </View>
+                </View>
+              ) : null}
             </View>
 
             <View style={styles.field}>

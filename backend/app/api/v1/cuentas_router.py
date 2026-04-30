@@ -1,6 +1,6 @@
 """
 Ruta: backend/app/api/v1/cuentas_router.py
-Versión: 2.1.0
+Versión: 2.2.0
 Descripción:
 API v1 - CUENTAS BANCARIAS
 
@@ -8,6 +8,7 @@ Responsabilidades:
 - Gestionar las cuentas bancarias del usuario autenticado.
 - Validar que el banco asociado sea de la rama 'Bancos y financieras'.
 - Exponer contadores reales de registros asociados.
+- Permitir configurar participación de cuenta.
 
 Endpoints:
 - GET    /api/v1/cuentas          -> listar cuentas
@@ -16,19 +17,12 @@ Endpoints:
 - PUT    /api/v1/cuentas/{id}     -> actualizar una cuenta
 - DELETE /api/v1/cuentas/{id}     -> eliminar una cuenta
 
-Cambios de esta versión:
-- Se añade:
-    * associated_count
-    * relation_counts
-- El contador se calcula desde relaciones reales:
-    * gastos
-    * ingresos
-    * gastos_cotidianos
-    * movimientos_origen
-    * movimientos_destino
-- Se ocultan del detalle las relaciones con count = 0.
-- Se mantiene el anagrama unificado:
-    "REFERENCIA - NOMBRE DEL BANCO"
+Regla de participación:
+- participacion_pct se guarda como porcentaje:
+    100 = cuenta propia completa
+    50  = cuenta compartida al 50%
+- No afecta a movimientos reales.
+- Se usa para calcular liquidez ponderada en Home.
 """
 
 from __future__ import annotations
@@ -63,33 +57,30 @@ router = APIRouter(
 )
 
 
-# ============================================================
-# Schemas locales (solo para CREATE)
-# ============================================================
-
 class CuentaBancariaCreateBody(BaseModel):
     """
     Body para CREATE.
 
-    Motivo:
-    - Evita 422 si el schema de create externo no coincide con este flujo.
-    - El backend siempre asigna user_id desde el usuario autenticado.
-
     Nota:
-    - Aceptamos user_id opcional por compatibilidad, pero se ignora.
+    - user_id opcional se acepta por compatibilidad, pero se ignora.
+    - liquidez_inicial ahora sí se persiste al crear.
+    - participacion_pct permite cuentas compartidas.
     """
     banco_id: str = Field(..., description="ID del proveedor (banco/financiera).")
     referencia: str = Field(
         ...,
         description="Etiqueta de la cuenta (ej. NÓMINA, GASTOS, CRÉDITO).",
     )
+    liquidez_inicial: Optional[float] = Field(0.0, description="Liquidez inicial de la cuenta.")
+    participacion_pct: float = Field(
+        100.0,
+        ge=0.01,
+        le=100.0,
+        description="Porcentaje de participación. 100=total, 50=mitad.",
+    )
     activo: Optional[bool] = Field(True, description="Estado activo/inactivo.")
     user_id: Optional[int] = Field(None, description="(Ignorado) Se toma del token.")
 
-
-# ============================================================
-# Helpers internos
-# ============================================================
 
 def _normalize_spaces(text: str) -> str:
     if not text:
@@ -98,15 +89,32 @@ def _normalize_spaces(text: str) -> str:
 
 
 def _build_anagrama(nombre_banco: str, referencia: str) -> str:
-    """
-    Regla unificada con la UI:
-    ANAGRAMA = "REFERENCIA - NOMBRE DEL BANCO"
-    """
     ref = _normalize_spaces(referencia or "")
     banco = _normalize_spaces(nombre_banco or "")
     if ref and banco:
         return f"{ref} - {banco}"
     return ref or banco
+
+
+def _safe_participacion_pct(value) -> float:
+    """
+    Normaliza participación de cuenta.
+
+    Compatibilidad:
+    - None o valores inválidos => 100
+    - Rango válido: 0.01 a 100
+    """
+    try:
+        val = float(value)
+    except Exception:
+        return 100.0
+
+    if val <= 0:
+        return 100.0
+    if val > 100:
+        return 100.0
+
+    return round(val, 2)
 
 
 def _get_cuenta_for_user(
@@ -162,16 +170,6 @@ def _get_cuenta_relation_maps(
     db: Session,
     current_user: models.User,
 ) -> dict[str, Dict[str, int]]:
-    """
-    Calcula relaciones reales por cuenta bancaria.
-
-    Relaciones consideradas:
-    - gastos
-    - ingresos
-    - gastos_cotidianos
-    - movimientos_origen
-    - movimientos_destino
-    """
     gastos_rows = (
         db.query(models.Gasto.cuenta_id, func.count(models.Gasto.id))
         .filter(
@@ -243,16 +241,13 @@ def _serialize_cuenta(
         "anagrama": obj.anagrama,
         "liquidez": float(obj.liquidez or 0),
         "liquidez_inicial": float(obj.liquidez_inicial or 0),
+        "participacion_pct": _safe_participacion_pct(getattr(obj, "participacion_pct", 100.0)),
         "user_id": int(obj.user_id),
         "activo": bool(obj.activo),
         "associated_count": int(associated_count or 0),
         "relation_counts": relation_counts or [],
     }
 
-
-# ============================================================
-# Endpoints
-# ============================================================
 
 @router.get(
     "/",
@@ -276,13 +271,6 @@ def list_cuentas_bancarias(
     db: Session = Depends(get_db),
     current_user: models.User = Depends(require_user),
 ):
-    """
-    Devuelve las cuentas bancarias del usuario autenticado.
-
-    Incluye:
-    - associated_count
-    - relation_counts
-    """
     q = (
         db.query(models.CuentaBancaria)
         .filter(models.CuentaBancaria.user_id == current_user.id)
@@ -378,14 +366,25 @@ def create_cuenta_bancaria(
 ):
     proveedor = ensure_proveedor_es_banco(db, cuenta_in.banco_id)
 
+    liquidez_inicial = float(cuenta_in.liquidez_inicial or 0.0)
+    if liquidez_inicial < 0:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="La liquidez inicial no puede ser negativa.",
+        )
+
     new_id = generate_cuenta_bancaria_id(db)
-    anagrama = _build_anagrama(proveedor.nombre, cuenta_in.referencia)
+    referencia = _normalize_spaces(cuenta_in.referencia).upper()
+    anagrama = _build_anagrama(proveedor.nombre, referencia)
 
     obj = models.CuentaBancaria(
         id=new_id,
         banco_id=cuenta_in.banco_id,
-        referencia=cuenta_in.referencia,
+        referencia=referencia,
         anagrama=anagrama,
+        liquidez_inicial=liquidez_inicial,
+        liquidez=liquidez_inicial,
+        participacion_pct=_safe_participacion_pct(cuenta_in.participacion_pct),
         user_id=current_user.id,
         activo=True if cuenta_in.activo is None else bool(cuenta_in.activo),
     )
@@ -419,7 +418,7 @@ def update_cuenta_bancaria(
         recalc_anagrama = True
 
     if cuenta_in.referencia is not None and cuenta_in.referencia != obj.referencia:
-        obj.referencia = cuenta_in.referencia
+        obj.referencia = _normalize_spaces(cuenta_in.referencia).upper()
         recalc_anagrama = True
 
     if cuenta_in.anagrama is not None:
@@ -427,10 +426,23 @@ def update_cuenta_bancaria(
         recalc_anagrama = False
 
     if getattr(cuenta_in, "liquidez", None) is not None:
+        if float(cuenta_in.liquidez) < 0:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="La liquidez no puede ser negativa.",
+            )
         obj.liquidez = float(cuenta_in.liquidez)
 
     if getattr(cuenta_in, "liquidez_inicial", None) is not None:
+        if float(cuenta_in.liquidez_inicial) < 0:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="La liquidez inicial no puede ser negativa.",
+            )
         obj.liquidez_inicial = float(cuenta_in.liquidez_inicial)
+
+    if getattr(cuenta_in, "participacion_pct", None) is not None:
+        obj.participacion_pct = _safe_participacion_pct(cuenta_in.participacion_pct)
 
     if getattr(cuenta_in, "activo", None) is not None:
         obj.activo = bool(cuenta_in.activo)

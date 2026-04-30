@@ -1,6 +1,6 @@
 """
 Ruta: backend/app/schemas/cuentas.py
-Versión: 2.0.0
+Versión: 2.1.0
 Descripción:
 Schemas Pydantic para cuentas bancarias de GapptoMobile v3.
 
@@ -8,10 +8,14 @@ Responsabilidades:
 - Definir contratos de lectura/escritura para cuentas bancarias.
 - Mantener compatibilidad con el flujo actual de creación/edición.
 - Añadir soporte para contadores reales de registros asociados.
+- Añadir soporte para participación de cuenta.
 
-Cambios de esta versión:
-- Se añade `associated_count` al schema de lectura.
-- No se altera el contrato de creación/actualización existente.
+Regla de participación:
+- participacion_pct se guarda como porcentaje:
+    100 = cuenta propia completa
+    50  = cuenta compartida al 50%
+- Esta participación solo afecta a métricas patrimoniales/liquidez.
+- No modifica movimientos reales de pagar/cobrar.
 """
 
 from __future__ import annotations
@@ -29,6 +33,12 @@ class CuentaBancariaBase(BaseModel):
         ...,
         description="Etiqueta de la cuenta (ej. NÓMINA, GASTOS, CRÉDITO).",
     )
+    participacion_pct: float = Field(
+        100.0,
+        ge=0.01,
+        le=100.0,
+        description="Porcentaje de participación sobre la cuenta. 100=total, 50=mitad.",
+    )
 
 
 class CuentaBancariaCreate(CuentaBancariaBase):
@@ -37,6 +47,7 @@ class CuentaBancariaCreate(CuentaBancariaBase):
     El backend asigna user_id según el usuario autenticado.
     """
     activo: Optional[bool] = Field(True, description="Si la cuenta está activa o no.")
+    liquidez_inicial: Optional[float] = Field(0.0, description="Liquidez inicial de la cuenta.")
 
 
 class CuentaBancariaUpdate(BaseModel):
@@ -48,6 +59,12 @@ class CuentaBancariaUpdate(BaseModel):
     anagrama: Optional[str] = None
     liquidez: Optional[float] = None
     liquidez_inicial: Optional[float] = None
+    participacion_pct: Optional[float] = Field(
+        None,
+        ge=0.01,
+        le=100.0,
+        description="Porcentaje de participación sobre la cuenta.",
+    )
     activo: Optional[bool] = None
 
     model_config = ConfigDict(from_attributes=True)
@@ -66,6 +83,7 @@ class CuentaBancariaRead(BaseModel):
     anagrama: Optional[str] = None
     liquidez: float = 0.0
     liquidez_inicial: float = 0.0
+    participacion_pct: float = 100.0
     user_id: int
     activo: bool = True
     associated_count: int = Field(0, description="Número real de registros asociados.")

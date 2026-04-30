@@ -1,14 +1,15 @@
 /**
  * Ruta: mobile_app/services/cuentasApi.ts
- * Versión: 2.1.0
+ * Versión: 2.2.0
  * Descripción:
  * Servicio centralizado para cuentas bancarias de GapptoMobile v3.
  *
  * Responsabilidades:
  * - Listar, obtener, crear, actualizar y eliminar cuentas bancarias.
  * - Mapear el contrato backend -> frontend.
- * - Exponer el contador real de registros asociados (`associated_count`).
- * - Mantener compatibilidad con detalle de relaciones (`relation_counts`).
+ * - Exponer el contador real de registros asociados.
+ * - Mantener compatibilidad con detalle de relaciones.
+ * - Añadir soporte para participación de cuenta.
  */
 
 import axios from 'axios';
@@ -27,6 +28,7 @@ export interface CuentaBancaria {
   anagrama: string | null;
   liquidezInicial: number;
   liquidez: number;
+  participacionPct: number;
   activo: boolean;
   associatedCount: number;
   relationCounts?: RelationCountItem[];
@@ -42,25 +44,23 @@ function mapRelationCountItem(data: any): RelationCountItem {
   };
 }
 
+function safeParticipacionPct(value: any): number {
+  const parsed = Number(value ?? 100);
+  if (!Number.isFinite(parsed) || parsed <= 0 || parsed > 100) return 100;
+  return parsed;
+}
+
 function mapCuentaRead(data: any): CuentaBancaria {
   const relationCounts: RelationCountItem[] | undefined = Array.isArray(data?.relation_counts)
-    ? data.relation_counts
-        .map(mapRelationCountItem)
-        .filter((item: RelationCountItem) => item.count > 0)
+    ? data.relation_counts.map(mapRelationCountItem).filter((item: RelationCountItem) => item.count > 0)
     : Array.isArray(data?.relationCounts)
-    ? data.relationCounts
-        .map(mapRelationCountItem)
-        .filter((item: RelationCountItem) => item.count > 0)
-    : undefined;
+      ? data.relationCounts.map(mapRelationCountItem).filter((item: RelationCountItem) => item.count > 0)
+      : undefined;
 
   const associatedCountFromDetail =
-    relationCounts?.reduce((acc: number, item: RelationCountItem) => {
-      return acc + Number(item.count ?? 0);
-    }, 0) ?? 0;
+    relationCounts?.reduce((acc: number, item: RelationCountItem) => acc + Number(item.count ?? 0), 0) ?? 0;
 
-  const associatedCountRaw = Number(
-    data?.associated_count ?? data?.associatedCount ?? 0
-  );
+  const associatedCountRaw = Number(data?.associated_count ?? data?.associatedCount ?? 0);
 
   return {
     id: String(data?.id ?? ''),
@@ -69,6 +69,7 @@ function mapCuentaRead(data: any): CuentaBancaria {
     anagrama: data?.anagrama ?? null,
     liquidezInicial: Number(data?.liquidez_inicial ?? data?.liquidezInicial ?? 0),
     liquidez: Number(data?.liquidez ?? 0),
+    participacionPct: safeParticipacionPct(data?.participacion_pct ?? data?.participacionPct),
     activo: Boolean(data?.activo ?? true),
     associatedCount: relationCounts?.length ? associatedCountFromDetail : associatedCountRaw,
     relationCounts,
@@ -132,6 +133,7 @@ export async function createCuenta(payload: {
   banco_id: string;
   referencia: string;
   liquidez_inicial: number;
+  participacion_pct?: number;
   activo?: boolean;
 }): Promise<CuentaBancaria> {
   try {
@@ -163,6 +165,7 @@ export async function updateCuenta(
     banco_id?: string;
     referencia?: string;
     liquidez_inicial?: number;
+    participacion_pct?: number;
     activo?: boolean;
   }
 ): Promise<CuentaBancaria> {

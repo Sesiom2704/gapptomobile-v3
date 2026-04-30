@@ -1,6 +1,6 @@
 /**
  * Ruta: mobile_app/screens/cuentasbancarias/CuentasBancariasListScreen.tsx
- * Versión: 2.0.1
+ * Versión: 2.1.0
  * Descripción:
  * Pantalla de listado de cuentas bancarias.
  *
@@ -8,11 +8,7 @@
  * - Mostrar las cuentas bancarias del usuario.
  * - Permitir búsqueda.
  * - Navegar a creación/edición.
- * - Mostrar liquidez, estado y contador real de registros asociados.
- *
- * Ajustes:
- * - Se añade export default del componente.
- * - Se mantiene lectura de associatedCount desde cuentasApi.
+ * - Mostrar liquidez, participación, estado y contador real de registros asociados.
  */
 
 import React, { useCallback, useMemo, useState } from 'react';
@@ -31,6 +27,12 @@ type Props = { navigation: any };
 function countLabel(count?: number | null, singular = 'registro', plural = 'registros') {
   const safe = Number(count ?? 0);
   return `${safe} ${safe === 1 ? singular : plural} asociados`;
+}
+
+function participationLabel(value?: number | null) {
+  const safe = Number(value ?? 100);
+  if (!Number.isFinite(safe)) return '100%';
+  return `${safe.toFixed(2).replace('.', ',')}%`;
 }
 
 export const CuentasBancariasListScreen: React.FC<Props> = ({ navigation }) => {
@@ -79,7 +81,7 @@ export const CuentasBancariasListScreen: React.FC<Props> = ({ navigation }) => {
     <>
       <Header
         title="Cuentas bancarias"
-        subtitle="Gestiona tus cuentas y su configuración."
+        subtitle="Gestiona tus cuentas, liquidez y participación."
         showBack
         onAddPress={handleAdd}
       />
@@ -125,38 +127,51 @@ export const CuentasBancariasListScreen: React.FC<Props> = ({ navigation }) => {
           ) : null}
 
           {!loading &&
-            filtered.map((c) => (
-              <TouchableOpacity
-                key={c.id}
-                style={panelStyles.menuCard}
-                onPress={() => handleEdit(c)}
-                activeOpacity={0.9}
-              >
-                <View style={panelStyles.menuTextContainer}>
-                  <Text style={panelStyles.menuTitle}>{(c.anagrama ?? '').toUpperCase()}</Text>
+            filtered.map((c) => {
+              const participacion = Number(c.participacionPct ?? 100);
+              const liquidezPonderada = Number(c.liquidez ?? 0) * (participacion / 100);
 
-                  {c.referencia ? (
+              return (
+                <TouchableOpacity
+                  key={c.id}
+                  style={panelStyles.menuCard}
+                  onPress={() => handleEdit(c)}
+                  activeOpacity={0.9}
+                >
+                  <View style={panelStyles.menuTextContainer}>
+                    <Text style={panelStyles.menuTitle}>{(c.anagrama ?? '').toUpperCase()}</Text>
+
+                    {c.referencia ? (
+                      <Text style={panelStyles.menuSubtitle}>
+                        {(c.referencia ?? '').toUpperCase()}
+                      </Text>
+                    ) : null}
+
                     <Text style={panelStyles.menuSubtitle}>
-                      {(c.referencia ?? '').toUpperCase()}
+                      Liquidez real: {EuroformatEuro(c.liquidez ?? 0, 'signed')}
                     </Text>
-                  ) : null}
 
-                  <Text style={panelStyles.menuSubtitle}>
-                    Liquidez: {EuroformatEuro(c.liquidez ?? 0, 'signed')}
-                  </Text>
+                    <Text style={panelStyles.menuSubtitle}>
+                      Participación: {participationLabel(c.participacionPct)}
+                    </Text>
 
-                  <Text style={panelStyles.menuSubtitle}>
-                    Estado: {c.activo ? 'ACTIVO' : 'INACTIVO'}
-                  </Text>
+                    <Text style={panelStyles.menuSubtitle}>
+                      Liquidez computable: {EuroformatEuro(liquidezPonderada, 'signed')}
+                    </Text>
 
-                  <Text style={panelStyles.menuSubtitle}>
-                    {countLabel(c.associatedCount)}
-                  </Text>
-                </View>
+                    <Text style={panelStyles.menuSubtitle}>
+                      Estado: {c.activo ? 'ACTIVO' : 'INACTIVO'}
+                    </Text>
 
-                <Ionicons name="chevron-forward" size={18} color={colors.textSecondary} />
-              </TouchableOpacity>
-            ))}
+                    <Text style={panelStyles.menuSubtitle}>
+                      {countLabel(c.associatedCount)}
+                    </Text>
+                  </View>
+
+                  <Ionicons name="chevron-forward" size={18} color={colors.textSecondary} />
+                </TouchableOpacity>
+              );
+            })}
         </ScrollView>
       </View>
     </>
