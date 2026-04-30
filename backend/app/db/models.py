@@ -653,6 +653,7 @@ class CuentaBancaria(Base):
 
     liquidez = Column(Float, nullable=False, server_default=text("0"))
     liquidez_inicial = Column(Float, nullable=False, server_default=text("0"))
+    participacion_pct = Column(Numeric(5, 2), nullable=False, server_default=text("100"))
 
     user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
 

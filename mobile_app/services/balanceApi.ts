@@ -1,3 +1,15 @@
+/**
+ * Ruta: mobile_app/services/balanceApi.ts
+ * Versión: 1.9.1
+ * Descripción:
+ * Servicio de balance mensual de cuentas.
+ *
+ * Importante:
+ * - Los importes inicio/salidas/entradas/fin son importes reales operativos.
+ * - La participación NO debe afectar a pagar/cobrar movimientos.
+ * - participacion_pct solo se usa para métricas de liquidez ponderada en Home.
+ */
+
 import { api } from './api';
 
 export type SaldoCuentaItem = {
@@ -7,6 +19,10 @@ export type SaldoCuentaItem = {
   salidas: number;
   entradas: number;
   fin: number;
+
+  // 100 = cuenta propia completa, 50 = cuenta compartida al 50%.
+  participacion_pct?: number;
+
   gastos_gestionables_pendientes: number;
   gastos_cotidianos_pendientes: number;
   ingresos_pendientes: number;
@@ -23,8 +39,6 @@ export type BalanceMesResponse = {
   gastos_pendientes_total: number;
   ahorro_mes_total: number;
 
-  // Compatibilidad: backend nuevo puede enviar estos campos.
-  // Si backend antiguo no los envía, simplemente serán undefined.
   gastos_ahorro_total?: number;
   ingresos_reintegro_ahorro_total?: number;
 };

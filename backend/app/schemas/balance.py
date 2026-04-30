@@ -51,6 +51,11 @@ class SaldoCuentaItem(BaseModel):
     salidas: float
     entradas: float
     fin: float
+    
+    participacion_pct: float = Field(
+    100.0,
+    description="Porcentaje de participación del usuario sobre la cuenta bancaria. 100 = cuenta completa, 50 = media cuenta.",
+)
 
     # nuevos campos para el modal de liquidez
     gastos_gestionables_pendientes: float

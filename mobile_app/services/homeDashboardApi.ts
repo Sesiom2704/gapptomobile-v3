@@ -1,19 +1,18 @@
 /**
  * Ruta: mobile_app/services/homeDashboardApi.ts
- * Versión: 1.9.0
+ * Versión: 1.9.1
  * Descripción:
  * Servicio de construcción del dashboard Home.
- * Mantiene compatibilidad con el panel actual y añade soporte para:
- * - Patrimonio total agregado
- * - Valor total de inversiones activas
- * - Tarjeta de inversiones con recuento y métricas medias
- * - Renombrado lógico de bloques en Home sin romper consumers previos
  *
- * Nota funcional importante:
- * - "valor total inversiones" se calcula con inversiones ACTIVAS
- * - Se usa aporte_final si existe; si no, aporte_estimado
- * - ROI esperado medio e IRR esperada media se calculan como media simple
- *   de inversiones activas con dato informado
+ * Mantiene compatibilidad con el panel actual y añade soporte para participación:
+ * - Propiedades: valor_mercado, inversión, NOI y equity ponderados por participacion_pct.
+ * - Liquidez: saldo de cuentas ponderado por participacion_pct.
+ * - Endeudamiento: se espera ya ponderado desde backend.
+ * - Ingresos/gastos gestionables: se espera ya ponderado desde monthly-summary.
+ *
+ * Regla funcional:
+ * - Los importes mostrados en Home son métricas personales ponderadas.
+ * - Las acciones reales de pagar/cobrar siguen moviendo el 100% del importe operativo.
  */
 
 import { getMonthlySummary } from './analyticsApi';
@@ -26,37 +25,27 @@ export type HomeDashboardResponse = {
   year: number;
   month: number;
 
-  // Header
   liquidezTotal: number;
   saldoPrevistoFinMes: number;
 
-  // Reales (mes)
-  // NOTA: ingresosMes en Home representa "ingresos cobrados/consumidos" para la barra principal,
-  // y por definición debe EXCLUIR extraordinarios (PAGO UNICO del mes).
   ingresosMes: number;
   gastosMes: number;
   ahorroMes: number;
-
-  // Opcional: total de ingresos del mes incluyendo extraordinarios
   ingresosMesTotalIncluyendoExtras?: number;
 
-  // Presupuesto “ajustado”
   ingresosPresupuestados: number;
   gestionablesPresupuestados: number;
   cotidianosPresupuestados: number;
   totalGastoPresupuestado: number;
 
-  // Consumidos
-  gestionablesConsumidos: number; // recurrentes (excluye PAGO UNICO)
+  gestionablesConsumidos: number;
   cotidianosConsumidos: number;
-  totalGastoConsumido: number; // incluye extras gastos
+  totalGastoConsumido: number;
 
-  // Extras (PAGO UNICO)
   extrasIngresosMes: number;
   extrasGastosMes: number;
   extrasNetoMes: number;
 
-  // Original + Omitidos (para Home 3 estados)
   ingresosPresupuestadosOriginal: number;
   gestionablesPresupuestadosOriginal: number;
   cotidianosPresupuestadosOriginal: number;
@@ -67,7 +56,6 @@ export type HomeDashboardResponse = {
   cotidianosOmitidosMes: number;
   totalGastoOmitidoMes: number;
 
-  // Alias legacy
   gestionablesReal: number;
   cotidianosReal: number;
   totalGastoReal: number;
@@ -75,13 +63,11 @@ export type HomeDashboardResponse = {
   gestionablesPresupuestado: number;
   cotidianosPresupuestado: number;
 
-  // Pendientes (balance)
   ingresosPendientesTotal: number;
   gastosPendientesTotal: number;
   gastosGestionablesPendientesTotal: number;
   gastosCotidianosPendientesTotal: number;
 
-  // Actividad reciente
   ultimosMovimientos: Array<{
     id: string;
     fecha: string;
@@ -91,7 +77,6 @@ export type HomeDashboardResponse = {
     importe: number;
   }>;
 
-  // Propiedades
   patrimonioPropiedadesCount: number;
   patrimonioValorMercadoTotal: number;
   patrimonioNoiTotal: number;
@@ -101,16 +86,13 @@ export type HomeDashboardResponse = {
   patrimonioLtvAproxPct: number | null;
   patrimonioNoiMensual: number;
 
-  // Inversiones
   patrimonioValorInversionesTotal: number;
   inversionesActivasCount: number;
   inversionesRoiEsperadoMedioPct: number | null;
   inversionesIrrEsperadaMediaPct: number | null;
 
-  // Patrimonio total agregado
   patrimonioTotal: number;
 
-  // Endeudamiento
   endeudamientoTotalDeuda: number;
   endeudamientoPct: number | null;
 };
@@ -133,9 +115,32 @@ function numOrNull(x: any): number | null {
   return v == null || Number.isNaN(v) ? null : v;
 }
 
+function round2(x: number): number {
+  return Number((Number.isFinite(x) ? x : 0).toFixed(2));
+}
+
 /**
- * Suma de cotidianos pagados (paginado).
+ * Convierte participación a factor multiplicador.
+ *
+ * Compatibilidad:
+ * - 100 -> 1
+ * - 50  -> 0.5
+ * - 1   -> 1
+ * - 0.5 -> 0.5
  */
+function participationFactor(value: unknown): number {
+  const raw = numOrNull(value);
+
+  if (raw == null || !Number.isFinite(raw) || raw <= 0) return 1;
+
+  const factor = raw > 1 ? raw / 100 : raw;
+
+  if (!Number.isFinite(factor) || factor <= 0) return 1;
+  if (factor > 1) return 1;
+
+  return factor;
+}
+
 async function sumGastosCotidianosMes(year: number, month: number): Promise<number> {
   const limit = 1000;
   let offset = 0;
@@ -154,10 +159,11 @@ async function sumGastosCotidianosMes(year: number, month: number): Promise<numb
   return total;
 }
 
-// -----------------------
-// Tipos mínimos para propiedades
-// -----------------------
-type PatrimonioRow = { id: string; activo?: boolean | null };
+type PatrimonioRow = {
+  id: string;
+  activo?: boolean | null;
+  participacion_pct?: number | string | null;
+};
 
 type PatrimonioCompraOut = {
   patrimonio_id: string;
@@ -224,7 +230,7 @@ async function fetchPatrimonioSummaryForHome(year: number): Promise<{
         .catch(() => null);
 
       const [compra, kpis] = await Promise.all([compraPromise, kpisPromise]);
-      return { compra, kpis };
+      return { patrimonio: p, compra, kpis };
     })
   );
 
@@ -236,17 +242,20 @@ async function fetchPatrimonioSummaryForHome(year: number): Promise<{
   let wPct = 0;
 
   for (const it of enriched) {
-    const vm = numOrNull(it.compra?.valor_mercado) ?? 0;
-    const inv = numOrNull(it.compra?.total_inversion) ?? 0;
+    const factor = participationFactor(it.patrimonio?.participacion_pct);
+
+    const vm = (numOrNull(it.compra?.valor_mercado) ?? 0) * factor;
+    const inv = (numOrNull(it.compra?.total_inversion) ?? 0) * factor;
 
     valorMercadoTotal += vm;
     totalInversionTotal += inv;
 
-    const noi = numOrNull(it.kpis?.noi) ?? 0;
+    const noi = (numOrNull(it.kpis?.noi) ?? 0) * factor;
     noiTotal += noi;
 
-    const base = numOrNull(it.kpis?.valor_base);
+    const baseRaw = numOrNull(it.kpis?.valor_base);
     const bruto = numOrNull(it.kpis?.rendimiento_bruto_pct);
+    const base = baseRaw == null ? null : baseRaw * factor;
 
     if (base != null && base > 0 && bruto != null) {
       wSum += base;
@@ -263,19 +272,16 @@ async function fetchPatrimonioSummaryForHome(year: number): Promise<{
 
   return {
     propiedadesCount: activos.length,
-    valorMercadoTotal: Number(valorMercadoTotal.toFixed(2)),
-    noiTotal: Number(noiTotal.toFixed(2)),
-    equityTotal: Number(equityTotal.toFixed(2)),
-    rentabilidadBrutaMediaPct: rentabilidadBrutaMediaPct == null ? null : Number(rentabilidadBrutaMediaPct.toFixed(2)),
-    noiSobreVmPct: noiSobreVmPct == null ? null : Number(noiSobreVmPct.toFixed(2)),
-    ltvAproxPct: ltvAproxPct == null ? null : Number(ltvAproxPct.toFixed(2)),
-    noiMensual: Number(noiMensual.toFixed(2)),
+    valorMercadoTotal: round2(valorMercadoTotal),
+    noiTotal: round2(noiTotal),
+    equityTotal: round2(equityTotal),
+    rentabilidadBrutaMediaPct: rentabilidadBrutaMediaPct == null ? null : round2(rentabilidadBrutaMediaPct),
+    noiSobreVmPct: noiSobreVmPct == null ? null : round2(noiSobreVmPct),
+    ltvAproxPct: ltvAproxPct == null ? null : round2(ltvAproxPct),
+    noiMensual: round2(noiMensual),
   };
 }
 
-// -----------------------
-// Tipos mínimos para inversiones
-// -----------------------
 type InversionHomeRow = {
   id: string;
   estado?: string | null;
@@ -332,16 +338,13 @@ async function fetchInversionesSummaryForHome(): Promise<{
   }
 
   return {
-    valorInversionesTotal: Number(valorInversionesTotal.toFixed(2)),
+    valorInversionesTotal: round2(valorInversionesTotal),
     inversionesActivasCount: rows.length,
-    roiEsperadoMedioPct: roiCount > 0 ? Number((roiSum / roiCount).toFixed(2)) : null,
-    irrEsperadaMediaPct: irrCount > 0 ? Number((irrSum / irrCount).toFixed(2)) : null,
+    roiEsperadoMedioPct: roiCount > 0 ? round2(roiSum / roiCount) : null,
+    irrEsperadaMediaPct: irrCount > 0 ? round2(irrSum / irrCount) : null,
   };
 }
 
-// -----------------------
-// Endeudamiento
-// -----------------------
 type EndeudamientoSummaryOut = {
   total_deuda?: number | string | null;
   totalDeuda?: number | string | null;
@@ -351,6 +354,41 @@ async function fetchEndeudamientoSummaryForHome(): Promise<{ totalDeuda: number 
   const r = await api.get<EndeudamientoSummaryOut>(`/api/v1/analytics/endeudamiento/summary`);
   const total = pickNumber(r.data, ['total_deuda', 'totalDeuda'], 0);
   return { totalDeuda: total };
+}
+
+function calcLiquidezActualPonderada(balance: any): number {
+  const cuentas = Array.isArray(balance?.saldos_cuentas) ? balance.saldos_cuentas : [];
+
+  if (!cuentas.length) {
+    return n(balance?.liquidez_actual_total);
+  }
+
+  return round2(
+    cuentas.reduce((acc: number, c: any) => {
+      const saldo = n(c?.fin);
+      const factor = participationFactor(c?.participacion_pct ?? 100);
+      return acc + saldo * factor;
+    }, 0)
+  );
+}
+
+function calcLiquidezPrevistaPonderada(balance: any): number {
+  const cuentas = Array.isArray(balance?.saldos_cuentas) ? balance.saldos_cuentas : [];
+
+  if (!cuentas.length) {
+    return n(balance?.liquidez_prevista_total);
+  }
+
+  return round2(
+    cuentas.reduce((acc: number, c: any) => {
+      const fin = n(c?.fin);
+      const ingresosPend = n(c?.ingresos_pendientes);
+      const gastosPend = n(c?.gastos_gestionables_pendientes) + n(c?.gastos_cotidianos_pendientes);
+      const factor = participationFactor(c?.participacion_pct ?? 100);
+
+      return acc + (fin - gastosPend + ingresosPend) * factor;
+    }, 0)
+  );
 }
 
 export async function fetchHomeDashboard(params: { year: number; month: number }): Promise<HomeDashboardResponse> {
@@ -388,9 +426,6 @@ export async function fetchHomeDashboard(params: { year: number; month: number }
     fetchEndeudamientoSummaryForHome().catch(() => ({ totalDeuda: 0 })),
   ]);
 
-  // -----------------------
-  // REALES (mes)
-  // -----------------------
   const ingresosRecurrentesMes = n((summary as any)?.detalle_ingresos?.recurrentes);
   const extrasIngresosMes = n((summary as any)?.detalle_ingresos?.extraordinarios);
 
@@ -402,14 +437,14 @@ export async function fetchHomeDashboard(params: { year: number; month: number }
 
   const gestionablesConsumidos = n((summary as any)?.detalle_gastos?.recurrentes);
   const extrasGastosMes = n((summary as any)?.detalle_gastos?.extraordinarios);
+
+  // Se mantiene el comportamiento actual:
+  // cotidianos salen de gastos_cotidianos y no se ponderan por vivienda.
   const cotidianosConsumidos = n(totalCotidianos);
 
   const totalGastoConsumido = gestionablesConsumidos + cotidianosConsumidos + extrasGastosMes;
   const extrasNetoMes = extrasIngresosMes - extrasGastosMes;
 
-  // -----------------------
-  // PRESUPUESTOS / OMITIDOS
-  // -----------------------
   const pres = (summary as any)?.presupuestos ?? {};
 
   const ingresosPresupuestados = pickNumber(pres, ['ingresos_presupuesto'], 0);
@@ -475,9 +510,6 @@ export async function fetchHomeDashboard(params: { year: number; month: number }
     ? Math.max(0, totalGastoOmitidosRaw)
     : Math.max(0, totalGastoPresupuestadoOriginal - totalGastoPresupuestado);
 
-  // -----------------------
-  // PENDIENTES (balance)
-  // -----------------------
   const cuentas = (balance as any)?.saldos_cuentas ?? [];
 
   const gastosGestionablesPendientesTotal = cuentas.reduce(
@@ -503,9 +535,6 @@ export async function fetchHomeDashboard(params: { year: number; month: number }
       importe: m.importe,
     }));
 
-  // -----------------------
-  // Alias legacy
-  // -----------------------
   const gestionablesReal = gestionablesConsumidos;
   const cotidianosReal = cotidianosConsumidos;
   const totalGastoReal = totalGastoConsumido;
@@ -513,36 +542,30 @@ export async function fetchHomeDashboard(params: { year: number; month: number }
   const gestionablesPresupuestado = gestionablesPresupuestados;
   const cotidianosPresupuestado = cotidianosPresupuestados;
 
-  // -----------------------
-  // Patrimonio + Endeudamiento
-  // -----------------------
-  const liquidezTotal = n((balance as any)?.liquidez_actual_total);
-  const endeudamientoTotalDeuda = n(endeudamientoSummary?.totalDeuda);
+  const liquidezTotal = calcLiquidezActualPonderada(balance);
+  const saldoPrevistoFinMes = calcLiquidezPrevistaPonderada(balance);
+
+  const endeudamientoTotalDeuda = round2(n(endeudamientoSummary?.totalDeuda));
 
   const patrimonioBruto = n(patrimonioSummary?.valorMercadoTotal);
   const patrimonioValorInversionesTotal = n(inversionesSummary?.valorInversionesTotal);
 
-  // Patrimonio = propiedades + inversiones + liquidez - deuda
-  const patrimonioTotal = Number(
-    (
-      patrimonioBruto +
+  const patrimonioTotal = round2(
+    patrimonioBruto +
       patrimonioValorInversionesTotal +
       liquidezTotal -
       endeudamientoTotalDeuda
-    ).toFixed(2)
   );
 
-  // El % de endeudamiento se mantiene sobre base propiedades (VM total)
-  const endeudamientoPct = patrimonioBruto > 0
-    ? Number(((endeudamientoTotalDeuda / patrimonioBruto) * 100).toFixed(2))
-    : null;
+  const endeudamientoPct =
+    patrimonioBruto > 0 ? round2((endeudamientoTotalDeuda / patrimonioBruto) * 100) : null;
 
   return {
     year,
     month,
 
     liquidezTotal,
-    saldoPrevistoFinMes: n((balance as any)?.liquidez_prevista_total),
+    saldoPrevistoFinMes,
 
     ingresosMes,
     gastosMes,

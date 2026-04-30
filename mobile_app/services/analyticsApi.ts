@@ -1,4 +1,16 @@
-// mobile_app/services/analyticsApi.ts
+/**
+ * Ruta: mobile_app/services/analyticsApi.ts
+ * Descripción:
+ * Servicio de analítica financiera.
+ *
+ * IMPORTANTE:
+ * - Los datos devueltos son importes REALES (no ponderados).
+ * - No aplican participación de propiedades o cuentas.
+ *
+ * Mejora futura:
+ * - Incorporar participación en backend para métricas reales del usuario.
+ */
+
 import { api } from './api';
 import {
   DayToDayAnalysisRequest,

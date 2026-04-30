@@ -7,13 +7,16 @@ Objetivo:
 - Separar explícitamente:
   - Real recurrente vs real extraordinario (PAGO ÚNICO)
   - Presupuesto (plan) vs consumido (real)
-- NUEVO:
-  - Presupuestos originales (sin excluir omitidos)
-  - Importes omitidos del mes (si el modelo lo soporta con omitido_este_mes)
+- Aplicar participación de vivienda en métricas visibles del Home cuando ingreso/gasto está vinculado a patrimonio.
+
+Regla de participación:
+- Si un ingreso/gasto tiene referencia_vivienda_id, se aplica:
+      importe * patrimonio.participacion_pct / 100
+- Si no tiene vivienda asociada, computa al 100%.
+- Esto NO afecta a la operativa real de cobrar/pagar: las acciones siguen moviendo el importe completo.
 
 Notas v3:
-- `periodicidad` se normaliza para tolerar valores legacy como 'PAGO_UNICO' (underscore)
-  y evitar inconsistencias de mayúsculas/minúsculas.
+- `periodicidad` se normaliza para tolerar valores legacy como 'PAGO_UNICO'.
 - Ventanas de fechas: [ini, fin_excl) para robustez en SQL.
 """
 
@@ -24,7 +27,7 @@ from typing import Optional, List, Tuple
 
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.orm import Session
-from sqlalchemy import func, cast, Integer
+from sqlalchemy import func, cast, Integer, and_
 
 from backend.app.schemas.monthly_summary import (
     MonthlySummaryResponse,
@@ -36,33 +39,40 @@ from backend.app.schemas.monthly_summary import (
     MonthlyResumenNota,
     MonthlyPresupuestos,
 )
-from backend.app.db.models import Ingreso, Gasto, GastoCotidiano, CierreMensual, User
+from backend.app.db.models import (
+    Ingreso,
+    Gasto,
+    GastoCotidiano,
+    CierreMensual,
+    User,
+    Patrimonio,
+)
 from backend.app.api.v1.auth_router import require_user
 from backend.app.db.session import get_db
 
 router = APIRouter()
 
-# Segmento "Cotidiano" (se usa en toda la app)
 SEGMENTO_COTIDIANO_ID = "COT-12345"
-
-# Periodicidad de extras (normalizada)
 PERIODICIDAD_PAGO_UNICO_NORM = "PAGO UNICO"
 
 
 def _periodicidad_norm_sql(col):
-    """
-    Normaliza periodicidad para tolerar:
-    - 'PAGO_UNICO' vs 'PAGO UNICO'
-    - mayúsculas/minúsculas
-    - NULL -> ''
-    """
     return func.upper(func.replace(func.coalesce(col, ""), "_", " "))
 
 
+def _participacion_factor_sql():
+    """
+    Factor SQL de participación de vivienda.
+
+    Ejemplos:
+    - participacion_pct = 100 => factor 1.0
+    - participacion_pct = 50  => factor 0.5
+    - NULL / sin vivienda     => factor 1.0
+    """
+    return func.coalesce(Patrimonio.participacion_pct, 100.0) / 100.0
+
+
 def _get_month_range(year: Optional[int], month: Optional[int]) -> Tuple[date, date]:
-    """
-    Devuelve el rango [ini, fin_excl) del mes solicitado.
-    """
     today = date.today()
     y = year or today.year
     m = month or today.month
@@ -77,14 +87,47 @@ def _get_month_range(year: Optional[int], month: Optional[int]) -> Tuple[date, d
 
 
 def _add_months(y: int, m: int, delta: int) -> Tuple[int, int]:
-    """
-    Suma (o resta) meses a un (year, month) y devuelve el nuevo (year, month).
-    Implementación robusta basada en "mes absoluto".
-    """
     total = y * 12 + (m - 1) + delta
     y2 = total // 12
     m2 = (total % 12) + 1
     return y2, m2
+
+
+def _ingresos_base_query(db: Session, current_user: User):
+    """
+    Query base de ingresos con LEFT JOIN a patrimonio para aplicar participación.
+
+    Importante:
+    - El join valida también user_id para no mezclar datos de usuarios.
+    """
+    return (
+        db.query(Ingreso)
+        .outerjoin(
+            Patrimonio,
+            and_(
+                Patrimonio.id == Ingreso.referencia_vivienda_id,
+                Patrimonio.user_id == Ingreso.user_id,
+            ),
+        )
+        .filter(Ingreso.user_id == current_user.id)
+    )
+
+
+def _gastos_base_query(db: Session, current_user: User):
+    """
+    Query base de gastos con LEFT JOIN a patrimonio para aplicar participación.
+    """
+    return (
+        db.query(Gasto)
+        .outerjoin(
+            Patrimonio,
+            and_(
+                Patrimonio.id == Gasto.referencia_vivienda_id,
+                Patrimonio.user_id == Gasto.user_id,
+            ),
+        )
+        .filter(Gasto.user_id == current_user.id)
+    )
 
 
 @router.get(
@@ -99,69 +142,38 @@ def get_monthly_summary(
     current_user: User = Depends(require_user),
 ) -> MonthlySummaryResponse:
     """
-    Resumen mensual de ingresos y gastos (alineado con Home).
+    Resumen mensual de ingresos y gastos.
 
-    INGRESOS
-    - REAL recurrentes KPI del mes:
-        activo+kpi+cobrados dentro del mes, periodicidad != PAGO UNICO, periodicidad no vacía.
-    - REAL extras:
-        cobrados dentro del mes, periodicidad = PAGO UNICO (sin filtrar activo/kpi).
-    - PRESUPUESTO ingresos:
-        activo+kpi, periodicidad != PAGO UNICO, periodicidad no vacía.
-      - NUEVO:
-        ingresos_presupuesto_original (sin excluir omitidos)
-        ingresos_omitidos_mes (si existe omitido_este_mes)
-
-    GASTOS
-    - PRESUPUESTO gestionables:
-        activo+kpi, segmento != COT, periodicidad != PAGO UNICO, periodicidad no vacía.
-    - PRESUPUESTO cotidianos:
-        activo+kpi, segmento = COT.
-      - NUEVO:
-        *_presupuesto_original, *_omitidos_mes (si existe omitido_este_mes)
-
-    - REAL gestionables recurrentes:
-        pagados en mes, segmento != COT, periodicidad != PAGO UNICO (SIN filtros activo/kpi)
-    - REAL gestionables extras:
-        pagados en mes, segmento != COT, periodicidad = PAGO UNICO
-    - REAL cotidianos:
-        gasto_cotidiano pagado en mes
-
-    RUN RATE / MEDIA 12M:
-    - Se calculan contra los 12 cierres ANTERIORES al mes objetivo.
+    En Home se muestran importes ponderados por participación cuando el movimiento
+    está vinculado a una vivienda. La operativa bancaria real queda intacta.
     """
     ini, fin_excl = _get_month_range(year, month)
     anio = ini.year
     mes = ini.month
     mes_label = ini.strftime("%B %Y").capitalize()
 
-    # -------------------------------------------------------------------------
-    # Ventana 12 meses (benchmark):
-    #  - 12 cierres ANTERIORES al mes objetivo
-    # -------------------------------------------------------------------------
     end_y, end_m = _add_months(anio, mes, -1)
     start_y, start_m = _add_months(end_y, end_m, -11)
 
     end_ym = int(end_y) * 100 + int(end_m)
     start_ym = int(start_y) * 100 + int(start_m)
 
-    # period_ym como INTEGER evita overflow de SMALLINT en expresiones (ej 202512)
     period_ym = cast(CierreMensual.anio, Integer) * 100 + cast(CierreMensual.mes, Integer)
 
-    # Normalizaciones SQL de periodicidad (tolerar 'PAGO_UNICO', minúsculas, etc.)
     per_ing = _periodicidad_norm_sql(Ingreso.periodicidad)
     per_gas = _periodicidad_norm_sql(Gasto.periodicidad)
 
+    factor = _participacion_factor_sql()
+
     # -------------------------------------------------------------------------
-    # 1) INGRESOS (REAL + PRESUPUESTO)
+    # 1) INGRESOS REALES
     # -------------------------------------------------------------------------
 
-    # (REAL) Recurrentes KPI del mes (excluye PAGO UNICO; excluye periodicidad vacía)
     ingresos_recurrentes_mes = float(
         (
-            db.query(func.coalesce(func.sum(Ingreso.importe), 0.0))
+            _ingresos_base_query(db, current_user)
+            .with_entities(func.coalesce(func.sum(Ingreso.importe * factor), 0.0))
             .filter(
-                Ingreso.user_id == current_user.id,
                 Ingreso.activo == True,   # noqa: E712
                 Ingreso.kpi == True,      # noqa: E712
                 Ingreso.cobrado == True,  # noqa: E712
@@ -174,14 +186,13 @@ def get_monthly_summary(
         or 0.0
     )
 
-    # (REAL) extras cobrados en el mes (PAGO UNICO)
     ingresos_extra_importe, ingresos_extra_num = (
-        db.query(
-            func.coalesce(func.sum(Ingreso.importe), 0.0),
+        _ingresos_base_query(db, current_user)
+        .with_entities(
+            func.coalesce(func.sum(Ingreso.importe * factor), 0.0),
             func.count(Ingreso.id),
         )
         .filter(
-            Ingreso.user_id == current_user.id,
             Ingreso.cobrado == True,  # noqa: E712
             per_ing == PERIODICIDAD_PAGO_UNICO_NORM,
             Ingreso.ultimo_ingreso_on >= ini,
@@ -196,15 +207,14 @@ def get_monthly_summary(
     ingresos_mes = ingresos_recurrentes_mes + ingresos_extra_importe
 
     # -------------------------------------------------------------------------
-    # 2) PRESUPUESTOS (ORIGINAL + AJUSTADO) y OMITIDOS del mes
+    # 2) PRESUPUESTOS Y OMITIDOS
     # -------------------------------------------------------------------------
 
-    # ===== INGRESOS PRESUPUESTO ORIGINAL (sin excluir omitidos) =====
     presupuesto_ingresos_original = float(
         (
-            db.query(func.coalesce(func.sum(Ingreso.importe), 0.0))
+            _ingresos_base_query(db, current_user)
+            .with_entities(func.coalesce(func.sum(Ingreso.importe * factor), 0.0))
             .filter(
-                Ingreso.user_id == current_user.id,
                 Ingreso.activo == True,  # noqa: E712
                 Ingreso.kpi == True,     # noqa: E712
                 per_ing != PERIODICIDAD_PAGO_UNICO_NORM,
@@ -214,14 +224,13 @@ def get_monthly_summary(
         or 0.0
     )
 
-    # Ingresos omitidos (si el modelo lo soporta)
     ingresos_omitidos_mes = 0.0
     if hasattr(Ingreso, "omitido_este_mes"):
         ingresos_omitidos_mes = float(
             (
-                db.query(func.coalesce(func.sum(Ingreso.importe), 0.0))
+                _ingresos_base_query(db, current_user)
+                .with_entities(func.coalesce(func.sum(Ingreso.importe * factor), 0.0))
                 .filter(
-                    Ingreso.user_id == current_user.id,
                     Ingreso.activo == True,  # noqa: E712
                     Ingreso.kpi == True,     # noqa: E712
                     Ingreso.omitido_este_mes == True,  # noqa: E712
@@ -232,46 +241,45 @@ def get_monthly_summary(
             or 0.0
         )
 
-    # Presupuesto ingresos AJUSTADO (legacy): excluye omitidos
-    presupuesto_ingresos = presupuesto_ingresos_original - ingresos_omitidos_mes
-    if presupuesto_ingresos < 0:
-        presupuesto_ingresos = 0.0
+    presupuesto_ingresos = max(0.0, presupuesto_ingresos_original - ingresos_omitidos_mes)
 
-    # ===== GASTOS PRESUPUESTO ORIGINAL (sin excluir omitidos) =====
-    q_pres_gest_original = (
-        db.query(func.coalesce(func.sum(Gasto.importe_cuota), 0.0))
-        .filter(
-            Gasto.user_id == current_user.id,
-            Gasto.activo == True,  # noqa: E712
-            Gasto.kpi == True,     # noqa: E712
-            Gasto.segmento_id != SEGMENTO_COTIDIANO_ID,
-            per_gas != PERIODICIDAD_PAGO_UNICO_NORM,
-            per_gas != "",
-        )
+    presupuesto_gestionables_original = float(
+        (
+            _gastos_base_query(db, current_user)
+            .with_entities(func.coalesce(func.sum(Gasto.importe_cuota * factor), 0.0))
+            .filter(
+                Gasto.activo == True,  # noqa: E712
+                Gasto.kpi == True,     # noqa: E712
+                Gasto.segmento_id != SEGMENTO_COTIDIANO_ID,
+                per_gas != PERIODICIDAD_PAGO_UNICO_NORM,
+                per_gas != "",
+            )
+        ).scalar()
+        or 0.0
     )
-    presupuesto_gestionables_original = float(q_pres_gest_original.scalar() or 0.0)
 
-    q_pres_cot_original = (
-        db.query(func.coalesce(func.sum(Gasto.importe_cuota), 0.0))
-        .filter(
-            Gasto.user_id == current_user.id,
-            Gasto.activo == True,  # noqa: E712
-            Gasto.kpi == True,     # noqa: E712
-            Gasto.segmento_id == SEGMENTO_COTIDIANO_ID,
-        )
+    presupuesto_cotidianos_original = float(
+        (
+            db.query(func.coalesce(func.sum(Gasto.importe_cuota), 0.0))
+            .filter(
+                Gasto.user_id == current_user.id,
+                Gasto.activo == True,  # noqa: E712
+                Gasto.kpi == True,     # noqa: E712
+                Gasto.segmento_id == SEGMENTO_COTIDIANO_ID,
+            )
+        ).scalar()
+        or 0.0
     )
-    presupuesto_cotidianos_original = float(q_pres_cot_original.scalar() or 0.0)
 
-    # Omitidos de gastos (si existe omitido_este_mes)
     gestionables_omitidos_mes = 0.0
     cotidianos_omitidos_mes = 0.0
 
     if hasattr(Gasto, "omitido_este_mes"):
         gestionables_omitidos_mes = float(
             (
-                db.query(func.coalesce(func.sum(Gasto.importe_cuota), 0.0))
+                _gastos_base_query(db, current_user)
+                .with_entities(func.coalesce(func.sum(Gasto.importe_cuota * factor), 0.0))
                 .filter(
-                    Gasto.user_id == current_user.id,
                     Gasto.activo == True,  # noqa: E712
                     Gasto.kpi == True,     # noqa: E712
                     Gasto.omitido_este_mes == True,  # noqa: E712
@@ -297,33 +305,22 @@ def get_monthly_summary(
             or 0.0
         )
 
-    # Presupuestos AJUSTADOS (legacy): excluye omitidos si existe el campo
-    presupuesto_gestionables = presupuesto_gestionables_original - gestionables_omitidos_mes
-    if presupuesto_gestionables < 0:
-        presupuesto_gestionables = 0.0
-
-    presupuesto_cotidianos = presupuesto_cotidianos_original - cotidianos_omitidos_mes
-    if presupuesto_cotidianos < 0:
-        presupuesto_cotidianos = 0.0
+    presupuesto_gestionables = max(0.0, presupuesto_gestionables_original - gestionables_omitidos_mes)
+    presupuesto_cotidianos = max(0.0, presupuesto_cotidianos_original - cotidianos_omitidos_mes)
 
     gasto_total_presupuesto_original = presupuesto_gestionables_original + presupuesto_cotidianos_original
     gasto_total_presupuesto = presupuesto_gestionables + presupuesto_cotidianos
-
     gasto_total_omitido_mes = gestionables_omitidos_mes + cotidianos_omitidos_mes
 
     presupuestos = MonthlyPresupuestos(
-        # legacy (ajustados)
         ingresos_presupuesto=presupuesto_ingresos,
         gestionables_presupuesto=presupuesto_gestionables,
         cotidianos_presupuesto=presupuesto_cotidianos,
         gasto_total_presupuesto=gasto_total_presupuesto,
-
-        # nuevos
         ingresos_presupuesto_original=presupuesto_ingresos_original,
         gestionables_presupuesto_original=presupuesto_gestionables_original,
         cotidianos_presupuesto_original=presupuesto_cotidianos_original,
         gasto_total_presupuesto_original=gasto_total_presupuesto_original,
-
         ingresos_omitidos_mes=ingresos_omitidos_mes,
         gestionables_omitidos_mes=gestionables_omitidos_mes,
         cotidianos_omitidos_mes=cotidianos_omitidos_mes,
@@ -331,16 +328,14 @@ def get_monthly_summary(
     )
 
     # -------------------------------------------------------------------------
-    # 3) GASTOS REALES (consumidos)
-    # Importante: NO filtramos por activo/kpi en consumidos gestionables.
+    # 3) GASTOS REALES
     # -------------------------------------------------------------------------
 
-    # Gestionables recurrentes consumidos (excluye PAGO UNICO; excluye periodicidad vacía)
     consumidos_gestionables_recurrentes = float(
         (
-            db.query(func.coalesce(func.sum(Gasto.importe_cuota), 0.0))
+            _gastos_base_query(db, current_user)
+            .with_entities(func.coalesce(func.sum(Gasto.importe_cuota * factor), 0.0))
             .filter(
-                Gasto.user_id == current_user.id,
                 Gasto.pagado == True,  # noqa: E712
                 Gasto.ultimo_pago_on >= ini,
                 Gasto.ultimo_pago_on < fin_excl,
@@ -352,14 +347,13 @@ def get_monthly_summary(
         or 0.0
     )
 
-    # Gestionables extras consumidos (PAGO UNICO)
     gastos_extra_importe, gastos_extra_num = (
-        db.query(
-            func.coalesce(func.sum(Gasto.importe_cuota), 0.0),
+        _gastos_base_query(db, current_user)
+        .with_entities(
+            func.coalesce(func.sum(Gasto.importe_cuota * factor), 0.0),
             func.count(Gasto.id),
         )
         .filter(
-            Gasto.user_id == current_user.id,
             Gasto.pagado == True,  # noqa: E712
             Gasto.ultimo_pago_on >= ini,
             Gasto.ultimo_pago_on < fin_excl,
@@ -372,10 +366,8 @@ def get_monthly_summary(
     gastos_extra_importe = float(gastos_extra_importe or 0.0)
     gastos_extra_num = int(gastos_extra_num or 0)
 
-    # Total gestionables consumidos (recurrentes + extras)
     consumidos_gestionables_total = consumidos_gestionables_recurrentes + gastos_extra_importe
 
-    # Cotidianos consumidos (pagado = true)
     consumidos_cotidianos = float(
         (
             db.query(func.coalesce(func.sum(GastoCotidiano.importe), 0.0))
@@ -389,15 +381,13 @@ def get_monthly_summary(
         or 0.0
     )
 
-    # Gastos totales reales del mes
     gastos_mes = consumidos_gestionables_total + consumidos_cotidianos
-
-    # -------------------------------------------------------------------------
-    # 4) KPIs generales
-    # -------------------------------------------------------------------------
     ahorro_mes = ingresos_mes - gastos_mes
 
-    # Media 12m: 12 cierres ANTERIORES al mes objetivo (start_ym..end_ym)
+    # -------------------------------------------------------------------------
+    # 4) KPIs generales / medias 12m
+    # -------------------------------------------------------------------------
+
     cierres_12m_q = (
         db.query(
             func.coalesce(func.avg(CierreMensual.ingresos_reales), 0.0),
@@ -433,9 +423,6 @@ def get_monthly_summary(
         gastos_vs_media_12m_pct=gastos_vs_media_pct,
     )
 
-    # -------------------------------------------------------------------------
-    # 5) Detalle ingresos / gastos
-    # -------------------------------------------------------------------------
     detalle_ingresos = MonthlyIngresosDetalle(
         recurrentes=ingresos_recurrentes_mes,
         extraordinarios=ingresos_extra_importe,
@@ -449,8 +436,9 @@ def get_monthly_summary(
     )
 
     # -------------------------------------------------------------------------
-    # 6) Distribuciones
+    # 5) Distribuciones
     # -------------------------------------------------------------------------
+
     distribucion_ingresos: List[MonthlyDistribucionItem] = []
     if ingresos_mes > 0:
         if detalle_ingresos.recurrentes > 0:
@@ -498,8 +486,9 @@ def get_monthly_summary(
             )
 
     # -------------------------------------------------------------------------
-    # 7) Run rate 12 meses
+    # 6) Run rate 12 meses
     # -------------------------------------------------------------------------
+
     cierres_det_q = (
         db.query(
             func.coalesce(func.avg(CierreMensual.ingresos_reales), 0.0),
@@ -533,8 +522,9 @@ def get_monthly_summary(
         )
 
     # -------------------------------------------------------------------------
-    # 8) Alertas e Insight (notas)
+    # 7) Notas
     # -------------------------------------------------------------------------
+
     notas: List[MonthlyResumenNota] = []
 
     def add_note(tipo: str, titulo: str, mensaje: str) -> None:
@@ -599,7 +589,6 @@ def get_monthly_summary(
                 f"Este mes has tenido gastos extraordinarios (aprox. {pct_extra_gastos:.1f}% del total).",
             )
 
-    # Presupuesto vs real (usamos el presupuesto AJUSTADO legacy para esta nota)
     if gasto_total_presupuesto > 0:
         desviacion_gasto_pct = ((gastos_mes - gasto_total_presupuesto) / gasto_total_presupuesto) * 100.0
         if desviacion_gasto_pct > 10:
@@ -650,10 +639,7 @@ def get_monthly_summary(
     if len(notas) > MAX_NOTAS:
         notas = notas[:MAX_NOTAS]
 
-    # -------------------------------------------------------------------------
-    # 9) Response
-    # -------------------------------------------------------------------------
-    response = MonthlySummaryResponse(
+    return MonthlySummaryResponse(
         anio=anio,
         mes=mes,
         mes_label=mes_label,
@@ -663,9 +649,7 @@ def get_monthly_summary(
         distribucion_ingresos=distribucion_ingresos,
         distribucion_gastos=distribucion_gastos,
         presupuestos=presupuestos,
-        consumidos_cotidianos=consumidos_cotidianos,  # ✅ requerido
+        consumidos_cotidianos=consumidos_cotidianos,
         run_rate_12m=run_rate_12m,
         notas=notas,
     )
-
-    return response
