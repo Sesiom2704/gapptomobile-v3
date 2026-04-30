@@ -7,10 +7,9 @@ Objetivo:
 - Permitir ampliar el endpoint /balance/mes-cuentas con nuevos campos sin romper.
 
 NUEVO:
+- participacion_pct en SaldoCuentaItem para calcular liquidez ponderada en Home.
 - gastos_ahorro_total: suma de gastos pagados del segmento AHO (AHO-12345) en el mes.
-- ingresos_reintegro_ahorro_total: suma de ingresos cobrados tipo REINTEGRO AHORRO (tipo_id=TING-2IB5N9) en el mes.
-  Estos campos permiten calcular en frontend:
-      Ahorrado neto = gastos_ahorro_total - ingresos_reintegro_ahorro_total
+- ingresos_reintegro_ahorro_total: suma de ingresos cobrados tipo REINTEGRO AHORRO.
 """
 
 from datetime import datetime
@@ -51,13 +50,11 @@ class SaldoCuentaItem(BaseModel):
     salidas: float
     entradas: float
     fin: float
-    
-    participacion_pct: float = Field(
-    100.0,
-    description="Porcentaje de participación del usuario sobre la cuenta bancaria. 100 = cuenta completa, 50 = media cuenta.",
-)
 
-    # nuevos campos para el modal de liquidez
+    # Participación de la cuenta para métricas patrimoniales.
+    # Ejemplo: 100 = cuenta propia completa, 50 = cuenta compartida al 50%.
+    participacion_pct: float = 100.0
+
     gastos_gestionables_pendientes: float
     gastos_cotidianos_pendientes: float
     ingresos_pendientes: float
@@ -68,19 +65,19 @@ class BalanceMesResponse(BaseModel):
     month: int
     saldos_cuentas: List[SaldoCuentaItem]
 
-    # KPIs globales de liquidez y pendientes
     liquidez_actual_total: float
     liquidez_inicio_mes_total: float
     liquidez_prevista_total: float
     ingresos_pendientes_total: float
     gastos_pendientes_total: float
-    
+
     ahorro_mes_total: float
 
-    # ✅ NUEVO (para cálculo Ahorrado neto en frontend)
-    # Defaults para compatibilidad (si por cualquier razón no se calculan, no rompen).
-    gastos_ahorro_total: float = Field(0.0, description="Total gastos del segmento AHO pagados en el mes.")
+    gastos_ahorro_total: float = Field(
+        0.0,
+        description="Total gastos del segmento AHO pagados en el mes.",
+    )
     ingresos_reintegro_ahorro_total: float = Field(
         0.0,
-        description="Total ingresos REINTEGRO AHORRO cobrados en el mes (tipo_id=TING-2IB5N9).",
+        description="Total ingresos REINTEGRO AHORRO cobrados en el mes.",
     )
