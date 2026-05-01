@@ -4,12 +4,18 @@
  * Responsabilidad:
  *   - Pantalla de consulta de movimientos del mes (cobros y pagos ya realizados).
  *   - Muestra un resumen del mes (ingresos, gastos, balance) y un listado de movimientos.
+ *   - Permite cambiar de mes, buscar movimientos y filtrar por cuenta o tipo.
  *
  * Maneja:
- *   - UI: Header + resumen fijo en card + listado en ScrollView con pull-to-refresh.
- *   - Estado: local (useState) para data, loading, refreshing y error.
+ *   - UI: Header + resumen fijo en card + filtros + listado en ScrollView con pull-to-refresh.
+ *   - Estado:
+ *       - data, loading, refreshing y error.
+ *       - selectedYear / selectedMonth para navegar entre meses.
+ *       - searchText para buscar por descripción, cuenta, banco o tipo.
+ *       - selectedTipo para filtrar todos/ingresos/gastos.
+ *       - selectedCuentaKey para filtrar por cuenta/banco.
  *   - Datos:
- *       - Lectura: fetchMovimientosMes (incluye totales y array de movimientos).
+ *       - Lectura: fetchMovimientosMes(year, month), incluye totales y array de movimientos.
  *   - Navegación:
  *       - Soporta retorno condicionado (returnToTab/returnToScreen) y compatibilidad antigua (fromHome).
  *
@@ -24,24 +30,27 @@
  *       - returnParams?: Record<string, any>
  *   - Efectos:
  *       - Carga inicial de movimientos (useEffect).
- *       - Pull-to-refresh: recarga de movimientos.
+ *       - Cambio de mes: recarga de movimientos.
+ *       - Pull-to-refresh: recarga del mes seleccionado.
  *       - Render condicional de estados: loading, error, vacío.
  *
  * Dependencias clave:
- *   - UI interna: Header, panelStyles
+ *   - UI interna: Header, panelStyles, ListRow, IconCircle
  *   - Tema: colors
  *   - Utilidades: EuroformatEuro, formatFechaCorta
  *   - Iconos: Ionicons
  *
  * Reutilización:
- *   - Candidato a externalizar: ALTO (fila de movimiento: icono positivo/negativo + título/subtítulo + importe).
- *   - Riesgos: estilos duplicados en filas entre pantallas; conviene unificar en un componente base (ListRow).
+ *   - Candidato a externalizar: ALTO.
+ *   - Los chips de filtros y selector de mes podrían convertirse en componentes reutilizables.
  *
  * Notas de estilo:
- *   - Centralizar estilos repetidos (importe, icono circular, tipografías) para mantener coherencia visual en listados.
+ *   - Se mantiene ListRow para no perder coherencia visual con otros listados.
+ *   - Se evita mostrar cuenta_id/banco_id como texto principal porque en cotidianos estaba apareciendo el id.
+ *   - La solución definitiva del banco de cotidianos debe venir desde backend enviando cuenta_nombre o banco_nombre.
  */
 
-import React, { useEffect, useState, useCallback } from 'react';
+import React, { useEffect, useState, useCallback, useMemo } from 'react';
 import {
   View,
   Text,
@@ -49,6 +58,8 @@ import {
   StyleSheet,
   ActivityIndicator,
   RefreshControl,
+  TextInput,
+  Pressable,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 
@@ -58,24 +69,94 @@ import { colors } from '../../theme/colors';
 import { ListRow } from '../../components/ui/ListRow';
 import { IconCircle } from '../../components/ui/IconCircle';
 
-// API
 import {
   fetchMovimientosMes,
   MovimientosMesResponse,
   MovimientoItem,
+  MovementKind,
 } from '../../services/movimientosApi';
 
-// NUEVO → formato unificado
 import { EuroformatEuro, formatFechaCorta } from '../../utils/format';
 
 type RouteParams = {
-  // compat: algunos sitios ya usan esto
   fromHome?: boolean;
-
-  // nuevo patrón: volver exacto al sitio de origen
   returnToTab?: 'HomeTab' | 'DayToDayTab' | 'MonthTab' | 'PatrimonyTab';
-  returnToScreen?: string; // screen interno del stack/tab
+  returnToScreen?: string;
   returnParams?: Record<string, any>;
+};
+
+type TipoFiltro = 'TODOS' | 'INGRESO' | 'GASTO';
+
+type CuentaFiltro = {
+  key: string;
+  label: string;
+};
+
+const getCurrentYearMonth = () => {
+  const now = new Date();
+  return {
+    year: now.getFullYear(),
+    month: now.getMonth() + 1,
+  };
+};
+
+const getMonthLabel = (year: number, month: number) => {
+  return `${month.toString().padStart(2, '0')}/${year}`;
+};
+
+const moveMonth = (
+  year: number,
+  month: number,
+  offset: number
+): { year: number; month: number } => {
+  const date = new Date(year, month - 1 + offset, 1);
+
+  return {
+    year: date.getFullYear(),
+    month: date.getMonth() + 1,
+  };
+};
+
+const normalizeText = (value: unknown) => {
+  return String(value ?? '')
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .trim();
+};
+
+/**
+ * Devuelve un nombre visible para la cuenta/banco.
+ *
+ * Importante:
+ * - No mostramos directamente cuenta_id o banco_id porque ese era el problema en cotidianos.
+ * - Si backend todavía no envía nombre, mostramos "SIN CUENTA".
+ */
+const getCuentaDisplayName = (m: MovimientoItem) => {
+  return (
+    m.cuenta_nombre ||
+    m.banco_nombre ||
+    'SIN CUENTA'
+  );
+};
+
+/**
+ * Devuelve una clave estable para filtrar por cuenta/banco.
+ *
+ * Si hay nombre, usa el nombre.
+ * Si no hay nombre pero hay id, usa el id internamente, pero la etiqueta visible será controlada aparte.
+ */
+const getCuentaFilterKey = (m: MovimientoItem) => {
+  if (m.cuenta_id !== undefined && m.cuenta_id !== null) {
+    return `cuenta:${String(m.cuenta_id)}`;
+  }
+
+  if (m.banco_id !== undefined && m.banco_id !== null) {
+    return `banco:${String(m.banco_id)}`;
+  }
+
+  const display = getCuentaDisplayName(m);
+  return `nombre:${display}`;
 };
 
 const MovimientosScreen: React.FC<{ navigation: any; route: any }> = ({
@@ -83,11 +164,19 @@ const MovimientosScreen: React.FC<{ navigation: any; route: any }> = ({
   route,
 }) => {
   const params: RouteParams = route?.params ?? {};
+  const current = getCurrentYearMonth();
+
+  const [selectedYear, setSelectedYear] = useState<number>(current.year);
+  const [selectedMonth, setSelectedMonth] = useState<number>(current.month);
 
   const [data, setData] = useState<MovimientosMesResponse | null>(null);
   const [loading, setLoading] = useState<boolean>(true);
   const [refreshing, setRefreshing] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
+
+  const [searchText, setSearchText] = useState<string>('');
+  const [selectedTipo, setSelectedTipo] = useState<TipoFiltro>('TODOS');
+  const [selectedCuentaKey, setSelectedCuentaKey] = useState<string>('TODAS');
 
   const cargarMovimientos = useCallback(
     async (isRefresh: boolean = false) => {
@@ -96,7 +185,8 @@ const MovimientosScreen: React.FC<{ navigation: any; route: any }> = ({
         else setLoading(true);
 
         setError(null);
-        const response = await fetchMovimientosMes();
+
+        const response = await fetchMovimientosMes(selectedYear, selectedMonth);
         setData(response);
       } catch (e) {
         console.error('[MovimientosScreen] Error cargando movimientos', e);
@@ -106,7 +196,7 @@ const MovimientosScreen: React.FC<{ navigation: any; route: any }> = ({
         else setLoading(false);
       }
     },
-    []
+    [selectedYear, selectedMonth]
   );
 
   useEffect(() => {
@@ -117,17 +207,13 @@ const MovimientosScreen: React.FC<{ navigation: any; route: any }> = ({
     cargarMovimientos(true);
   }, [cargarMovimientos]);
 
-  // ✅ Back: vuelve al origen si viene indicado; si no, goBack normal
   const handleBack = useCallback(() => {
-    // Compatibilidad antigua: si venías del Home y no hay returnTo, vuelve a HomeTab
     if (!params.returnToTab && params.fromHome) {
       navigation.navigate('HomeTab');
       return;
     }
 
-    // Nuevo patrón: vuelta “exacta”
     if (params.returnToTab) {
-      // Si además se indica screen interno, navega al stack correspondiente
       if (params.returnToScreen) {
         navigation.navigate(params.returnToTab, {
           screen: params.returnToScreen,
@@ -139,7 +225,6 @@ const MovimientosScreen: React.FC<{ navigation: any; route: any }> = ({
       return;
     }
 
-    // Fallback estándar
     if (navigation.canGoBack?.()) {
       navigation.goBack();
     } else {
@@ -147,8 +232,21 @@ const MovimientosScreen: React.FC<{ navigation: any; route: any }> = ({
     }
   }, [navigation, params]);
 
-  // Etiquetas de tipo de movimiento
-  const getTipoLabel = (tipo: MovimientoItem['tipo']) => {
+  const handlePreviousMonth = useCallback(() => {
+    const next = moveMonth(selectedYear, selectedMonth, -1);
+    setSelectedYear(next.year);
+    setSelectedMonth(next.month);
+    setSelectedCuentaKey('TODAS');
+  }, [selectedYear, selectedMonth]);
+
+  const handleNextMonth = useCallback(() => {
+    const next = moveMonth(selectedYear, selectedMonth, 1);
+    setSelectedYear(next.year);
+    setSelectedMonth(next.month);
+    setSelectedCuentaKey('TODAS');
+  }, [selectedYear, selectedMonth]);
+
+  const getTipoLabel = (tipo: MovementKind) => {
     switch (tipo) {
       case 'GASTO_GESTIONABLE':
         return 'Gasto gestionable';
@@ -161,48 +259,110 @@ const MovimientosScreen: React.FC<{ navigation: any; route: any }> = ({
     }
   };
 
-  const year = data?.year;
-  const month = data?.month;
+  const movimientos = data?.movimientos ?? [];
+
+  const cuentaOptions = useMemo<CuentaFiltro[]>(() => {
+    const map = new Map<string, string>();
+
+    movimientos.forEach((m) => {
+      const key = getCuentaFilterKey(m);
+      const label = getCuentaDisplayName(m);
+
+      if (!map.has(key)) {
+        map.set(key, label);
+      }
+    });
+
+    return [
+      { key: 'TODAS', label: 'Todas' },
+      ...Array.from(map.entries())
+        .map(([key, label]) => ({ key, label }))
+        .sort((a, b) => a.label.localeCompare(b.label)),
+    ];
+  }, [movimientos]);
+
+  const movimientosFiltrados = useMemo(() => {
+    const q = normalizeText(searchText);
+
+    return movimientos.filter((m) => {
+      const cuentaKey = getCuentaFilterKey(m);
+      const cuentaDisplay = getCuentaDisplayName(m);
+      const tipoLabel = getTipoLabel(m.tipo);
+
+      const matchCuenta =
+        selectedCuentaKey === 'TODAS' || cuentaKey === selectedCuentaKey;
+
+      const matchTipo =
+        selectedTipo === 'TODOS' ||
+        (selectedTipo === 'INGRESO' && m.es_ingreso) ||
+        (selectedTipo === 'GASTO' && !m.es_ingreso);
+
+      const searchable = normalizeText(
+        [
+          m.descripcion,
+          cuentaDisplay,
+          m.cuenta_nombre,
+          m.banco_nombre,
+          tipoLabel,
+          m.fecha,
+          m.importe,
+        ].join(' ')
+      );
+
+      const matchSearch = !q || searchable.includes(q);
+
+      return matchCuenta && matchTipo && matchSearch;
+    });
+  }, [movimientos, searchText, selectedCuentaKey, selectedTipo]);
+
+  const year = data?.year ?? selectedYear;
+  const month = data?.month ?? selectedMonth;
   const totalIngresos = data?.total_ingresos ?? 0;
   const totalGastos = data?.total_gastos ?? 0;
   const balance = data?.balance ?? 0;
-  const movimientos = data?.movimientos ?? [];
 
   return (
     <>
       <Header
         title="Movimientos del mes"
-        subtitle={
-          year && month
-            ? `Cobros y pagos realizados en ${month.toString().padStart(2, '0')}/${year}.`
-            : 'Cobros y pagos que ya se han realizado este mes.'
-        }
+        subtitle={`Cobros y pagos realizados en ${getMonthLabel(year, month)}.`}
         showBack
-        onBackPress={() => {
-          const returnToTab = route?.params?.returnToTab;
-          const returnToScreen = route?.params?.returnToScreen;
-
-          if (returnToTab) {
-            navigation.navigate(returnToTab, returnToScreen ? { screen: returnToScreen } : undefined);
-            return;
-          }
-
-          if (navigation.canGoBack()) navigation.goBack();
-        }}
+        onBackPress={handleBack}
       />
 
       <View style={panelStyles.screen}>
-        {/* 🔹 RESUMEN FIJO */}
         {data && (
           <View style={[panelStyles.section, { paddingBottom: 8 }]}>
             <View style={panelStyles.card}>
-              <Text style={panelStyles.cardTitle}>Resumen del mes</Text>
-              <Text style={panelStyles.cardSubtitle}>
-                Ingresos cobrados, gastos pagados y balance neto.
-              </Text>
+              <View style={styles.monthHeaderRow}>
+                <Pressable
+                  style={styles.monthButton}
+                  onPress={handlePreviousMonth}
+                >
+                  <Ionicons
+                    name="chevron-back"
+                    size={18}
+                    color={colors.textPrimary}
+                  />
+                </Pressable>
+
+                <View style={styles.monthTextBlock}>
+                  <Text style={panelStyles.cardTitle}>Resumen del mes</Text>
+                  <Text style={panelStyles.cardSubtitle}>
+                    {getMonthLabel(year, month)} · ingresos cobrados, gastos pagados y balance neto.
+                  </Text>
+                </View>
+
+                <Pressable style={styles.monthButton} onPress={handleNextMonth}>
+                  <Ionicons
+                    name="chevron-forward"
+                    size={18}
+                    color={colors.textPrimary}
+                  />
+                </Pressable>
+              </View>
 
               <View style={styles.summaryRow}>
-                {/* INGRESOS */}
                 <View style={styles.summaryCardInner}>
                   <View style={styles.summaryIconCircle}>
                     <Ionicons
@@ -223,7 +383,6 @@ const MovimientosScreen: React.FC<{ navigation: any; route: any }> = ({
                   </View>
                 </View>
 
-                {/* GASTOS */}
                 <View style={styles.summaryCardInner}>
                   <View style={styles.summaryIconCircle}>
                     <Ionicons
@@ -245,9 +404,8 @@ const MovimientosScreen: React.FC<{ navigation: any; route: any }> = ({
                 </View>
               </View>
 
-              {/* BALANCE */}
               <View style={[styles.balanceRow, { marginTop: 12 }]}>
-                <View>
+                <View style={{ flex: 1, paddingRight: 12 }}>
                   <Text style={styles.balanceLabel}>Balance del mes</Text>
                   <Text style={styles.balanceSubtitle}>
                     Ingresos cobrados menos gastos pagados.
@@ -267,7 +425,6 @@ const MovimientosScreen: React.FC<{ navigation: any; route: any }> = ({
           </View>
         )}
 
-        {/* 🔹 LISTA DE MOVIMIENTOS */}
         <ScrollView
           style={{ flex: 1 }}
           contentContainerStyle={panelStyles.scrollContent}
@@ -275,23 +432,13 @@ const MovimientosScreen: React.FC<{ navigation: any; route: any }> = ({
             <RefreshControl refreshing={refreshing} onRefresh={onRefresh} />
           }
         >
-          {/* Loading inicial */}
           {loading && !data && !error && (
             <View style={{ paddingVertical: 32, alignItems: 'center' }}>
               <ActivityIndicator size="small" color={colors.primary} />
-              <Text
-                style={{
-                  marginTop: 8,
-                  fontSize: 13,
-                  color: colors.textSecondary,
-                }}
-              >
-                Cargando movimientos...
-              </Text>
+              <Text style={styles.loadingText}>Cargando movimientos...</Text>
             </View>
           )}
 
-          {/* Error */}
           {error && (
             <View style={panelStyles.section}>
               <View style={panelStyles.card}>
@@ -302,55 +449,138 @@ const MovimientosScreen: React.FC<{ navigation: any; route: any }> = ({
             </View>
           )}
 
-          {/* LISTADO */}
           {data && (
             <View style={panelStyles.section}>
-              <Text style={panelStyles.sectionTitle}>Movimientos</Text>
+              <Text style={panelStyles.sectionTitle}>Filtros</Text>
 
               <View style={panelStyles.card}>
-                {movimientos.length === 0 && (
-                  <Text
-                    style={{
-                      fontSize: 13,
-                      color: colors.textSecondary,
-                      textAlign: 'center',
-                      paddingVertical: 8,
-                    }}
-                  >
-                    No hay movimientos registrados en este mes.
+                <View style={styles.searchBox}>
+                  <Ionicons
+                    name="search-outline"
+                    size={18}
+                    color={colors.textSecondary}
+                  />
+                  <TextInput
+                    value={searchText}
+                    onChangeText={setSearchText}
+                    placeholder="Buscar por descripción, cuenta o banco..."
+                    placeholderTextColor={colors.textMuted}
+                    style={styles.searchInput}
+                    autoCorrect={false}
+                    autoCapitalize="none"
+                  />
+
+                  {searchText.length > 0 && (
+                    <Pressable onPress={() => setSearchText('')}>
+                      <Ionicons
+                        name="close-circle"
+                        size={18}
+                        color={colors.textSecondary}
+                      />
+                    </Pressable>
+                  )}
+                </View>
+
+                <Text style={styles.filterLabel}>Tipo</Text>
+
+                <ScrollView
+                  horizontal
+                  showsHorizontalScrollIndicator={false}
+                  contentContainerStyle={styles.chipRow}
+                >
+                  <FilterChip
+                    label="Todos"
+                    active={selectedTipo === 'TODOS'}
+                    onPress={() => setSelectedTipo('TODOS')}
+                  />
+                  <FilterChip
+                    label="Ingresos"
+                    active={selectedTipo === 'INGRESO'}
+                    onPress={() => setSelectedTipo('INGRESO')}
+                  />
+                  <FilterChip
+                    label="Gastos"
+                    active={selectedTipo === 'GASTO'}
+                    onPress={() => setSelectedTipo('GASTO')}
+                  />
+                </ScrollView>
+
+                <Text style={styles.filterLabel}>Cuenta / banco</Text>
+
+                <ScrollView
+                  horizontal
+                  showsHorizontalScrollIndicator={false}
+                  contentContainerStyle={styles.chipRow}
+                >
+                  {cuentaOptions.map((option) => (
+                    <FilterChip
+                      key={option.key}
+                      label={option.label}
+                      active={selectedCuentaKey === option.key}
+                      onPress={() => setSelectedCuentaKey(option.key)}
+                    />
+                  ))}
+                </ScrollView>
+              </View>
+            </View>
+          )}
+
+          {data && (
+            <View style={panelStyles.section}>
+              <View style={styles.sectionHeaderRow}>
+                <Text style={panelStyles.sectionTitle}>Movimientos</Text>
+                <Text style={styles.counterText}>
+                  {movimientosFiltrados.length} de {movimientos.length}
+                </Text>
+              </View>
+
+              <View style={panelStyles.card}>
+                {movimientosFiltrados.length === 0 && (
+                  <Text style={styles.emptyText}>
+                    No hay movimientos que coincidan con los filtros aplicados.
                   </Text>
                 )}
 
-                {movimientos.map((m) => {
+                {movimientosFiltrados.map((m) => {
                   const isPositive = m.es_ingreso;
+                  const cuentaDisplay = getCuentaDisplayName(m);
 
                   return (
                     <ListRow
-                      key={m.id}
+                      key={`${m.tipo}-${m.id}`}
                       left={
                         <IconCircle
-                          name={isPositive ? 'arrow-down-outline' : 'arrow-up-outline'}
+                          name={
+                            isPositive
+                              ? 'arrow-down-outline'
+                              : 'arrow-up-outline'
+                          }
                           diameter={28}
                           size={16}
-                          backgroundColor={isPositive ? colors.success : colors.danger}
+                          backgroundColor={
+                            isPositive ? colors.success : colors.danger
+                          }
                           iconColor="#fff"
                         />
                       }
                       title={(m.descripcion ?? '').toUpperCase()}
-                      subtitle={`${formatFechaCorta(m.fecha)} · ${
-                        m.cuenta_nombre || m.cuenta_id || 'SIN CUENTA'
-                      } · ${getTipoLabel(m.tipo)}`}
+                      subtitle={`${formatFechaCorta(m.fecha)} · ${cuentaDisplay} · ${getTipoLabel(m.tipo)}`}
                       right={
                         <Text
                           style={[
                             styles.amountBase,
-                            isPositive ? styles.amountPositive : styles.amountNegative,
+                            isPositive
+                              ? styles.amountPositive
+                              : styles.amountNegative,
                           ]}
                         >
-                          {EuroformatEuro(m.importe, isPositive ? 'plus' : 'minus')}
+                          {EuroformatEuro(
+                            m.importe,
+                            isPositive ? 'plus' : 'minus'
+                          )}
                         </Text>
                       }
-                      showDivider={false} // si quieres divider dentro del card, pon true y quita padding extra
+                      showDivider={false}
                     />
                   );
                 })}
@@ -363,14 +593,47 @@ const MovimientosScreen: React.FC<{ navigation: any; route: any }> = ({
   );
 };
 
+type FilterChipProps = {
+  label: string;
+  active: boolean;
+  onPress: () => void;
+};
+
+const FilterChip: React.FC<FilterChipProps> = ({ label, active, onPress }) => {
+  return (
+    <Pressable
+      onPress={onPress}
+      style={[styles.chip, active && styles.chipActive]}
+    >
+      <Text style={[styles.chipText, active && styles.chipTextActive]}>
+        {label}
+      </Text>
+    </Pressable>
+  );
+};
+
 export default MovimientosScreen;
 
-// ========================= STYLES ===========================
-
 const styles = StyleSheet.create({
-  // =========================
-  // Resumen
-  // =========================
+  monthHeaderRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+  monthTextBlock: {
+    flex: 1,
+    paddingHorizontal: 8,
+  },
+  monthButton: {
+    width: 34,
+    height: 34,
+    borderRadius: 17,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: colors.surface,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: colors.border,
+  },
+
   summaryRow: {
     flexDirection: 'row',
     gap: 10,
@@ -387,8 +650,6 @@ const styles = StyleSheet.create({
     borderColor: colors.border,
     alignItems: 'center',
   },
-
-  // Nota: en tu código ambos círculos son iguales -> uno solo reutilizable.
   summaryIconCircle: {
     width: 32,
     height: 32,
@@ -398,15 +659,25 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     marginRight: 8,
   },
+  summaryTextBlock: {
+    flex: 1,
+  },
+  summaryLabel: {
+    fontSize: 11,
+    color: colors.textSecondary,
+    marginBottom: 2,
+  },
+  summaryValue: {
+    fontSize: 16,
+    fontWeight: '700',
+    color: colors.textPrimary,
+  },
+  summaryDelta: {
+    marginTop: 2,
+    fontSize: 11,
+    color: colors.textMuted,
+  },
 
-  summaryTextBlock: { flex: 1 },
-  summaryLabel: { fontSize: 11, color: colors.textSecondary, marginBottom: 2 },
-  summaryValue: { fontSize: 16, fontWeight: '700', color: colors.textPrimary },
-  summaryDelta: { marginTop: 2, fontSize: 11, color: colors.textMuted },
-
-  // =========================
-  // Balance
-  // =========================
   balanceRow: {
     flexDirection: 'row',
     justifyContent: 'space-between',
@@ -426,27 +697,94 @@ const styles = StyleSheet.create({
     fontSize: 11,
     color: colors.textSecondary,
   },
-  positive: { color: colors.success },
-  negative: { color: colors.danger },
+  positive: {
+    color: colors.success,
+  },
+  negative: {
+    color: colors.danger,
+  },
 
-  // =========================
-  // Movimientos (para ListRow)
-  // =========================
+  searchBox: {
+    minHeight: 42,
+    borderRadius: 14,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: colors.border,
+    backgroundColor: colors.surface,
+    paddingHorizontal: 12,
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: 12,
+  },
+  searchInput: {
+    flex: 1,
+    paddingVertical: 8,
+    paddingHorizontal: 8,
+    color: colors.textPrimary,
+    fontSize: 13,
+  },
+  filterLabel: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: colors.textSecondary,
+    marginBottom: 8,
+    marginTop: 4,
+  },
+  chipRow: {
+    gap: 8,
+    paddingBottom: 10,
+  },
+  chip: {
+    paddingVertical: 7,
+    paddingHorizontal: 12,
+    borderRadius: 999,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: colors.border,
+    backgroundColor: colors.surface,
+  },
+  chipActive: {
+    backgroundColor: colors.primary,
+    borderColor: colors.primary,
+  },
+  chipText: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: colors.textSecondary,
+  },
+  chipTextActive: {
+    color: '#fff',
+  },
+
+  sectionHeaderRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
+  counterText: {
+    fontSize: 12,
+    color: colors.textSecondary,
+    marginBottom: 6,
+  },
+  loadingText: {
+    marginTop: 8,
+    fontSize: 13,
+    color: colors.textSecondary,
+  },
+  emptyText: {
+    fontSize: 13,
+    color: colors.textSecondary,
+    textAlign: 'center',
+    paddingVertical: 8,
+  },
+
   amountBase: {
     fontSize: 13,
     fontWeight: '700',
     marginLeft: 8,
   },
-  amountPositive: { color: colors.success },
-  amountNegative: { color: colors.danger },
-
-  /**
-   * Si ya migraste el listado a <ListRow />, estos estilos antiguos sobran:
-   * - movementRow
-   * - movementIconCircle / movementIconCirclePositive/Negative
-   * - movementTextContainer / movementTitle / movementSubtitle
-   *
-   * Si todavía NO migraste, deja los antiguos de momento.
-   */
+  amountPositive: {
+    color: colors.success,
+  },
+  amountNegative: {
+    color: colors.danger,
+  },
 });
-
