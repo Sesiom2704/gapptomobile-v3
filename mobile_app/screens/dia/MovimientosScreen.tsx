@@ -6,48 +6,11 @@
  *   - Muestra un resumen del mes (ingresos, gastos, balance) y un listado de movimientos.
  *   - Permite cambiar de mes, buscar movimientos y filtrar por cuenta o tipo.
  *
- * Maneja:
- *   - UI: Header + resumen fijo en card + filtros + listado en ScrollView con pull-to-refresh.
- *   - Estado:
- *       - data, loading, refreshing y error.
- *       - selectedYear / selectedMonth para navegar entre meses.
- *       - searchText para buscar por descripción, cuenta, banco o tipo.
- *       - selectedTipo para filtrar todos/ingresos/gastos.
- *       - selectedCuentaKey para filtrar por cuenta/banco.
- *   - Datos:
- *       - Lectura: fetchMovimientosMes(year, month), incluye totales y array de movimientos.
- *   - Navegación:
- *       - Soporta retorno condicionado (returnToTab/returnToScreen) y compatibilidad antigua (fromHome).
- *
- * Entradas / Salidas:
- *   - Props:
- *       - navigation: React Navigation
- *       - route: React Navigation
- *   - route.params:
- *       - fromHome?: boolean (compat)
- *       - returnToTab?: 'HomeTab' | 'DayToDayTab' | 'MonthTab' | 'PatrimonyTab'
- *       - returnToScreen?: string
- *       - returnParams?: Record<string, any>
- *   - Efectos:
- *       - Carga inicial de movimientos (useEffect).
- *       - Cambio de mes: recarga de movimientos.
- *       - Pull-to-refresh: recarga del mes seleccionado.
- *       - Render condicional de estados: loading, error, vacío.
- *
- * Dependencias clave:
- *   - UI interna: Header, panelStyles, ListRow, IconCircle
- *   - Tema: colors
- *   - Utilidades: EuroformatEuro, formatFechaCorta
- *   - Iconos: Ionicons
- *
- * Reutilización:
- *   - Candidato a externalizar: ALTO.
- *   - Los chips de filtros y selector de mes podrían convertirse en componentes reutilizables.
- *
- * Notas de estilo:
- *   - Se mantiene ListRow para no perder coherencia visual con otros listados.
- *   - Se evita mostrar cuenta_id/banco_id como texto principal porque en cotidianos estaba apareciendo el id.
- *   - La solución definitiva del banco de cotidianos debe venir desde backend enviando cuenta_nombre o banco_nombre.
+ * Ajustes v3:
+ *   - Buscador avanzado plegable con formato unificado.
+ *   - Filtros con FilterPill y TwoLineCompactPill, igual que otras pantallas.
+ *   - Mantiene navegación mensual, resumen y listado existente.
+ *   - Evita mostrar ids como banco/cuenta cuando no llega nombre legible.
  */
 
 import React, { useEffect, useState, useCallback, useMemo } from 'react';
@@ -60,6 +23,8 @@ import {
   RefreshControl,
   TextInput,
   Pressable,
+  TouchableOpacity,
+  Keyboard,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 
@@ -68,6 +33,8 @@ import { panelStyles } from '../../components/panels/panelStyles';
 import { colors } from '../../theme/colors';
 import { ListRow } from '../../components/ui/ListRow';
 import { IconCircle } from '../../components/ui/IconCircle';
+import { FilterPill } from '../../components/ui/FilterPill';
+import { TwoLineCompactPill } from '../../components/ui/TwoLineCompactPill';
 
 import {
   fetchMovimientosMes,
@@ -125,27 +92,10 @@ const normalizeText = (value: unknown) => {
     .trim();
 };
 
-/**
- * Devuelve un nombre visible para la cuenta/banco.
- *
- * Importante:
- * - No mostramos directamente cuenta_id o banco_id porque ese era el problema en cotidianos.
- * - Si backend todavía no envía nombre, mostramos "SIN CUENTA".
- */
 const getCuentaDisplayName = (m: MovimientoItem) => {
-  return (
-    m.cuenta_nombre ||
-    m.banco_nombre ||
-    'SIN CUENTA'
-  );
+  return m.cuenta_nombre || m.banco_nombre || 'SIN CUENTA';
 };
 
-/**
- * Devuelve una clave estable para filtrar por cuenta/banco.
- *
- * Si hay nombre, usa el nombre.
- * Si no hay nombre pero hay id, usa el id internamente, pero la etiqueta visible será controlada aparte.
- */
 const getCuentaFilterKey = (m: MovimientoItem) => {
   if (m.cuenta_id !== undefined && m.cuenta_id !== null) {
     return `cuenta:${String(m.cuenta_id)}`;
@@ -174,9 +124,18 @@ const MovimientosScreen: React.FC<{ navigation: any; route: any }> = ({
   const [refreshing, setRefreshing] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
 
+  const [buscadorAbierto, setBuscadorAbierto] = useState<boolean>(false);
   const [searchText, setSearchText] = useState<string>('');
   const [selectedTipo, setSelectedTipo] = useState<TipoFiltro>('TODOS');
   const [selectedCuentaKey, setSelectedCuentaKey] = useState<string>('TODAS');
+
+  const [showTipoFilter, setShowTipoFilter] = useState<boolean>(true);
+  const [showCuentaFilter, setShowCuentaFilter] = useState<boolean>(true);
+
+  const closeBuscador = useCallback(() => {
+    Keyboard.dismiss();
+    setBuscadorAbierto(false);
+  }, []);
 
   const cargarMovimientos = useCallback(
     async (isRefresh: boolean = false) => {
@@ -277,7 +236,7 @@ const MovimientosScreen: React.FC<{ navigation: any; route: any }> = ({
       { key: 'TODAS', label: 'Todas' },
       ...Array.from(map.entries())
         .map(([key, label]) => ({ key, label }))
-        .sort((a, b) => a.label.localeCompare(b.label)),
+        .sort((a, b) => a.label.localeCompare(b.label, 'es')),
     ];
   }, [movimientos]);
 
@@ -321,6 +280,161 @@ const MovimientosScreen: React.FC<{ navigation: any; route: any }> = ({
   const totalGastos = data?.total_gastos ?? 0;
   const balance = data?.balance ?? 0;
 
+  const renderBuscador = () => {
+    const hasAnyCuenta = cuentaOptions.length > 1;
+
+    return (
+      <View style={styles.searchPanel}>
+        <Text style={styles.searchLabel}>Buscar</Text>
+
+        <View style={styles.searchRow}>
+          <Ionicons
+            name="search-outline"
+            size={16}
+            color={colors.textSecondary}
+            style={styles.searchIcon}
+          />
+          <TextInput
+            value={searchText}
+            onChangeText={setSearchText}
+            placeholder="Descripción, cuenta, banco o tipo…"
+            placeholderTextColor={colors.textMuted}
+            style={styles.searchInput}
+          />
+
+          {searchText.length > 0 && (
+            <TouchableOpacity onPress={() => setSearchText('')}>
+              <Ionicons
+                name="close-circle"
+                size={18}
+                color={colors.textSecondary}
+              />
+            </TouchableOpacity>
+          )}
+        </View>
+
+        <View style={{ marginTop: 16 }}>
+          <View style={styles.filterHeaderRow}>
+            <Text style={styles.searchLabel}>Tipo de movimiento</Text>
+
+            <TouchableOpacity
+              onPress={() => setShowTipoFilter((prev) => !prev)}
+              style={styles.showHideButton}
+            >
+              <Ionicons
+                name={
+                  showTipoFilter
+                    ? 'remove-circle-outline'
+                    : 'add-circle-outline'
+                }
+                size={16}
+                color={colors.textSecondary}
+                style={{ marginRight: 4 }}
+              />
+              <Text style={styles.showHideText}>
+                {showTipoFilter ? 'Ocultar' : 'Mostrar'}
+              </Text>
+            </TouchableOpacity>
+          </View>
+
+          {showTipoFilter && (
+            <View style={styles.pillsRow}>
+              <View style={styles.pillWrapper}>
+                <FilterPill
+                  label="Todos"
+                  selected={selectedTipo === 'TODOS'}
+                  disabled={movimientos.length === 0}
+                  onPress={() => setSelectedTipo('TODOS')}
+                  style={styles.filterPill}
+                />
+              </View>
+
+              <View style={styles.pillWrapper}>
+                <FilterPill
+                  label="Ingresos"
+                  selected={selectedTipo === 'INGRESO'}
+                  disabled={!movimientos.some((m) => m.es_ingreso)}
+                  onPress={() =>
+                    setSelectedTipo(
+                      selectedTipo === 'INGRESO' ? 'TODOS' : 'INGRESO'
+                    )
+                  }
+                  style={styles.filterPill}
+                />
+              </View>
+
+              <View style={styles.pillWrapper}>
+                <FilterPill
+                  label="Gastos"
+                  selected={selectedTipo === 'GASTO'}
+                  disabled={!movimientos.some((m) => !m.es_ingreso)}
+                  onPress={() =>
+                    setSelectedTipo(
+                      selectedTipo === 'GASTO' ? 'TODOS' : 'GASTO'
+                    )
+                  }
+                  style={styles.filterPill}
+                />
+              </View>
+            </View>
+          )}
+        </View>
+
+        {hasAnyCuenta && (
+          <View style={{ marginTop: 16 }}>
+            <View style={styles.filterHeaderRow}>
+              <Text style={styles.searchLabel}>Cuenta bancaria</Text>
+
+              <TouchableOpacity
+                onPress={() => setShowCuentaFilter((prev) => !prev)}
+                style={styles.showHideButton}
+              >
+                <Ionicons
+                  name={
+                    showCuentaFilter
+                      ? 'remove-circle-outline'
+                      : 'add-circle-outline'
+                  }
+                  size={16}
+                  color={colors.textSecondary}
+                  style={{ marginRight: 4 }}
+                />
+                <Text style={styles.showHideText}>
+                  {showCuentaFilter ? 'Ocultar' : 'Mostrar'}
+                </Text>
+              </TouchableOpacity>
+            </View>
+
+            {showCuentaFilter && (
+              <View style={styles.pillsRowWrap}>
+                {cuentaOptions.map((option) => {
+                  const selected = selectedCuentaKey === option.key;
+
+                  return (
+                    <View style={styles.pillWrapper} key={option.key}>
+                      <TwoLineCompactPill
+                        label={option.label}
+                        selected={selected}
+                        onPress={() =>
+                          setSelectedCuentaKey(
+                            selected && option.key !== 'TODAS'
+                              ? 'TODAS'
+                              : option.key
+                          )
+                        }
+                        style={styles.filterPill}
+                      />
+                    </View>
+                  );
+                })}
+              </View>
+            )}
+          </View>
+        )}
+      </View>
+    );
+  };
+
   return (
     <>
       <Header
@@ -349,7 +463,8 @@ const MovimientosScreen: React.FC<{ navigation: any; route: any }> = ({
                 <View style={styles.monthTextBlock}>
                   <Text style={panelStyles.cardTitle}>Resumen del mes</Text>
                   <Text style={panelStyles.cardSubtitle}>
-                    {getMonthLabel(year, month)} · ingresos cobrados, gastos pagados y balance neto.
+                    {getMonthLabel(year, month)} · ingresos cobrados, gastos
+                    pagados y balance neto.
                   </Text>
                 </View>
 
@@ -431,6 +546,10 @@ const MovimientosScreen: React.FC<{ navigation: any; route: any }> = ({
           refreshControl={
             <RefreshControl refreshing={refreshing} onRefresh={onRefresh} />
           }
+          onScrollBeginDrag={closeBuscador}
+          onTouchStart={() => {
+            if (buscadorAbierto) Keyboard.dismiss();
+          }}
         >
           {loading && !data && !error && (
             <View style={{ paddingVertical: 32, alignItems: 'center' }}>
@@ -451,77 +570,30 @@ const MovimientosScreen: React.FC<{ navigation: any; route: any }> = ({
 
           {data && (
             <View style={panelStyles.section}>
-              <Text style={panelStyles.sectionTitle}>Filtros</Text>
+              <TouchableOpacity
+                style={styles.searchToggle}
+                onPress={() => setBuscadorAbierto((prev) => !prev)}
+              >
+                <Ionicons
+                  name={buscadorAbierto ? 'chevron-up' : 'chevron-down'}
+                  size={16}
+                  color={colors.textSecondary}
+                  style={{ marginRight: 8 }}
+                />
+                <Text style={styles.searchToggleText}>Buscador avanzado</Text>
+              </TouchableOpacity>
 
-              <View style={panelStyles.card}>
-                <View style={styles.searchBox}>
-                  <Ionicons
-                    name="search-outline"
-                    size={18}
-                    color={colors.textSecondary}
-                  />
-                  <TextInput
-                    value={searchText}
-                    onChangeText={setSearchText}
-                    placeholder="Buscar por descripción, cuenta o banco..."
-                    placeholderTextColor={colors.textMuted}
-                    style={styles.searchInput}
-                    autoCorrect={false}
-                    autoCapitalize="none"
-                  />
-
-                  {searchText.length > 0 && (
-                    <Pressable onPress={() => setSearchText('')}>
-                      <Ionicons
-                        name="close-circle"
-                        size={18}
-                        color={colors.textSecondary}
-                      />
-                    </Pressable>
-                  )}
+              {buscadorAbierto && (
+                <View style={{ maxHeight: 320 }}>
+                  <ScrollView
+                    nestedScrollEnabled
+                    showsVerticalScrollIndicator={false}
+                    contentContainerStyle={{ paddingBottom: 8 }}
+                  >
+                    {renderBuscador()}
+                  </ScrollView>
                 </View>
-
-                <Text style={styles.filterLabel}>Tipo</Text>
-
-                <ScrollView
-                  horizontal
-                  showsHorizontalScrollIndicator={false}
-                  contentContainerStyle={styles.chipRow}
-                >
-                  <FilterChip
-                    label="Todos"
-                    active={selectedTipo === 'TODOS'}
-                    onPress={() => setSelectedTipo('TODOS')}
-                  />
-                  <FilterChip
-                    label="Ingresos"
-                    active={selectedTipo === 'INGRESO'}
-                    onPress={() => setSelectedTipo('INGRESO')}
-                  />
-                  <FilterChip
-                    label="Gastos"
-                    active={selectedTipo === 'GASTO'}
-                    onPress={() => setSelectedTipo('GASTO')}
-                  />
-                </ScrollView>
-
-                <Text style={styles.filterLabel}>Cuenta / banco</Text>
-
-                <ScrollView
-                  horizontal
-                  showsHorizontalScrollIndicator={false}
-                  contentContainerStyle={styles.chipRow}
-                >
-                  {cuentaOptions.map((option) => (
-                    <FilterChip
-                      key={option.key}
-                      label={option.label}
-                      active={selectedCuentaKey === option.key}
-                      onPress={() => setSelectedCuentaKey(option.key)}
-                    />
-                  ))}
-                </ScrollView>
-              </View>
+              )}
             </View>
           )}
 
@@ -564,7 +636,9 @@ const MovimientosScreen: React.FC<{ navigation: any; route: any }> = ({
                         />
                       }
                       title={(m.descripcion ?? '').toUpperCase()}
-                      subtitle={`${formatFechaCorta(m.fecha)} · ${cuentaDisplay} · ${getTipoLabel(m.tipo)}`}
+                      subtitle={`${formatFechaCorta(
+                        m.fecha
+                      )} · ${cuentaDisplay} · ${getTipoLabel(m.tipo)}`}
                       right={
                         <Text
                           style={[
@@ -590,25 +664,6 @@ const MovimientosScreen: React.FC<{ navigation: any; route: any }> = ({
         </ScrollView>
       </View>
     </>
-  );
-};
-
-type FilterChipProps = {
-  label: string;
-  active: boolean;
-  onPress: () => void;
-};
-
-const FilterChip: React.FC<FilterChipProps> = ({ label, active, onPress }) => {
-  return (
-    <Pressable
-      onPress={onPress}
-      style={[styles.chip, active && styles.chipActive]}
-    >
-      <Text style={[styles.chipText, active && styles.chipTextActive]}>
-        {label}
-      </Text>
-    </Pressable>
   );
 };
 
@@ -704,54 +759,86 @@ const styles = StyleSheet.create({
     color: colors.danger,
   },
 
-  searchBox: {
-    minHeight: 42,
+  searchToggle: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: colors.surface,
     borderRadius: 14,
     borderWidth: StyleSheet.hairlineWidth,
     borderColor: colors.border,
-    backgroundColor: colors.surface,
+    paddingVertical: 10,
     paddingHorizontal: 12,
-    flexDirection: 'row',
-    alignItems: 'center',
-    marginBottom: 12,
   },
-  searchInput: {
-    flex: 1,
-    paddingVertical: 8,
-    paddingHorizontal: 8,
-    color: colors.textPrimary,
+  searchToggleText: {
     fontSize: 13,
+    fontWeight: '600',
+    color: colors.textPrimary,
   },
-  filterLabel: {
+  searchPanel: {
+    marginTop: 10,
+    backgroundColor: colors.surface,
+    borderRadius: 16,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: colors.border,
+    padding: 12,
+  },
+  searchLabel: {
     fontSize: 12,
     fontWeight: '600',
     color: colors.textSecondary,
     marginBottom: 8,
-    marginTop: 4,
   },
-  chipRow: {
-    gap: 8,
-    paddingBottom: 10,
-  },
-  chip: {
-    paddingVertical: 7,
-    paddingHorizontal: 12,
-    borderRadius: 999,
+  searchRow: {
+    minHeight: 40,
+    borderRadius: 12,
     borderWidth: StyleSheet.hairlineWidth,
     borderColor: colors.border,
-    backgroundColor: colors.surface,
+    backgroundColor: colors.background,
+    paddingHorizontal: 10,
+    flexDirection: 'row',
+    alignItems: 'center',
   },
-  chipActive: {
-    backgroundColor: colors.primary,
-    borderColor: colors.primary,
+  searchIcon: {
+    marginRight: 6,
   },
-  chipText: {
-    fontSize: 12,
-    fontWeight: '600',
+  searchInput: {
+    flex: 1,
+    paddingVertical: 8,
+    paddingHorizontal: 4,
+    color: colors.textPrimary,
+    fontSize: 13,
+  },
+  filterHeaderRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
+  showHideButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+  showHideText: {
     color: colors.textSecondary,
+    fontSize: 12,
   },
-  chipTextActive: {
-    color: '#fff',
+  pillsRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    marginHorizontal: -4,
+    marginTop: 2,
+  },
+  pillsRowWrap: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    marginHorizontal: -4,
+    marginTop: 2,
+  },
+  pillWrapper: {
+    paddingHorizontal: 4,
+    paddingBottom: 8,
+  },
+  filterPill: {
+    minHeight: 32,
   },
 
   sectionHeaderRow: {
