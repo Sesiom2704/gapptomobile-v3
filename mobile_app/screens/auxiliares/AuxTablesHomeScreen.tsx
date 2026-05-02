@@ -1,13 +1,13 @@
 /**
  * Ruta: screens/auxiliares/AuxTablesHomeScreen.tsx
- * Versión: 1.1.0
+ * Versión: 1.2.0
  * Descripción:
  * Pantalla de navegación de tablas auxiliares de GapptoMobile v3.
  *
- * Cambios de esta versión:
- * - Se añade la entrada "Subsegmentos de proveedores".
- * - Se mantiene intacta la navegación existente.
- * - Se reutiliza el patrón visual actual del proyecto.
+ * Cambios:
+ * - Añade sección "Ubicaciones".
+ * - Permite gestionar Países, Regiones y Localidades desde tablas auxiliares.
+ * - Mantiene intacta la navegación existente.
  */
 
 import React from 'react';
@@ -26,7 +26,7 @@ export const AuxTablesHomeScreen: React.FC<Props> = ({ navigation }) => {
   const goTo = (auxType: AuxEntity | 'proveedor') => {
     navigation.navigate('AuxEntityList', {
       auxType,
-      origin: 'config', // venimos desde menú de configuración
+      origin: 'config',
     });
   };
 
@@ -34,7 +34,7 @@ export const AuxTablesHomeScreen: React.FC<Props> = ({ navigation }) => {
     <>
       <Header
         title="Tablas auxiliares"
-        subtitle="Configura tipos, segmentos, ramas y proveedores."
+        subtitle="Configura tipos, segmentos, ramas, proveedores y ubicaciones."
         showBack
       />
 
@@ -59,6 +59,31 @@ export const AuxTablesHomeScreen: React.FC<Props> = ({ navigation }) => {
               subtitle="IBAN, alias, banco y configuración."
               icon="card-outline"
               onPress={() => navigation.navigate('CuentasBancariasList')}
+            />
+          </View>
+
+          <View style={panelStyles.section}>
+            <Text style={panelStyles.sectionTitle}>Ubicaciones</Text>
+
+            <AuxMenuItem
+              label="Países"
+              subtitle="Gestiona países disponibles."
+              icon="earth-outline"
+              onPress={() => goTo('pais')}
+            />
+
+            <AuxMenuItem
+              label="Regiones"
+              subtitle="Gestiona regiones asociadas a país."
+              icon="map-outline"
+              onPress={() => goTo('region')}
+            />
+
+            <AuxMenuItem
+              label="Localidades"
+              subtitle="Gestiona localidades asociadas a región."
+              icon="location-outline"
+              onPress={() => goTo('localidad')}
             />
           </View>
 
@@ -165,3 +190,5 @@ const AuxMenuItem: React.FC<ItemProps> = ({
     />
   </TouchableOpacity>
 );
+
+export default AuxTablesHomeScreen;

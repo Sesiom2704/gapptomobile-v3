@@ -1,6 +1,15 @@
 /**
  * Ruta: mobile_app/services/auxiliaresApi.ts
- * Versión: 2.0.1
+ * Versión: 2.1.0
+ *
+ * Responsabilidad:
+ * - Servicio genérico de tablas auxiliares.
+ * - Añade soporte de navegación/listado para entidades de ubicación:
+ *   pais, region y localidad.
+ *
+ * Nota:
+ * - Para creación/edición/eliminación avanzada de ubicaciones, se recomienda usar ubicacionesApi.ts,
+ *   porque región y localidad tienen relaciones obligatorias.
  */
 
 import axios from 'axios';
@@ -13,7 +22,10 @@ export type AuxEntity =
   | 'tipo_ramas_ingreso'
   | 'tipo_ramas_proveedores'
   | 'tipo_segmento_gasto'
-  | 'tipo_subsegmento_proveedor';
+  | 'tipo_subsegmento_proveedor'
+  | 'pais'
+  | 'region'
+  | 'localidad';
 
 export type RelationCountItem = {
   key: string;
@@ -88,6 +100,12 @@ function endpointFor(entity: AuxEntity): string {
       return '/api/v1/tipos/segmentos';
     case 'tipo_subsegmento_proveedor':
       return '/api/v1/subsegmentos/proveedores';
+    case 'pais':
+      return '/api/v1/ubicaciones/paises/';
+    case 'region':
+      return '/api/v1/ubicaciones/regiones/';
+    case 'localidad':
+      return '/api/v1/ubicaciones/localidades/';
     default:
       return '/api/v1';
   }
@@ -159,7 +177,7 @@ export async function updateAux<T = any>(
   id: string,
   payload: any
 ): Promise<T> {
-  const url = `${endpointFor(entity)}/${encodeURIComponent(id)}`;
+  const url = `${endpointFor(entity).replace(/\/$/, '')}/${encodeURIComponent(id)}`;
 
   try {
     const resp = await api.put<any>(url, payload);
@@ -186,7 +204,7 @@ export async function updateAux<T = any>(
 }
 
 export async function deleteAux(entity: AuxEntity, id: string): Promise<void> {
-  const url = `${endpointFor(entity)}/${encodeURIComponent(id)}`;
+  const url = `${endpointFor(entity).replace(/\/$/, '')}/${encodeURIComponent(id)}`;
 
   try {
     await api.delete(url);

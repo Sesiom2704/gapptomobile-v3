@@ -1,18 +1,18 @@
 /**
  * Ruta: mobile_app/services/ubicacionesApi.ts
- * Versión: 2.2.0
+ * Versión: 2.3.0
  * Descripción:
  * Servicio centralizado para ubicaciones.
  *
  * Responsabilidades:
- * - Listar países, regiones y localidades.
- * - Crear países, regiones y localidades.
+ * - Listar, crear, actualizar y eliminar países, regiones y localidades.
  * - Mantener tipado completo para formularios jerárquicos:
  *      país -> región/comunidad -> localidad.
  *
  * Notas:
  * - El backend normaliza nombres a MAYÚSCULAS.
  * - Las altas son idempotentes: si ya existe, el backend devuelve el registro existente.
+ * - Las bajas pueden fallar si existen registros asociados; el backend debe responder 409.
  */
 
 import { api } from './api';
@@ -174,6 +174,100 @@ export async function createLocalidad(payload: {
   return resp.data;
 }
 
+// --------------------
+// ACTUALIZACIÓN
+// --------------------
+
+export async function updatePais(
+  id: number | string,
+  payload: {
+    nombre: string;
+    codigo_iso?: string | null;
+  }
+): Promise<Pais> {
+  const nombre = cleanText(payload.nombre);
+
+  if (!nombre) {
+    throw new Error('El nombre del país es obligatorio.');
+  }
+
+  const resp = await api.put<Pais>(`/api/v1/ubicaciones/paises/${encodeURIComponent(String(id))}`, {
+    nombre,
+    codigo_iso: cleanOptionalText(payload.codigo_iso),
+  });
+
+  return resp.data;
+}
+
+export async function updateRegion(
+  id: number | string,
+  payload: {
+    nombre: string;
+    pais_id: number;
+  }
+): Promise<Region> {
+  const nombre = cleanText(payload.nombre);
+
+  if (!nombre) {
+    throw new Error('El nombre de la región es obligatorio.');
+  }
+
+  if (!payload.pais_id) {
+    throw new Error('El país es obligatorio para actualizar una región.');
+  }
+
+  const resp = await api.put<Region>(`/api/v1/ubicaciones/regiones/${encodeURIComponent(String(id))}`, {
+    nombre,
+    pais_id: payload.pais_id,
+  });
+
+  return resp.data;
+}
+
+export async function updateLocalidad(
+  id: number | string,
+  payload: {
+    nombre: string;
+    region_id: number;
+  }
+): Promise<LocalidadWithContext> {
+  const nombre = cleanText(payload.nombre);
+
+  if (!nombre) {
+    throw new Error('El nombre de la localidad es obligatorio.');
+  }
+
+  if (!payload.region_id) {
+    throw new Error('La región es obligatoria para actualizar una localidad.');
+  }
+
+  const resp = await api.put<LocalidadWithContext>(
+    `/api/v1/ubicaciones/localidades/${encodeURIComponent(String(id))}`,
+    {
+      nombre,
+      region_id: payload.region_id,
+    }
+  );
+
+  return resp.data;
+}
+
+// --------------------
+// ELIMINACIÓN
+// --------------------
+
+export async function deletePais(id: number | string): Promise<void> {
+  await api.delete(`/api/v1/ubicaciones/paises/${encodeURIComponent(String(id))}`);
+}
+
+export async function deleteRegion(id: number | string): Promise<void> {
+  await api.delete(`/api/v1/ubicaciones/regiones/${encodeURIComponent(String(id))}`);
+}
+
+export async function deleteLocalidad(id: number | string): Promise<void> {
+  await api.delete(`/api/v1/ubicaciones/localidades/${encodeURIComponent(String(id))}`);
+}
+
 const ubicacionesApi = {
   listPaises,
   listRegiones,
@@ -181,6 +275,12 @@ const ubicacionesApi = {
   createPais,
   createRegion,
   createLocalidad,
+  updatePais,
+  updateRegion,
+  updateLocalidad,
+  deletePais,
+  deleteRegion,
+  deleteLocalidad,
 };
 
 export default ubicacionesApi;

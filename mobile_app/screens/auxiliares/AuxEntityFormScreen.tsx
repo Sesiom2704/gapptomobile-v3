@@ -44,6 +44,15 @@ import {
   listLocalidades,
   listPaises,
   listRegiones,
+  createPais,
+  updatePais,
+  deletePais,
+  createRegion,
+  updateRegion,
+  deleteRegion,
+  createLocalidad,
+  updateLocalidad,
+  deleteLocalidad,
   LocalidadWithContext,
   Pais as PaisApi,
   Region as RegionApi,
@@ -142,6 +151,9 @@ export const AuxEntityFormScreen: React.FC<Props> = ({ navigation, route }) => {
   const isTipoIngreso = auxType === 'tipo_ingreso';
   const isTipoRamaProveedor = auxType === 'tipo_ramas_proveedores';
   const isSubsegmentoProveedor = auxType === 'tipo_subsegmento_proveedor';
+  const isPais = auxType === 'pais';
+  const isRegion = auxType === 'region';
+  const isLocalidad = auxType === 'localidad';
 
   const isEditMode = !!(editingProveedor || editingItem);
 
@@ -481,6 +493,39 @@ export const AuxEntityFormScreen: React.FC<Props> = ({ navigation, route }) => {
 
     setNombre(editingItem.nombre ?? '');
 
+    if (isPais) {
+      setPaisId(Number(editingItem.id));
+      setPais(editingItem.nombre ?? '');
+    }
+
+    if (isRegion) {
+      setRegionId(Number(editingItem.id));
+      setComunidad(editingItem.nombre ?? '');
+
+      const rawPaisId = Number((editingItem as any).pais_id ?? (editingItem as any).pais?.id ?? 0);
+      const rawPaisNombre = String((editingItem as any).pais?.nombre ?? '').trim();
+
+      setPaisId(rawPaisId || null);
+      setPais(rawPaisNombre);
+    }
+
+    if (isLocalidad) {
+      setLocalidadId(Number(editingItem.id));
+      setLocalidad(editingItem.nombre ?? '');
+
+      const rawRegionId = Number((editingItem as any).region_id ?? (editingItem as any).region?.id ?? 0);
+      const rawRegionNombre = String((editingItem as any).region?.nombre ?? '').trim();
+
+      const rawPaisId = Number((editingItem as any).region?.pais?.id ?? 0);
+      const rawPaisNombre = String((editingItem as any).region?.pais?.nombre ?? '').trim();
+
+      setRegionId(rawRegionId || null);
+      setComunidad(rawRegionNombre);
+
+      setPaisId(rawPaisId || null);
+      setPais(rawPaisNombre);
+    }
+
     if (isTipoGasto) {
       setRamaGastoId(editingItem.rama_id ?? null);
       setSegmentoGastoId(editingItem.segmento_id ?? null);
@@ -493,7 +538,7 @@ export const AuxEntityFormScreen: React.FC<Props> = ({ navigation, route }) => {
     if (isSubsegmentoProveedor) {
       setSubsegmentoRamaId(editingItem.rama_id ?? null);
     }
-  }, [isProveedor, editingItem, isTipoGasto, isTipoIngreso, isSubsegmentoProveedor]);
+  }, [isProveedor, editingItem, isTipoGasto, isTipoIngreso, isSubsegmentoProveedor, isPais, isRegion, isLocalidad]);
 
   useEffect(() => {
     const loadCatalogs = async () => {
@@ -506,6 +551,14 @@ export const AuxEntityFormScreen: React.FC<Props> = ({ navigation, route }) => {
 
           setRamasGasto(rg ?? []);
           setSegmentosGasto(sg ?? []);
+        }
+
+        if (isRegion || isLocalidad) {
+          await ensurePaisesLoaded();
+        }
+
+        if (isLocalidad) {
+          await ensureRegionesLoaded();
         }
 
         if (isTipoIngreso) {
@@ -532,6 +585,8 @@ export const AuxEntityFormScreen: React.FC<Props> = ({ navigation, route }) => {
     isTipoGasto,
     isTipoIngreso,
     isSubsegmentoProveedor,
+    isRegion,
+    isLocalidad,
     route?.params?.defaultRamaId,
     editingItem?.rama_id,
   ]);
@@ -1139,15 +1194,90 @@ export const AuxEntityFormScreen: React.FC<Props> = ({ navigation, route }) => {
   };
 
   const handleSave = async () => {
-    if (!isProveedor) {
+    if (!isProveedor && !isPais && !isRegion && !isLocalidad) {
       await handleSaveGenericAux();
       return;
     }
-
     const nombreFinal = nombre.trim();
     if (!nombreFinal) {
       Alert.alert('Campo requerido', 'Debes indicar un nombre.');
       return;
+    }
+
+    if (isPais) {
+      try {
+        const payload = { nombre: nombreFinal, codigo_iso: null };
+
+        const result = isEditMode && editingItem?.id
+          ? await updatePais(editingItem.id, payload)
+          : await createPais(payload);
+
+        sendResultAndClose({
+          type: auxType,
+          item: result,
+          key: returnKey ?? null,
+          mode: isEditMode ? 'updated' : 'created',
+        });
+        return;
+      } catch (err: any) {
+        const detail = err?.response?.data?.detail;
+        Alert.alert('No se ha podido guardar', typeof detail === 'string' ? detail : 'No se ha podido guardar el país.');
+        return;
+      }
+    }
+
+    if (isRegion) {
+      if (!paisId) {
+        Alert.alert('Campo requerido', 'Debes seleccionar un país.');
+        return;
+      }
+
+      try {
+        const payload = { nombre: nombreFinal, pais_id: paisId };
+
+        const result = isEditMode && editingItem?.id
+          ? await updateRegion(editingItem.id, payload)
+          : await createRegion(payload);
+
+        sendResultAndClose({
+          type: auxType,
+          item: result,
+          key: returnKey ?? null,
+          mode: isEditMode ? 'updated' : 'created',
+        });
+        return;
+      } catch (err: any) {
+        const detail = err?.response?.data?.detail;
+        Alert.alert('No se ha podido guardar', typeof detail === 'string' ? detail : 'No se ha podido guardar la región.');
+        return;
+      }
+    }
+
+    if (isLocalidad) {
+      if (!regionId) {
+        Alert.alert('Campo requerido', 'Debes seleccionar una región.');
+        return;
+      }
+
+      try {
+        const payload = { nombre: nombreFinal, region_id: regionId };
+
+        const result = isEditMode && editingItem?.id
+          ? await updateLocalidad(editingItem.id, payload)
+          : await createLocalidad(payload);
+
+        sendResultAndClose({
+          type: auxType,
+          item: result,
+          key: returnKey ?? null,
+          mode: isEditMode ? 'updated' : 'created',
+        });
+        return;
+      } catch (err: any) {
+        const detail = err?.response?.data?.detail;
+        Alert.alert('No se ha podido guardar', typeof detail === 'string' ? detail : 'No se ha podido guardar la localidad.');
+        return;
+      }
     }
 
     if (!ramaId) {
@@ -1274,7 +1404,7 @@ export const AuxEntityFormScreen: React.FC<Props> = ({ navigation, route }) => {
   const handleDelete = () => {
     if (!isEditMode) return;
 
-    if (!isProveedor) {
+    if (!isProveedor && !isPais && !isRegion && !isLocalidad) {
       if (!editingItem?.id) return;
 
       Alert.alert(
@@ -1292,6 +1422,44 @@ export const AuxEntityFormScreen: React.FC<Props> = ({ navigation, route }) => {
               } catch (err) {
                 console.error('[AuxEntityForm] Error al eliminar auxiliar', err);
                 Alert.alert('Error', 'No se ha podido eliminar el registro.');
+              }
+            },
+          },
+        ]
+      );
+      return;
+    }
+
+    if (!editingItem?.id) return;
+    if (isPais || isRegion || isLocalidad) {
+      const label =
+        isPais ? 'país' :
+        isRegion ? 'región' :
+        'localidad';
+
+      Alert.alert(
+        `Eliminar ${label}`,
+        `¿Seguro que quieres eliminar "${editingItem.nombre}"? Esta acción no se puede deshacer.`,
+        [
+          { text: 'Cancelar', style: 'cancel' },
+          {
+            text: 'Eliminar',
+            style: 'destructive',
+            onPress: async () => {
+              try {
+                if (isPais) await deletePais(editingItem.id);
+                else if (isRegion) await deleteRegion(editingItem.id);
+                else await deleteLocalidad(editingItem.id);
+
+                navigation.goBack();
+              } catch (err: any) {
+                const detail = err?.response?.data?.detail;
+                Alert.alert(
+                  'No se ha podido eliminar',
+                  typeof detail === 'string'
+                    ? detail
+                    : `No se ha podido eliminar la ${label}. Puede tener registros asociados.`
+                );
               }
             },
           },
@@ -1533,30 +1701,42 @@ export const AuxEntityFormScreen: React.FC<Props> = ({ navigation, route }) => {
   };
 
   const title =
-    auxType === 'proveedor'
-      ? isEditMode
-        ? 'Editar proveedor'
-        : 'Nuevo proveedor'
-      : auxType === 'tipo_gasto'
-      ? isEditMode
-        ? 'Editar tipo de gasto'
-        : 'Nuevo tipo de gasto'
-      : auxType === 'tipo_ingreso'
-      ? isEditMode
-        ? 'Editar tipo de ingreso'
-        : 'Nuevo tipo de ingreso'
-      : auxType === 'tipo_ramas_proveedores'
-      ? isEditMode
-        ? 'Editar rama de proveedor'
-        : 'Nueva rama de proveedor'
-      : auxType === 'tipo_subsegmento_proveedor'
-      ? isEditMode
-        ? 'Editar subsegmento de proveedor'
-        : 'Nuevo subsegmento de proveedor'
-      : isEditMode
-      ? 'Editar registro'
-      : 'Nuevo registro';
-
+  auxType === 'proveedor'
+    ? isEditMode
+      ? 'Editar proveedor'
+      : 'Nuevo proveedor'
+    : auxType === 'pais'
+    ? isEditMode
+      ? 'Editar país'
+      : 'Nuevo país'
+    : auxType === 'region'
+    ? isEditMode
+      ? 'Editar región'
+      : 'Nueva región'
+    : auxType === 'localidad'
+    ? isEditMode
+      ? 'Editar localidad'
+      : 'Nueva localidad'
+    : auxType === 'tipo_gasto'
+    ? isEditMode
+      ? 'Editar tipo de gasto'
+      : 'Nuevo tipo de gasto'
+    : auxType === 'tipo_ingreso'
+    ? isEditMode
+      ? 'Editar tipo de ingreso'
+      : 'Nuevo tipo de ingreso'
+    : auxType === 'tipo_ramas_proveedores'
+    ? isEditMode
+      ? 'Editar rama de proveedor'
+      : 'Nueva rama de proveedor'
+    : auxType === 'tipo_subsegmento_proveedor'
+    ? isEditMode
+      ? 'Editar subsegmento de proveedor'
+      : 'Nuevo subsegmento de proveedor'
+    : isEditMode
+    ? 'Editar registro'
+    : 'Nuevo registro';
+    
   const selectedRama = useMemo(() => {
     if (!ramaId) return null;
     const found = ramaOptions.find((r) => r.id === ramaId);
@@ -1631,6 +1811,100 @@ export const AuxEntityFormScreen: React.FC<Props> = ({ navigation, route }) => {
               />
             </View>
           </FormSection>
+
+        {(isRegion || isLocalidad) ? (
+          <FormSection title="Ubicación jerárquica">
+            <View style={styles.field}>
+              <InlineSearchSelect<PaisOption>
+                label="País"
+                onAddPress={NOOP}
+                addAccessibilityLabel="Añadir país desde Países"
+                disabled={false}
+                selected={paisId && pais ? ({ id: paisId, nombre: pais } as any) : null}
+                selectedLabel={(p) => p.nombre}
+                onClear={() => {
+                  setPaisId(null);
+                  setPais('');
+                  if (isLocalidad) {
+                    setRegionId(null);
+                    setComunidad('');
+                  }
+                }}
+                query={busquedaPais}
+                onChangeQuery={(v) => {
+                  setBusquedaPais(v);
+                  void ensurePaisesLoaded();
+                }}
+                placeholder="Escribe para buscar país"
+                options={paisesFiltrados}
+                optionKey={(p) => String(p.id)}
+                optionLabel={(p) => p.nombre}
+                onSelect={(p) => {
+                  setPaisId(p.id);
+                  setPais(p.nombre);
+                  setBusquedaPais('');
+
+                  if (isLocalidad && regionId) {
+                    const currentRegion = regionOptions.find((r) => r.id === regionId);
+                    if (currentRegion?.paisId && currentRegion.paisId !== p.id) {
+                      setRegionId(null);
+                      setComunidad('');
+                    }
+                  }
+                }}
+                emptyText="No hay países que coincidan con la búsqueda."
+              />
+
+              {loadingPaises ? <Text style={styles.helperText}>Cargando países...</Text> : null}
+            </View>
+
+            {isLocalidad ? (
+              <View style={styles.field}>
+                <InlineSearchSelect<RegionOption>
+                  label="Región"
+                  onAddPress={NOOP}
+                  addAccessibilityLabel="Añadir región desde Regiones"
+                  disabled={false}
+                  selected={
+                    regionId && comunidad
+                      ? ({
+                          id: regionId,
+                          nombre: comunidad,
+                          paisId: paisId ?? null,
+                          paisNombre: pais || null,
+                        } as any)
+                      : null
+                  }
+                  selectedLabel={(r) => `${r.nombre}${r.paisNombre ? ` (${r.paisNombre})` : ''}`}
+                  onClear={() => {
+                    setRegionId(null);
+                    setComunidad('');
+                  }}
+                  query={busquedaRegion}
+                  onChangeQuery={(v) => {
+                    setBusquedaRegion(v);
+                    void ensureRegionesLoaded();
+                  }}
+                  placeholder="Escribe para buscar región"
+                  options={regionesFiltradas}
+                  optionKey={(r) => String(r.id)}
+                  optionLabel={(r) => `${r.nombre}${r.paisNombre ? ` (${r.paisNombre})` : ''}`}
+                  onSelect={(r) => {
+                    setRegionId(r.id);
+                    setComunidad(r.nombre);
+                    setBusquedaRegion('');
+
+                    if (r.paisId) setPaisId(r.paisId);
+                    if (r.paisNombre) setPais(r.paisNombre);
+                  }}
+                  emptyText="No hay regiones que coincidan con la búsqueda."
+                />
+
+                {loadingRegiones ? <Text style={styles.helperText}>Cargando regiones...</Text> : null}
+              </View>
+            ) : null}
+          </FormSection>
+        ) : null}
 
           <FormSection
             title={

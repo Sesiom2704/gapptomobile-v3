@@ -1,24 +1,21 @@
 /**
  * Ruta: mobile_app/screens/auxiliares/AuxEntityListScreen.tsx
- * Versión: 2.0.1
+ * Versión: 2.1.0
  * Descripción:
  * Pantalla de listado genérico de tablas auxiliares.
  *
  * Responsabilidades:
- * - Mostrar listados auxiliares y de proveedores.
+ * - Mostrar listados auxiliares, proveedores y ubicaciones.
  * - Permitir búsqueda por nombre.
  * - Navegar a formulario de creación/edición.
  * - Mostrar información contextual relacionada:
  *   * rama / segmento / subsegmento
- *   * localidad / país
+ *   * localidad / región / país
  *   * contadores de registros asociados
  *
- * Ajustes incluidos:
- * - Soporte para `tipo_subsegmento_proveedor`.
- * - Prioriza `associated_count` devuelto por backend.
- * - Mantiene compatibilidad con cálculos frontend solo como fallback.
- * - Mantiene la información contextual previa del listado.
- * - Añade visualización de `associated_count` en proveedores cuando venga informado.
+ * Ajustes:
+ * - Añade soporte a pais, region y localidad.
+ * - Mantiene compatibilidad con proveedores y resto de auxiliares.
  */
 
 import React, { useEffect, useState, useCallback, useMemo } from 'react';
@@ -77,7 +74,6 @@ export const AuxEntityListScreen: React.FC<Props> = ({ navigation, route }) => {
   const [ramasIngresoMap, setRamasIngresoMap] = useState<Record<string, string>>({});
   const [ramasProveedorMap, setRamasProveedorMap] = useState<Record<string, string>>({});
 
-  // Fallbacks frontend para entidades que todavía no traigan conteo backend
   const [proveedorCountByRama, setProveedorCountByRama] = useState<CountMap>({});
   const [proveedorCountBySubsegmento, setProveedorCountBySubsegmento] = useState<CountMap>({});
   const [gastoCountByTipo, setGastoCountByTipo] = useState<CountMap>({});
@@ -92,6 +88,9 @@ export const AuxEntityListScreen: React.FC<Props> = ({ navigation, route }) => {
     tipo_ramas_proveedores: 'Ramas de proveedores',
     tipo_ingreso: 'Tipos de ingreso',
     tipo_subsegmento_proveedor: 'Subsegmentos de proveedores',
+    pais: 'Países',
+    region: 'Regiones',
+    localidad: 'Localidades',
   };
 
   const subtitleByType: Record<string, string> = {
@@ -103,42 +102,39 @@ export const AuxEntityListScreen: React.FC<Props> = ({ navigation, route }) => {
     tipo_ramas_proveedores: 'Agrupa proveedores por rama.',
     tipo_ingreso: 'Configura los tipos de ingreso.',
     tipo_subsegmento_proveedor: 'Clasifica proveedores dentro de cada rama.',
+    pais: 'Gestiona países disponibles.',
+    region: 'Gestiona regiones asociadas a país.',
+    localidad: 'Gestiona localidades asociadas a región.',
   };
 
   const title = titleByType[auxType] ?? 'Tabla auxiliar';
   const subtitle = subtitleByType[auxType] ?? 'Configuración avanzada.';
 
+  const clearContextMaps = () => {
+    setRamasGastoMap({});
+    setSegmentosMap({});
+    setRamasIngresoMap({});
+    setRamasProveedorMap({});
+    setProveedorCountByRama({});
+    setProveedorCountBySubsegmento({});
+    setGastoCountByTipo({});
+    setIngresoCountByTipo({});
+  };
+
   const load = useCallback(async () => {
     setLoading(true);
 
     try {
-      // ======================================================
-      // PROVEEDORES
-      // ======================================================
       if (auxType === 'proveedor') {
         const data = await listProveedores();
         setItems(data);
-
-        setRamasGastoMap({});
-        setSegmentosMap({});
-        setRamasIngresoMap({});
-        setRamasProveedorMap({});
-        setProveedorCountByRama({});
-        setProveedorCountBySubsegmento({});
-        setGastoCountByTipo({});
-        setIngresoCountByTipo({});
+        clearContextMaps();
         return;
       }
 
-      // ======================================================
-      // AUX GENÉRICO
-      // ======================================================
       const data = await listAux<SimpleAuxItem>(auxType as AuxEntity);
       setItems(data);
 
-      // ------------------------------------------------------
-      // TIPOS DE GASTO
-      // ------------------------------------------------------
       if (auxType === 'tipo_gasto') {
         const [ramas, segmentos] = await Promise.all([
           listAux<SimpleAuxItem>('tipo_ramas_gasto'),
@@ -155,16 +151,9 @@ export const AuxEntityListScreen: React.FC<Props> = ({ navigation, route }) => {
         setSegmentosMap(sMap);
         setRamasIngresoMap({});
         setRamasProveedorMap({});
-        setGastoCountByTipo({});
-        setProveedorCountByRama({});
-        setProveedorCountBySubsegmento({});
-        setIngresoCountByTipo({});
         return;
       }
 
-      // ------------------------------------------------------
-      // TIPOS DE INGRESO
-      // ------------------------------------------------------
       if (auxType === 'tipo_ingreso') {
         const ramasIngreso = await listAux<SimpleAuxItem>('tipo_ramas_ingreso');
 
@@ -175,16 +164,9 @@ export const AuxEntityListScreen: React.FC<Props> = ({ navigation, route }) => {
         setRamasGastoMap({});
         setSegmentosMap({});
         setRamasProveedorMap({});
-        setProveedorCountByRama({});
-        setProveedorCountBySubsegmento({});
-        setGastoCountByTipo({});
-        setIngresoCountByTipo({});
         return;
       }
 
-      // ------------------------------------------------------
-      // SUBSEGMENTOS DE PROVEEDOR
-      // ------------------------------------------------------
       if (auxType === 'tipo_subsegmento_proveedor') {
         const ramasProveedor = await listAux<SimpleAuxItem>('tipo_ramas_proveedores');
 
@@ -192,52 +174,17 @@ export const AuxEntityListScreen: React.FC<Props> = ({ navigation, route }) => {
         for (const r of ramasProveedor ?? []) rpMap[String(r.id)] = String(r.nombre);
 
         setRamasProveedorMap(rpMap);
-
         setRamasGastoMap({});
         setSegmentosMap({});
         setRamasIngresoMap({});
-        setProveedorCountByRama({});
-        setProveedorCountBySubsegmento({});
-        setGastoCountByTipo({});
-        setIngresoCountByTipo({});
         return;
       }
 
-      // ------------------------------------------------------
-      // RAMAS DE PROVEEDORES
-      // ------------------------------------------------------
-      if (auxType === 'tipo_ramas_proveedores') {
-        setRamasGastoMap({});
-        setSegmentosMap({});
-        setRamasIngresoMap({});
-        setRamasProveedorMap({});
-        setProveedorCountByRama({});
-        setProveedorCountBySubsegmento({});
-        setGastoCountByTipo({});
-        setIngresoCountByTipo({});
-        return;
-      }
-
-      // Resto: limpiar mapas
-      setRamasGastoMap({});
-      setSegmentosMap({});
-      setRamasIngresoMap({});
-      setRamasProveedorMap({});
-      setProveedorCountByRama({});
-      setProveedorCountBySubsegmento({});
-      setGastoCountByTipo({});
-      setIngresoCountByTipo({});
+      clearContextMaps();
     } catch (err) {
       console.error('[AuxEntityList] Error cargando', auxType, err);
       setItems([]);
-      setRamasGastoMap({});
-      setSegmentosMap({});
-      setRamasIngresoMap({});
-      setRamasProveedorMap({});
-      setProveedorCountByRama({});
-      setProveedorCountBySubsegmento({});
-      setGastoCountByTipo({});
-      setIngresoCountByTipo({});
+      clearContextMaps();
     } finally {
       setLoading(false);
     }
@@ -260,7 +207,9 @@ export const AuxEntityListScreen: React.FC<Props> = ({ navigation, route }) => {
 
     return items.filter((item: any) => {
       const nombre = String(item?.nombre ?? '').toLowerCase();
-      return nombre.includes(term);
+      const pais = String(item?.pais?.nombre ?? item?.region?.pais?.nombre ?? '').toLowerCase();
+      const region = String(item?.region?.nombre ?? '').toLowerCase();
+      return nombre.includes(term) || pais.includes(term) || region.includes(term);
     });
   }, [items, search]);
 
@@ -381,6 +330,19 @@ export const AuxEntityListScreen: React.FC<Props> = ({ navigation, route }) => {
                 >
                   <View style={panelStyles.menuTextContainer}>
                     <Text style={panelStyles.menuTitle}>{item.nombre}</Text>
+
+                    {auxType === 'region' && item?.pais?.nombre ? (
+                      <Text style={panelStyles.menuSubtitle}>
+                        País: {item.pais.nombre}
+                      </Text>
+                    ) : null}
+
+                    {auxType === 'localidad' && item?.region?.nombre ? (
+                      <Text style={panelStyles.menuSubtitle}>
+                        Región: {item.region.nombre}
+                        {item.region?.pais?.nombre ? ` · ${item.region.pais.nombre}` : ''}
+                      </Text>
+                    ) : null}
 
                     {auxType === 'proveedor' && item?.rama_rel?.nombre && (
                       <Text style={panelStyles.menuSubtitle}>
