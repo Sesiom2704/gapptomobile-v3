@@ -47,6 +47,7 @@ import {
   type RamaIngreso,
   omitirIngresoEsteMes,
   deshacerOmisionIngresoEsteMes,
+  cambiarEstadoActivoKpiIngreso,
 } from '../../services/ingresosApi';
 import { PERIODICIDAD_OPTIONS, type PeriodicidadFiltro } from '../../constants/general';
 import { EuroformatEuro } from '../../utils/format';
@@ -418,6 +419,48 @@ export const IngresoListScreen: React.FC<Props> = ({ navigation }) => {
     );
   };
 
+  // ============================
+  // ✅ Activar / desactivar ingreso gestionable
+  // ============================
+
+  const handleCambiarActivoKpiIngreso = async (ingreso: Ingreso, nuevoActivo: boolean) => {
+    try {
+      await cambiarEstadoActivoKpiIngreso(ingreso.id, nuevoActivo);
+
+      await cargarIngresos();
+      await Promise.all([reloadGastosPendientes(), fetchIngresosPendientesCount()]);
+    } catch (err) {
+      console.error('[IngresoList] Error al cambiar estado activo/kpi del ingreso', err);
+      Alert.alert(
+        'Error',
+        nuevoActivo
+          ? 'No se ha podido activar el ingreso.'
+          : 'No se ha podido desactivar el ingreso.'
+      );
+    }
+  };
+
+  const confirmarCambiarActivoKpiIngreso = (ingreso: Ingreso) => {
+    const estaActivo = ingreso.activo !== false;
+    const nuevoActivo = !estaActivo;
+    const nombre = ingreso.concepto || ingreso.id;
+
+    Alert.alert(
+      estaActivo ? 'Desactivar ingreso' : 'Activar ingreso',
+      estaActivo
+        ? `¿Quieres desactivar "${nombre}"?\n\nSe guardará ACTIVO = false y KPI = false.`
+        : `¿Quieres activar "${nombre}"?\n\nSe guardará ACTIVO = true y KPI = true.`,
+      [
+        { text: 'Cancelar', style: 'cancel' },
+        {
+          text: estaActivo ? 'Desactivar' : 'Activar',
+          style: estaActivo ? 'destructive' : 'default',
+          onPress: () => void handleCambiarActivoKpiIngreso(ingreso, nuevoActivo),
+        },
+      ]
+    );
+  };
+
   const handleEliminar = async (ingreso: Ingreso) => {
     Alert.alert('Eliminar ingreso', `¿Eliminar el ingreso "${ingreso.concepto || ingreso.id}"?`, [
       { text: 'Cancelar', style: 'cancel' },
@@ -492,6 +535,18 @@ export const IngresoListScreen: React.FC<Props> = ({ navigation }) => {
         });
       }
     }
+
+    const estaActivo = ingreso.activo !== false;
+
+    acciones.push({
+      label: estaActivo ? 'Desactivar' : 'Activar',
+      onPress: () => {
+        setSheetVisible(false);
+        confirmarCambiarActivoKpiIngreso(ingreso);
+      },
+      iconName: estaActivo ? 'pause-circle-outline' : 'play-circle-outline',
+      color: estaActivo ? rojo : verde,
+    });
 
     acciones.push({
       label: 'Editar ingreso',

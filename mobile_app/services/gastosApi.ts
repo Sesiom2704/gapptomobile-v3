@@ -428,6 +428,61 @@ export async function actualizarGasto(
 }
 
 /**
+ * UPDATE específico:
+ * Activar / desactivar gasto gestionable desde listados.
+ *
+ * Regla de negocio:
+ * - Activar    => activo=true  y kpi=true
+ * - Desactivar => activo=false y kpi=false
+ *
+ * Importante:
+ * - Reutiliza actualizarGasto porque el backend actual trabaja con PUT completo.
+ * - No enviamos comentariosDirty, así que actualizarGasto NO pisa comentarios.
+ */
+export async function cambiarEstadoActivoKpiGasto(
+  gasto: Gasto,
+  nuevoActivo: boolean
+): Promise<Gasto> {
+  return actualizarGasto(gasto.id, {
+    nombre: gasto.nombre,
+    segmentoId: gasto.segmento_id,
+    tipoId: gasto.tipo_id,
+    proveedorId: gasto.proveedor_id,
+    tienda: gasto.tienda ?? undefined,
+
+    numCuotas: gasto.cuotas ?? 1,
+    importeCuota:
+      gasto.importe_cuota != null
+        ? String(gasto.importe_cuota)
+        : String(gasto.importe ?? 0),
+    importeTotal:
+      gasto.importe != null
+        ? String(gasto.importe)
+        : String(gasto.importe_cuota ?? 0),
+
+    periodicidad: gasto.periodicidad,
+    cuentaId: gasto.cuenta_id,
+    viviendaId: gasto.referencia_vivienda_id ?? null,
+
+    fecha: gasto.fecha,
+    rangoPago: gasto.rango_pago,
+    referenciaGasto: gasto.referencia_gasto ?? undefined,
+
+    // Se pasa el valor actual, pero comentariosDirty=false para no pisar BD.
+    comentarios: gasto.comentarios ?? undefined,
+    comentariosDirty: false,
+
+    cuotasPagadas: gasto.cuotas_pagadas ?? 0,
+    prestamoId: gasto.prestamo_id ?? undefined,
+    numCuota: gasto.num_cuota ?? 1,
+
+    activo: nuevoActivo,
+    pagado: gasto.pagado ?? false,
+    kpi: nuevoActivo,
+  });
+}
+
+/**
  * DELETE gasto.
  */
 export async function eliminarGasto(gastoId: string): Promise<void> {

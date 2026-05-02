@@ -435,6 +435,26 @@ export async function updateIngreso(id: string, payload: IngresoUpdatePayload): 
   }
 }
 
+/**
+ * UPDATE específico:
+ * Activar / desactivar ingreso gestionable desde listados.
+ *
+ * Regla de negocio:
+ * - Activar    => activo=true  y kpi=true
+ * - Desactivar => activo=false y kpi=false
+ *
+ * En ingresos usamos PATCH, por tanto podemos enviar solo los campos necesarios.
+ */
+export async function cambiarEstadoActivoKpiIngreso(
+  id: string,
+  nuevoActivo: boolean
+): Promise<Ingreso> {
+  return updateIngreso(id, {
+    activo: nuevoActivo,
+    kpi: nuevoActivo,
+  });
+}
+
 export async function eliminarIngreso(id: string): Promise<void> {
   const url = `${ENDPOINT_INGRESOS_BASE}/${id}`;
   console.log('[ingresosApi] DELETE ingreso ->', url);

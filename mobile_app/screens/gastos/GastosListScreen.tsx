@@ -120,11 +120,11 @@ import {
   Gasto,
   marcarGastoComoPagado,
   eliminarGasto,
+  cambiarEstadoActivoKpiGasto,
   fetchTiposGasto,
   TipoGasto,
   Proveedor,
   fetchProveedores,
-  // ✅ omisión mensual (gestionables)
   omitirGastoEsteMes,
   deshacerOmisionGastoEsteMes,
 } from '../../services/gastosApi';
@@ -1075,6 +1075,47 @@ export const GastosListScreen: React.FC<{ navigation: any; route: any }> = ({
     );
   };
 
+  // ============================
+  // ✅ Activar / desactivar gestionable
+  // ============================
+
+  const handleCambiarActivoKpiGestionable = async (gasto: Gasto, nuevoActivo: boolean) => {
+    try {
+      await cambiarEstadoActivoKpiGasto(gasto, nuevoActivo);
+
+      await reload();
+      await Promise.all([reloadPendientes(), fetchIngresosPendientesCount()]);
+    } catch (err) {
+      console.error('Error al cambiar estado activo/kpi del gasto', err);
+      Alert.alert(
+        'Error',
+        nuevoActivo
+          ? 'No se ha podido activar el gasto.'
+          : 'No se ha podido desactivar el gasto.'
+      );
+    }
+  };
+
+  const confirmarCambiarActivoKpiGestionable = (gasto: Gasto) => {
+    const estaActivo = gasto.activo !== false;
+    const nuevoActivo = !estaActivo;
+
+    Alert.alert(
+      estaActivo ? 'Desactivar gasto' : 'Activar gasto',
+      estaActivo
+        ? `¿Quieres desactivar "${gasto.nombre}"?\n\nSe guardará ACTIVO = false y KPI = false.`
+        : `¿Quieres activar "${gasto.nombre}"?\n\nSe guardará ACTIVO = true y KPI = true.`,
+      [
+        { text: 'Cancelar', style: 'cancel' },
+        {
+          text: estaActivo ? 'Desactivar' : 'Activar',
+          style: estaActivo ? 'destructive' : 'default',
+          onPress: () => void handleCambiarActivoKpiGestionable(gasto, nuevoActivo),
+        },
+      ]
+    );
+  };
+
   // ======= ActionSheet helpers =======
   const abrirMenuGestionable = (gasto: Gasto) => {
     setSelectedGasto(gasto);
@@ -1133,6 +1174,18 @@ export const GastosListScreen: React.FC<{ navigation: any; route: any }> = ({
         });
       }
     }
+
+    const estaActivo = gasto.activo !== false;
+
+    acciones.push({
+      label: estaActivo ? 'Desactivar' : 'Activar',
+      onPress: () => {
+        setSheetVisible(false);
+        confirmarCambiarActivoKpiGestionable(gasto);
+      },
+      iconName: estaActivo ? 'pause-circle-outline' : 'play-circle-outline',
+      color: estaActivo ? rojo : verde,
+    });
 
     acciones.push({
       label: 'Editar gasto',
