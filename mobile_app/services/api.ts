@@ -1,4 +1,36 @@
-// mobile_app/services/api.ts
+/**
+ * Ruta: mobile_app/services/api.ts
+ * Versión: 1.1.0
+ * Descripción:
+ * Cliente HTTP centralizado para GAPPTO Mobile.
+ *
+ * Funcionalidades incluidas:
+ * - Configuración única de la URL base de API desde Constants / EAS.
+ * - Instancia rápida de Axios para peticiones normales.
+ * - Instancia lenta de Axios para procesos largos.
+ * - Gestión global de base activa mediante header X-DB.
+ * - Gestión global de token Bearer mediante header Authorization.
+ * - Interceptores de request para garantizar headers consistentes.
+ * - Interceptores de response para logging, timeout y manejo global de 401.
+ *
+ * Ajustes de esta versión:
+ * - Se unifica la base por defecto en "supabase", coherente con la pantalla de gestión.
+ * - Se fuerza siempre el header X-DB con la base activa en memoria.
+ * - Se evita que una request conserve un X-DB antiguo.
+ * - Se mantiene compatibilidad con api y apiSlow.
+ *
+ * Reglas funcionales:
+ * - La fuente activa en memoria es currentDbKey.
+ * - setDbKey debe llamarse cuando se cambie la base activa.
+ * - Cada request debe salir siempre con el X-DB actual.
+ * - Si hay token, Authorization debe salir siempre como Bearer <token>.
+ *
+ * Notas de diseño:
+ * - SecureStore no se lee aquí para evitar efectos asíncronos dentro del módulo.
+ * - La carga inicial de dbKey se realiza desde AuthContext.
+ * - Las pantallas operativas pueden consultar getDbKey o cambiar con setDbKey.
+ */
+
 import axios, {
   AxiosError,
   AxiosResponse,
@@ -22,7 +54,7 @@ console.log(
   (Constants.expoConfig as any)?.releaseChannel ||
     (Constants.expoConfig as any)?.updates?.requestHeaders
 );
-console.log("[CONFIG] BUILD_TAG=2025-12-22T-GPT-FIX-01");
+console.log("[CONFIG] BUILD_TAG=2025-12-22T-GPT-FIX-DB-SELECTOR-01");
 
 // Preferimos EXPO_PUBLIC_API_URL. NO queremos “API_URL” legacy colándose.
 const RAW_API_URL =
@@ -61,8 +93,12 @@ export const getApiBaseUrl = (): string => API_URL;
  * --------------------------------------------
  * Estado global: DB selector + Auth token
  * --------------------------------------------
+ *
+ * IMPORTANTE:
+ * - La app usa "supabase" como base por defecto si no hay valor guardado.
+ * - AuthContext será quien lea SecureStore al arrancar y llame a setDbKey().
  */
-let currentDbKey: DBKey = "neon";
+let currentDbKey: DBKey = "supabase";
 
 /**
  * Guardamos el token en memoria y lo inyectamos SIEMPRE en cada request
@@ -112,8 +148,13 @@ export const apiSlow = axios.create({
  */
 export const setDbKey = (key: DBKey) => {
   currentDbKey = key;
+
+  // Dejamos defaults actualizados por compatibilidad.
+  // El interceptor, además, forzará X-DB en cada request.
   api.defaults.headers.common["X-DB"] = key;
   apiSlow.defaults.headers.common["X-DB"] = key;
+
+  console.log("[API] setDbKey ->", key);
 };
 
 export const getDbKey = (): DBKey => currentDbKey;
@@ -127,7 +168,8 @@ export const setAuthToken = (token?: string | null) => {
 
   if (currentAuthToken) {
     const v = buildBearer(currentAuthToken);
-    // dejamos también defaults por si alguna librería lee de ahí
+
+    // Dejamos también defaults por si alguna librería lee de ahí.
     api.defaults.headers.common["Authorization"] = v;
     apiSlow.defaults.headers.common["Authorization"] = v;
   } else {
@@ -135,7 +177,7 @@ export const setAuthToken = (token?: string | null) => {
     delete apiSlow.defaults.headers.common["Authorization"];
   }
 
-  // limpieza defensiva
+  // Limpieza defensiva.
   delete (api.defaults.headers.common as any)["authorization"];
   delete (apiSlow.defaults.headers.common as any)["authorization"];
 };
@@ -173,26 +215,29 @@ const maskAuth = (auth: unknown): string => {
 
 /**
  * Interceptor único:
- * - Garantiza X-DB siempre
- * - Garantiza Authorization siempre (si hay token)
- * - Loggea lo que REALMENTE va en config.headers
+ * - Garantiza X-DB siempre con la base activa actual.
+ * - Garantiza Authorization siempre, si hay token.
+ * - Loggea lo que REALMENTE va en config.headers.
+ *
+ * Punto clave:
+ * - Forzamos headersAny["X-DB"] = currentDbKey.
+ * - No usamos ?? porque una request podría traer un X-DB antiguo.
  */
 const requestInterceptor = (name: string) => (config: ReqConfig) => {
   config.__t0 = Date.now();
   config.__name = name;
 
   // Normaliza headers (axios en RN puede traer AxiosHeaders u objeto)
-  const headersAny: any = (config.headers ?? {});
+  const headersAny: any = config.headers ?? {};
 
-  // 1) X-DB (siempre)
-  headersAny["X-DB"] = headersAny["X-DB"] ?? currentDbKey;
+  // 1) X-DB siempre con la base activa en memoria.
+  headersAny["X-DB"] = currentDbKey;
 
-  // 2) Authorization (siempre que haya token)
+  // 2) Authorization siempre que haya token.
   if (currentAuthToken) {
     headersAny["Authorization"] = buildBearer(currentAuthToken);
     delete headersAny["authorization"];
   } else {
-    // si no hay token, limpiamos
     delete headersAny["Authorization"];
     delete headersAny["authorization"];
   }
@@ -239,6 +284,7 @@ const logResponse = (response: AxiosResponse) => {
       dt != null ? ` (${dt}ms)` : ""
     }`
   );
+
   return response;
 };
 
@@ -305,7 +351,10 @@ apiSlow.interceptors.response.use(logResponse, async (error: AxiosError) => {
 api.interceptors.response.use(
   (r) => r,
   (error: AxiosError) => {
-    if (error.response?.status === 401 && onUnauthorizedHandler) onUnauthorizedHandler();
+    if (error.response?.status === 401 && onUnauthorizedHandler) {
+      onUnauthorizedHandler();
+    }
+
     return Promise.reject(error);
   }
 );

@@ -1,12 +1,13 @@
 /**
  * Ruta: mobile_app/screens/bd/gestionDbScreen.tsx
- * Versión: 1.0.0
+ * Versión: 1.1.0
  * Descripción:
  * Pantalla de gestión manual de base de datos y sincronizaciones para GAPPTO Mobile.
  *
  * Funcionalidades incluidas:
  * - Permite seleccionar la base activa de la app entre Supabase y Neon.
  * - Guarda la base activa en SecureStore.
+ * - Aplica la base activa inmediatamente al cliente HTTP global.
  * - Permite lanzar sincronizaciones manuales entre Neon, Supabase y Sheets.
  * - Soporta dry-run y ejecución real.
  * - Soporta modo destructivo controlado.
@@ -16,16 +17,22 @@
  * - Incluye ping de backend para depuración.
  *
  * Ajustes de esta versión:
- * - Se refuerzan validaciones antes de lanzar sincronización.
- * - Se mejora la limpieza del polling para evitar estados colgados.
- * - Se evita relanzar un job manual si ya hay uno en curso.
- * - Se mantienen logs de depuración y comportamiento funcional existente.
+ * - Se corrige el cambio real de base activa llamando a setDbKey().
+ * - Se sincroniza SecureStore + memoria HTTP + estado visual.
+ * - Se aplica setDbKey también al cargar la pantalla.
+ * - Se refuerza la validación del valor guardado en SecureStore.
+ * - Se mantiene toda la funcionalidad de sincronización existente.
+ *
+ * Reglas funcionales:
+ * - Base válida solo puede ser "supabase" o "neon".
+ * - Cambiar base activa afecta a las siguientes peticiones normales.
+ * - Las sincronizaciones manuales siguen usando source/dest independientes.
+ * - No se relanza un job manual si ya hay uno en curso.
  *
  * Notas de diseño:
  * - La pantalla sigue siendo manual y operativa, útil para pruebas y soporte.
- * - Se prioriza la claridad del estado del job y la prevención de acciones conflictivas.
- * - El polling sigue siendo simple para no añadir complejidad innecesaria.
- * - Se mantiene compatibilidad con el backend actual de sincronización.
+ * - La base activa se guarda persistente y se aplica en caliente.
+ * - El backend debe usar el header X-DB recibido para seleccionar conexión.
  */
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -45,7 +52,7 @@ import * as SecureStore from "expo-secure-store";
 import Header from "../../components/layout/Header";
 import { panelStyles } from "../../components/panels/panelStyles";
 import { colors } from "../../theme/colors";
-import { api } from "../../services/api";
+import { api, setDbKey } from "../../services/api";
 
 // Habilitar animaciones en Android (para desplegables)
 if (Platform.OS === "android" && UIManager.setLayoutAnimationEnabledExperimental) {
@@ -58,6 +65,8 @@ type JobStatus = "idle" | "queued" | "running" | "done" | "error" | "canceled";
 
 const DEBUG_DB = true;
 const POLL_INTERVAL_MS = 900;
+const STORAGE_DB_KEY = "dbKey";
+const DEFAULT_DB_KEY: DBKey = "supabase";
 
 function debug(...args: any[]) {
   if (!DEBUG_DB) return;
@@ -78,6 +87,10 @@ function extractAxiosError(e: any) {
   const detail = data?.detail ?? data;
   const message = e?.message;
   return { status, data, detail, message };
+}
+
+function isValidDbKey(value: string | null): value is DBKey {
+  return value === "supabase" || value === "neon";
 }
 
 async function startSyncJob(payload: {
@@ -120,7 +133,10 @@ function Pill({
         disabled ? { opacity: 0.5 } : null,
       ]}
     >
-      <Text style={[styles.pillText, active ? styles.pillTextActive : styles.pillTextInactive]} numberOfLines={1}>
+      <Text
+        style={[styles.pillText, active ? styles.pillTextActive : styles.pillTextInactive]}
+        numberOfLines={1}
+      >
         {label}
       </Text>
     </TouchableOpacity>
@@ -219,7 +235,7 @@ export default function GestionDbScreen() {
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const reqIdRef = useRef<string>("");
 
-  const [currentDb, setCurrentDb] = useState<DBKey>("supabase");
+  const [currentDb, setCurrentDb] = useState<DBKey>(DEFAULT_DB_KEY);
 
   const [syncSrc, setSyncSrc] = useState<EndpointDB>("neon");
   const [syncDst, setSyncDst] = useState<EndpointDB>("supabase");
@@ -259,12 +275,25 @@ export default function GestionDbScreen() {
     }
   }, []);
 
+  /**
+   * Cambia la base activa real:
+   * 1) guarda en SecureStore
+   * 2) aplica en memoria al cliente HTTP
+   * 3) actualiza la pantalla
+   *
+   * Antes solo se hacía 1 y 3. Por eso visualmente cambiaba,
+   * pero las peticiones podían seguir saliendo con la base anterior.
+   */
   const applyDb = useCallback(async (key: DBKey) => {
     debug("applyDb ->", key);
-    setCurrentDb(key);
 
     try {
-      await SecureStore.setItemAsync("dbKey", key);
+      await SecureStore.setItemAsync(STORAGE_DB_KEY, key);
+
+      setDbKey(key);
+      setCurrentDb(key);
+
+      debug("applyDb saved + api updated ->", key);
       Alert.alert("Base de datos", `Ahora usas: ${key.toUpperCase()}`);
     } catch (e) {
       debug("applyDb error:", e);
@@ -320,22 +349,37 @@ export default function GestionDbScreen() {
     [clearPoll]
   );
 
+  /**
+   * Carga inicial de la pantalla:
+   * - lee dbKey de SecureStore
+   * - valida valor
+   * - aplica setDbKey para asegurar memoria HTTP
+   * - actualiza estado visual
+   */
   useEffect(() => {
     mountedRef.current = true;
 
     (async () => {
       try {
-        const stored = (await SecureStore.getItemAsync("dbKey")) as DBKey | null;
-        const effective = stored || "supabase";
-        debug("boot: stored dbKey =", stored, "-> effective =", effective);
+        const storedRaw = await SecureStore.getItemAsync(STORAGE_DB_KEY);
+        const effective: DBKey = isValidDbKey(storedRaw) ? storedRaw : DEFAULT_DB_KEY;
+
+        if (!isValidDbKey(storedRaw)) {
+          await SecureStore.setItemAsync(STORAGE_DB_KEY, effective);
+        }
+
+        debug("boot: stored dbKey =", storedRaw, "-> effective =", effective);
 
         if (mountedRef.current) {
+          setDbKey(effective);
           setCurrentDb(effective);
         }
       } catch (e) {
         debug("boot: SecureStore read failed:", e);
+
         if (mountedRef.current) {
-          setCurrentDb("supabase");
+          setDbKey(DEFAULT_DB_KEY);
+          setCurrentDb(DEFAULT_DB_KEY);
         }
       }
     })();
@@ -478,6 +522,7 @@ export default function GestionDbScreen() {
               <Text style={styles.cardTitle}>Base activa (peticiones normales)</Text>
               <Badge text={currentDb.toUpperCase()} tone="info" />
             </View>
+
             <Text style={styles.cardSubtitle}>
               Selecciona la base de datos principal para las peticiones estándar de la app.
             </Text>
@@ -502,6 +547,7 @@ export default function GestionDbScreen() {
                 tone={syncExecute ? (syncDestructive ? "warn" : "ok") : "info"}
               />
             </View>
+
             <Text style={styles.cardSubtitle}>
               Define origen y destino. Recomendación: empieza siempre con dry-run.
             </Text>
@@ -577,6 +623,7 @@ export default function GestionDbScreen() {
 
               <View style={{ marginTop: 8 }}>
                 <ProgressBar progress={progress} />
+
                 <View style={styles.progressMetaRow}>
                   <Text style={styles.progressMetaLeft}>Progreso</Text>
                   <Text style={styles.progressMetaRight}>{progress.toFixed(2)}%</Text>

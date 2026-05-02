@@ -1,4 +1,37 @@
-// screens/auth/BootScreen.tsx
+/**
+ * Ruta: mobile_app/screens/auth/BootScreen.tsx
+ * Versión: 1.1.0
+ * Descripción:
+ * Pantalla de arranque de GAPPTO Mobile.
+ *
+ * Funcionalidades incluidas:
+ * - Muestra pantalla de inicio con logo, imagen familiar, progreso y estado.
+ * - Despierta el backend mediante /health.
+ * - Valida disponibilidad de base de datos mediante /ready o fallback /api/health.
+ * - Espera a que AuthContext termine de hidratar SecureStore.
+ * - Valida sesión si existe token usando /api/v1/auth/me.
+ * - Navega a Login o Main según autenticación.
+ * - Sugiere copia automática los días 7, 14, 21 y 28 si el usuario está autenticado.
+ * - Permite reintentar si el backend no responde.
+ *
+ * Ajustes de esta versión:
+ * - Boot no ejecuta runBoot hasta que isHydrating sea false.
+ * - /ready y /api/health reciben header X-DB con la base activa.
+ * - /api/v1/auth/me recibe Authorization y X-DB.
+ * - Se mantiene el flujo Boot -> Login/Main/BackupAuto.
+ *
+ * Reglas funcionales:
+ * - AuthContext debe haber aplicado dbKey antes de que Boot valide la base.
+ * - /health se puede llamar sin X-DB porque solo comprueba servidor vivo.
+ * - /ready se llama con X-DB porque puede validar conexión a base activa.
+ * - Si token es inválido, se ejecuta logout y se navega a Login.
+ *
+ * Notas de diseño:
+ * - Se conserva fetch directo para boot/wake-up.
+ * - El cliente Axios sigue siendo usado por el resto de la app.
+ * - getDbKey permite que fetch directo use la misma base activa que Axios.
+ */
+
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   View,
@@ -16,7 +49,7 @@ import * as SecureStore from "expo-secure-store";
 import { Screen } from "../../components/layout/Screen";
 import { colors, spacing, radius } from "../../theme";
 import { useAuth } from "../../context/AuthContext";
-import { getApiBaseUrl } from "../../services/api";
+import { getApiBaseUrl, getDbKey } from "../../services/api";
 
 /**
  * Keys SecureStore para control de popup y ejecución por slot.
@@ -37,12 +70,16 @@ function todayKeyLocal(d = new Date()) {
 /**
  * Devuelve slot (1..4) si el día es 7/14/21/28. Si no, null.
  */
-function getBackupSlotForDate(d = new Date()): { day: number; slot: 1 | 2 | 3 | 4; slotLabel: string; slotKey: string } | null {
+function getBackupSlotForDate(
+  d = new Date()
+): { day: number; slot: 1 | 2 | 3 | 4; slotLabel: string; slotKey: string } | null {
   const day = d.getDate();
   if (day !== 7 && day !== 14 && day !== 21 && day !== 28) return null;
+
   const slot = (day / 7) as 1 | 2 | 3 | 4;
   const slotLabel = `${slot}/4`;
   const slotKey = `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(day)}`; // YYYY-MM-07
+
   return { day, slot, slotLabel, slotKey };
 }
 
@@ -97,6 +134,7 @@ export const BootScreen: React.FC<{ navigation: any }> = ({ navigation }) => {
           ...(extraHeaders || {}),
         },
       });
+
       return res;
     } finally {
       clearTimeout(t);
@@ -105,6 +143,10 @@ export const BootScreen: React.FC<{ navigation: any }> = ({ navigation }) => {
 
   /**
    * Polling robusto (Render puede tardar en despertar).
+   *
+   * headers:
+   * - opcional, usado para /ready y /api/health cuando queremos validar
+   *   la base activa mediante X-DB.
    */
   const pollOk = async (
     url: string,
@@ -113,6 +155,7 @@ export const BootScreen: React.FC<{ navigation: any }> = ({ navigation }) => {
       initialIntervalMs?: number;
       maxIntervalMs?: number;
       requestTimeoutMs?: number;
+      headers?: Record<string, string>;
     }
   ): Promise<boolean> => {
     const totalMs = opts?.totalMs ?? 60_000;
@@ -124,7 +167,7 @@ export const BootScreen: React.FC<{ navigation: any }> = ({ navigation }) => {
 
     while (Date.now() - start < totalMs) {
       try {
-        const res = await fetchWithTimeout(url, requestTimeoutMs);
+        const res = await fetchWithTimeout(url, requestTimeoutMs, opts?.headers);
         if (res.ok) return true;
       } catch {
         // Normal durante el wake-up o sin conexión
@@ -141,12 +184,21 @@ export const BootScreen: React.FC<{ navigation: any }> = ({ navigation }) => {
    * Validación de token:
    * - Si el token es inválido, el backend responderá 401.
    * - En ese caso hacemos logout() y forzamos Login.
+   *
+   * Importante:
+   * - Como esta llamada usa fetch directo, añadimos X-DB manualmente.
    */
-  const validateSessionIfToken = async (base: string): Promise<"valid" | "invalid" | "unknown"> => {
+  const validateSessionIfToken = async (
+    base: string
+  ): Promise<"valid" | "invalid" | "unknown"> => {
     if (!token) return "unknown";
 
     const meUrl = `${base}/api/v1/auth/me`;
-    const authHeader = { Authorization: `Bearer ${token}` };
+
+    const authHeader = {
+      Authorization: `Bearer ${token}`,
+      "X-DB": getDbKey(),
+    };
 
     try {
       const res = await fetchWithTimeout(meUrl, 6_000, authHeader);
@@ -167,8 +219,8 @@ export const BootScreen: React.FC<{ navigation: any }> = ({ navigation }) => {
 
   /**
    * Decide si toca mostrar popup de copia y lo muestra.
-   * Devuelve true si el flujo de navegación queda “gestionado” por el popup (aceptar/rechazar),
-   * y por tanto runBoot debe hacer return para no ejecutar navigation.reset adicional.
+   * Devuelve true si el flujo de navegación queda “gestionado” por el popup
+   * y, por tanto, runBoot debe hacer return para no ejecutar navigation.reset adicional.
    */
   const maybeShowBackupPrompt = useCallback(async (): Promise<boolean> => {
     // Solo tiene sentido si vamos a entrar a Main (sesión activa).
@@ -197,7 +249,8 @@ export const BootScreen: React.FC<{ navigation: any }> = ({ navigation }) => {
         return false;
       }
 
-      // Marcamos como “mostrado hoy” en cuanto decidimos mostrarlo (acepte o rechace, no insistimos).
+      // Marcamos como “mostrado hoy” en cuanto decidimos mostrarlo.
+      // Acepte o rechace, no insistimos.
       await SecureStore.setItemAsync(SS_BACKUP_PROMPT_SEEN_DATE, today);
 
       // Importante: el popup gestiona la navegación final.
@@ -210,6 +263,7 @@ export const BootScreen: React.FC<{ navigation: any }> = ({ navigation }) => {
             style: "cancel",
             onPress: () => {
               if (didFinalizeNavRef.current) return;
+
               didFinalizeNavRef.current = true;
               navigation.reset({ index: 0, routes: [{ name: "Main" }] });
             },
@@ -219,7 +273,9 @@ export const BootScreen: React.FC<{ navigation: any }> = ({ navigation }) => {
             style: "default",
             onPress: () => {
               if (didFinalizeNavRef.current) return;
+
               didFinalizeNavRef.current = true;
+
               // Dejamos Main por debajo, y abrimos BackupAuto encima.
               navigation.reset({
                 index: 1,
@@ -254,6 +310,11 @@ export const BootScreen: React.FC<{ navigation: any }> = ({ navigation }) => {
       return;
     }
 
+    const activeDb = getDbKey();
+    const dbHeaders = { "X-DB": activeDb };
+
+    console.log("[BOOT] runBoot con base activa:", activeDb);
+
     const urlHealth = `${base}/health`;
     const urlReadyPrimary = `${base}/ready`;
     const urlReadyFallback = `${base}/api/health`;
@@ -263,6 +324,7 @@ export const BootScreen: React.FC<{ navigation: any }> = ({ navigation }) => {
       setProgress(5);
 
       // 1) Servidor vivo
+      // /health no necesita X-DB porque solo comprueba que el backend responde.
       setStatus("Despertando backend…");
       setProgress(15);
 
@@ -270,30 +332,45 @@ export const BootScreen: React.FC<{ navigation: any }> = ({ navigation }) => {
       if (!okHealth) {
         throw new Error(`No responde /health.\nURL: ${urlHealth}`);
       }
+
       if (!mountedRef.current) return;
       setProgress(45);
 
       // 2) DB accesible
+      // /ready sí recibe X-DB para validar la base activa.
       setStatus("Validando base de datos…");
       setProgress(55);
 
-      let okReady = await pollOk(urlReadyPrimary, { totalMs: 30_000 });
-      if (!okReady) okReady = await pollOk(urlReadyFallback, { totalMs: 30_000 });
+      let okReady = await pollOk(urlReadyPrimary, {
+        totalMs: 30_000,
+        headers: dbHeaders,
+      });
+
+      if (!okReady) {
+        okReady = await pollOk(urlReadyFallback, {
+          totalMs: 30_000,
+          headers: dbHeaders,
+        });
+      }
 
       if (!okReady) {
         throw new Error(
-          `No responde /ready (ni /api/health).\nURLs:\n- ${urlReadyPrimary}\n- ${urlReadyFallback}`
+          `No responde /ready (ni /api/health).\nBase activa: ${activeDb}\nURLs:\n- ${urlReadyPrimary}\n- ${urlReadyFallback}`
         );
       }
+
       if (!mountedRef.current) return;
       setProgress(80);
 
-      // 3) Esperar a que SecureStore termine (AuthContext)
+      // 3) AuthContext ya debería haber terminado porque el useEffect no llama
+      // runBoot hasta isHydrating=false. Dejamos esta defensa por seguridad.
       setStatus("Preparando sesión…");
       const t0 = Date.now();
+
       while (mountedRef.current && isHydrating && Date.now() - t0 < 6_000) {
         await sleep(120);
       }
+
       if (!mountedRef.current) return;
       setProgress(88);
 
@@ -306,7 +383,9 @@ export const BootScreen: React.FC<{ navigation: any }> = ({ navigation }) => {
 
         if (session === "invalid") {
           await logout();
+
           if (!mountedRef.current) return;
+
           setProgress(100);
           navigation.reset({ index: 0, routes: [{ name: "Login" }] });
           return;
@@ -318,33 +397,53 @@ export const BootScreen: React.FC<{ navigation: any }> = ({ navigation }) => {
       setProgress(100);
 
       if (isAuthenticated) {
-        // Intentamos popup de backup antes de entrar a Main (pero la navegación final la hace el popup).
+        // Intentamos popup de backup antes de entrar a Main.
+        // La navegación final la hace el popup si devuelve true.
         const handledByPopup = await maybeShowBackupPrompt();
         if (handledByPopup) return;
 
         if (didFinalizeNavRef.current) return;
+
         didFinalizeNavRef.current = true;
         navigation.reset({ index: 0, routes: [{ name: "Main" }] });
       } else {
         if (didFinalizeNavRef.current) return;
+
         didFinalizeNavRef.current = true;
         navigation.reset({ index: 0, routes: [{ name: "Login" }] });
       }
     } catch (e: any) {
       if (!mountedRef.current) return;
+
       setFailed(true);
       setStatus("No se pudo iniciar la app.");
       setErrorDetail(typeof e?.message === "string" ? e.message : "Error desconocido");
     }
-  }, [isAuthenticated, isHydrating, token, logout, navigation, maybeShowBackupPrompt]);
+  }, [
+    isAuthenticated,
+    isHydrating,
+    token,
+    logout,
+    navigation,
+    maybeShowBackupPrompt,
+  ]);
 
+  /**
+   * Arranque:
+   * - No ejecutamos runBoot hasta que AuthContext termine de hidratar.
+   * - Así nos aseguramos de que dbKey y token ya están aplicados en memoria.
+   */
   useEffect(() => {
     mountedRef.current = true;
-    void runBoot();
+
+    if (!isHydrating) {
+      void runBoot();
+    }
+
     return () => {
       mountedRef.current = false;
     };
-  }, [runBoot]);
+  }, [isHydrating, runBoot]);
 
   return (
     <Screen>
