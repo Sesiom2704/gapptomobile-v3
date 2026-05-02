@@ -59,7 +59,6 @@ console.log("[CONFIG] BUILD_TAG=2025-12-22T-GPT-FIX-DB-SELECTOR-01");
 // Preferimos EXPO_PUBLIC_API_URL. NO queremos “API_URL” legacy colándose.
 const RAW_API_URL =
   extra.EXPO_PUBLIC_API_URL ||
-  process.env.EXPO_PUBLIC_API_URL ||
   (extra.eas && (extra.eas.EXPO_PUBLIC_API_URL || extra.eas.apiUrl)) ||
   "";
 
