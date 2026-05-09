@@ -985,17 +985,24 @@ def create_gasto(
 ):
     """
     Crea un gasto gestionable para el usuario autenticado:
-    - Normaliza campos (mayúsculas, vacíos -> None).
+    - Normaliza campos.
     - Genera id único.
-    - Calcula cuotas, total, importe pendiente.
+    - Calcula cuotas, total e importe pendiente.
     - Ajusta liquidez si aplica.
-    - Aplica lógica de pago relacionado (financiaciones/aportaciones).
-    - Fuerza user_id = current_user.id (ignorando cualquier user_id del payload).
+    - Aplica lógica de pago relacionado.
+    - Fuerza user_id = current_user.id.
 
-    NUEVO:
-    - Inicializa campos de omisión a valores seguros si vienen None:
-      omitido_este_mes=False, omitido_count=0.
-    - No se permite crear directamente con omitido_este_mes=True (lo controla el endpoint /omitir).
+    FIX v1.7.1:
+    - Antes, si el cliente enviaba cuotas=1 en un PAGO UNICO, el backend ponía
+      cuotas_pagadas=0 porque entraba en la rama "cuotas_in > 0".
+    - Ahora todo PAGO UNICO nace con todas sus cuotas pagadas:
+          cuotas_pagadas = cuotas
+          cuotas_restantes = 0
+          importe_pendiente = 0
+    - Esto corrige el caso:
+          cuotas = 1
+          cuotas_pagadas = 0
+      aunque el gasto estuviera pagado, inactivo y con liquidez descontada.
     """
     payload = to_payload(gasto_in)
 
@@ -1016,12 +1023,13 @@ def create_gasto(
 
     _upperize_payload(payload)
 
-    # Nunca confiamos en user_id que venga del cliente
+    # Nunca confiamos en user_id que venga del cliente.
     payload.pop("user_id", None)
 
-    # NUEVO: blindaje omisión en create
+    # Blindaje omisión en create.
     payload.pop("omitido_on", None)
     payload.pop("omitido_count", None)
+
     # Si el cliente intenta crear omitido_este_mes=True, lo neutralizamos.
     if bool(payload.get("omitido_este_mes", False)) is True:
         payload["omitido_este_mes"] = False
@@ -1032,24 +1040,30 @@ def create_gasto(
     payload["modifiedon"] = now_expr
 
     per_str = (payload.get("periodicidad") or "").upper().strip()
+    seg_str = (payload.get("segmento_id") or "").upper().strip()
+    is_cot = (seg_str == SEG_COT)
+
     cuotas_in = int(payload.get("cuotas") or 0)
-    importe = safe_float(payload.get("importe"))
+    cuotas_final = max(cuotas_in, 1)
 
-    # Defaults defensivos
-    if payload.get("activo") is None:
-        payload["activo"] = True
-    if payload.get("pagado") is None:
-        payload["pagado"] = False
-    if payload.get("kpi") is None:
-        payload["kpi"] = False
+    # ------------------------------------------------------------
+    # Normalización robusta de cuotas
+    # ------------------------------------------------------------
+    # Regla:
+    # - PAGO UNICO: nace completamente pagado.
+    # - Resto: usa cuotas_pagadas enviada si existe y es válida; si no, 0.
+    cp_in_raw = payload.get("cuotas_pagadas", None)
 
-    # Inserción: si no marca cuotas, tratamos como 1 (y PU marca pagado=1)
-    if cuotas_in > 0:
-        cuotas_final = max(cuotas_in, 1)
-        cuotas_pagadas = 0
+    try:
+      cp_in = int(cp_in_raw) if cp_in_raw is not None else None
+    except Exception:
+      cp_in = None
+
+    if per_str == "PAGO UNICO":
+        cuotas_pagadas = cuotas_final
     else:
-        cuotas_final = 1
-        cuotas_pagadas = 1 if per_str == "PAGO UNICO" else 0
+        cuotas_pagadas = cp_in if cp_in is not None else 0
+        cuotas_pagadas = max(0, min(cuotas_pagadas, cuotas_final))
 
     cuotas_restantes = max(cuotas_final - cuotas_pagadas, 0)
 
@@ -1057,42 +1071,59 @@ def create_gasto(
     payload["cuotas_pagadas"] = cuotas_pagadas
     payload["cuotas_restantes"] = cuotas_restantes
 
-    seg_str = (payload.get("segmento_id") or "").upper().strip()
-    is_cot = (seg_str == SEG_COT)
+    # Defaults defensivos.
+    if payload.get("activo") is None:
+        payload["activo"] = True
+    if payload.get("pagado") is None:
+        payload["pagado"] = False
+    if payload.get("kpi") is None:
+        payload["kpi"] = False
 
-    # --- Importes y derivados ---
+    # ------------------------------------------------------------
+    # Importes y derivados
+    # ------------------------------------------------------------
     if is_cot:
-        # COTIDIANOS (concepto especial):
-        # - importe       = presupuesto restante (viene del cliente y se irá ajustando con otra tabla)
-        # - importe_cuota = presupuesto (viene del cliente)
+        # COTIDIANOS:
+        # - importe       = presupuesto restante
+        # - importe_cuota = presupuesto base
+        # - total         = no relevante
         presupuesto = safe_float(payload.get("importe_cuota"))
         restante = safe_float(payload.get("importe"))
 
         payload["cuotas"] = 1
-        payload["cuotas_pagadas"] = 0 if per_str != "PAGO UNICO" else 1
+        payload["cuotas_pagadas"] = 1 if per_str == "PAGO UNICO" else 0
         payload["cuotas_restantes"] = 0
 
         payload["importe"] = round(restante, 2)
         payload["importe_cuota"] = round(presupuesto, 2)
-
-        # total no es relevante en COT -> lo dejamos a 0 para no inducir interpretaciones
         payload["total"] = 0.0
         payload["importe_pendiente"] = 0.0
     else:
-        # NO COT (regla estándar):
+        # NO COT:
         # - importe e importe_cuota iguales
         # - total = importe * cuotas
-        payload["importe_cuota"] = round(importe, 2)
-        payload["total"] = round(cuotas_final * importe, 2)
-        payload["importe_pendiente"] = round(cuotas_restantes * importe, 2)
+        # - importe_pendiente = cuotas_restantes * importe
+        importe = safe_float(payload.get("importe"))
 
+        payload["importe"] = round(importe, 2)
+        payload["importe_cuota"] = round(importe, 2)
+        payload["total"] = round(payload["cuotas"] * importe, 2)
+        payload["importe_pendiente"] = round(payload["cuotas_restantes"] * importe, 2)
+
+    # ------------------------------------------------------------
     # Reglas por periodicidad
+    # ------------------------------------------------------------
     if per_str == "PAGO UNICO":
         payload["inactivatedon"] = now_expr
         payload["activo"] = False
         payload["pagado"] = True
         payload["kpi"] = False
         payload["ultimo_pago_on"] = now_expr
+
+        # Refuerzo final: cualquier PAGO UNICO debe quedar cerrado.
+        payload["cuotas_pagadas"] = payload["cuotas"]
+        payload["cuotas_restantes"] = 0
+        payload["importe_pendiente"] = 0.0
     else:
         payload["activo"] = True
         payload["pagado"] = False
@@ -1100,14 +1131,13 @@ def create_gasto(
 
     db_obj = models.Gasto(
         **payload,
-        user_id=current_user.id,  # dueño del gasto
-        # NUEVO: defaults si el modelo no tiene server_default (defensivo)
+        user_id=current_user.id,
         omitido_este_mes=False,
-        omitido_count=getattr(models.Gasto, "omitido_count", 0) and 0,  # fuerza 0
+        omitido_count=0,
     )
     db.add(db_obj)
 
-    # Ajuste liquidez en CREATE:
+    # Ajuste liquidez en CREATE.
     if per_str == "PAGO UNICO" or bool(payload.get("pagado")) is True:
         adjust_liquidez(
             db,
@@ -1120,7 +1150,6 @@ def create_gasto(
     db.commit()
     db.refresh(db_obj)
     return db_obj
-
 
 # ============================================================
 # UPDATE

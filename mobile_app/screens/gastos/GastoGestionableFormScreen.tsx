@@ -821,9 +821,16 @@ export const GastoGestionableFormScreen: React.FC<Props> = ({ navigation, route 
         }
 
         if (duplicate && per === 'PAGO UNICO') {
+          // Un duplicado de PAGO UNICO nace como gasto ya pagado.
+          // Esto evita estados incoherentes tipo:
+          // cuotas = 1 pero cuotas_pagadas = 0.
           basePayload.pagado = true;
           basePayload.activo = false;
           basePayload.kpi = false;
+
+          basePayload.numCuotas = 1;
+          basePayload.cuotasPagadas = 1;
+          basePayload.numCuota = 1;
 
           basePayload.createOn = nowIso;
           basePayload.modifiedOn = nowIso;

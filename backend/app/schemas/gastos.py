@@ -1,10 +1,18 @@
 """
 Ruta: backend/app/schemas/gastos.py
-Versión: 1.7.0
+Versión: 1.7.1
 Descripción:
 Schemas Pydantic para gastos gestionables.
-Expone los campos necesarios para create/update/read en GapptoMobile v3,
-incluyendo tracking, omisión mensual y metadatos de auditoría.
+
+Cambios v1.7.1:
+- GastoCreate acepta campos derivados opcionales:
+    cuotas_pagadas
+    cuotas_restantes
+    importe_pendiente
+    ultimo_pago_on
+- Esto permite crear correctamente gastos PAGO UNICO ya pagados,
+  duplicados/migraciones controladas y evita que el backend descarte esos datos.
+- Se mantiene toda la funcionalidad anterior.
 """
 
 from __future__ import annotations
@@ -67,9 +75,22 @@ class GastoBase(BaseModel):
 class GastoCreate(GastoBase):
     """
     Schema para CREAR un gasto gestionable.
+
+    Campos derivados opcionales:
+    - cuotas_pagadas / cuotas_restantes / importe_pendiente:
+      normalmente los recalcula el backend, pero se aceptan para no descartar
+      datos válidos enviados desde duplicados, migraciones o altas especiales.
+    - ultimo_pago_on:
+      permite que un PAGO UNICO creado como ya pagado pueda conservar su fecha
+      de último pago si el cliente la envía.
     """
 
+    cuotas_pagadas: Optional[int] = None
+    cuotas_restantes: Optional[int] = None
+    importe_pendiente: Optional[Money] = None
+
     inactivatedon: Optional[datetime] = None
+    ultimo_pago_on: Optional[datetime] = None
 
 
 class GastoUpdate(BaseModel):

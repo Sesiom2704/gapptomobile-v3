@@ -332,6 +332,7 @@ function normalizarPayloadGasto(payload: CrearGastoGestionablePayload) {
   if (typeof payload.kpi === 'boolean') body.kpi = payload.kpi;
 
   // Edición / financiación / préstamo
+  // Edición / financiación / préstamo
   if (typeof payload.cuotasPagadas === 'number') body.cuotas_pagadas = payload.cuotasPagadas;
   if (typeof payload.numCuota === 'number') body.num_cuota = payload.numCuota;
 
@@ -339,6 +340,31 @@ function normalizarPayloadGasto(payload: CrearGastoGestionablePayload) {
     body.prestamo_id = payload.prestamoId.trim();
   }
 
+  // ------------------------------------------------------------
+  // Blindaje PAGO UNICO
+  // ------------------------------------------------------------
+  // Un PAGO UNICO representa un gasto ya satisfecho en el momento de alta.
+  // Por coherencia debe viajar al backend como:
+  // - 1 cuota total
+  // - 1 cuota pagada
+  // - pagado=true
+  // - activo=false
+  // - kpi=false
+  //
+  // El backend también lo blinda, pero lo reforzamos aquí para que el payload
+  // sea coherente desde origen.
+  const isPagoUnico = (payload.periodicidad || '').trim().toUpperCase() === 'PAGO UNICO';
+
+  if (isPagoUnico) {
+    body.cuotas = 1;
+    body.cuotas_pagadas = 1;
+    body.num_cuota = 1;
+    body.pagado = true;
+    body.activo = false;
+    body.kpi = false;
+  }
+
+  // Timestamps opcionales (si backend los soporta)
   // Timestamps opcionales (si backend los soporta)
   if (typeof payload.createOn === 'string') body.createon = payload.createOn;
   if (typeof payload.modifiedOn === 'string') body.modifiedon = payload.modifiedOn;
