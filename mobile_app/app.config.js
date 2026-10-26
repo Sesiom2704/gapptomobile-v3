@@ -4,8 +4,9 @@ export default ({ config }) => ({
   ...config,
   name: "GapptoMobile V3",
   slug: "gapptomobile-v3",
+  version: "1.1.0",
   scheme: "gapptomobilev3",
-  plugins: ["expo-secure-store"],
+  plugins: ["expo-secure-store", "expo-font", "@react-native-community/datetimepicker"],
 
   ios: {
     ...config.ios,
@@ -36,3 +37,5 @@ export default ({ config }) => ({
     API_URL: FORCE_V3
   }
 });
+
+

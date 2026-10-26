@@ -7,13 +7,6 @@ import { AuthProvider } from "./context/AuthContext";
 import RootNavigator from "./navigation/RootNavigator";
 import { navigationRef } from "./navigation/navigationRef";
 
-/**
- * App (entrypoint)
- * ----------------
- * - Aquí NO decidimos Main/Login.
- * - El flujo vive en RootNavigator (Boot -> Login/Main).
- * - Conectamos navigationRef para poder resetear a Login desde AuthContext (logout/401).
- */
 export default function App() {
   return (
     <SafeAreaProvider>
