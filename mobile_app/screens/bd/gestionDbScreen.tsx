@@ -52,7 +52,7 @@ import * as SecureStore from "expo-secure-store";
 import Header from "../../components/layout/Header";
 import { panelStyles } from "../../components/panels/panelStyles";
 import { colors } from "../../theme/colors";
-import { api, setDbKey } from "../../services/api";
+import { api, setDbKey, DEFAULT_DB_KEY } from "../../services/api";
 
 // Habilitar animaciones en Android (para desplegables)
 if (Platform.OS === "android" && UIManager.setLayoutAnimationEnabledExperimental) {
@@ -66,7 +66,7 @@ type JobStatus = "idle" | "queued" | "running" | "done" | "error" | "canceled";
 const DEBUG_DB = true;
 const POLL_INTERVAL_MS = 900;
 const STORAGE_DB_KEY = "dbKey";
-const DEFAULT_DB_KEY: DBKey = "supabase";
+// El valor por defecto se comparte con AuthContext y services/api (Neon).
 
 function debug(...args: any[]) {
   if (!DEBUG_DB) return;
