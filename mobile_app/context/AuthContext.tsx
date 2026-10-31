@@ -12,12 +12,12 @@
  * - Gestiona estado de carga de login.
  * - Gestiona estado de hidratación inicial.
  * - Maneja logout automático ante respuestas 401.
- * - Inicializa la base activa guardada en SecureStore.
+ * - Inicializa siempre Neon y actualiza la base guardada en SecureStore.
  *
  * Ajustes de esta versión:
  * - Se añade lectura inicial de dbKey desde SecureStore.
  * - Se aplica setDbKey antes de finalizar la hidratación.
- * - Se crea valor por defecto coherente: supabase.
+ * - Neon es la base principal y la seleccionamos en cada arranque.
  * - Se asegura que la app arranca con el X-DB correcto antes de entrar a Main.
  *
  * Reglas funcionales:
@@ -45,6 +45,7 @@ import {
   setAuthToken,
   setOnUnauthorizedHandler,
   setDbKey,
+  DEFAULT_DB_KEY,
   type DBKey,
 } from "../services/api";
 import { login as loginRequest, LoginResponse } from "../services/authApi";
@@ -57,10 +58,9 @@ const STORAGE_TOKEN_KEY = "userToken";
 const STORAGE_DB_KEY = "dbKey";
 
 /**
- * Base por defecto de la app.
- * Debe coincidir con el valor visual usado en Gestión DB.
+ * La base principal se define en services/api.ts para que toda la app
+ * comparta el mismo valor (Neon).
  */
-const DEFAULT_DB_KEY: DBKey = "supabase";
 
 type AuthUser = {
   id: string;
@@ -165,7 +165,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({
 
   /**
    * Bootstrap de sesión al arrancar:
-   * - recupera base activa si existe
+   * - establece Neon como base inicial aunque hubiera Supabase guardada
    * - aplica base activa a axios
    * - recupera token si existe
    * - aplica token a axios
@@ -181,16 +181,19 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({
       try {
         const savedDbKeyRaw = await SecureStore.getItemAsync(STORAGE_DB_KEY);
 
-        const effectiveDbKey: DBKey = isValidDbKey(savedDbKeyRaw)
-          ? savedDbKeyRaw
-          : DEFAULT_DB_KEY;
+        // Neon es la base principal: arrancamos siempre con ella.
+        // Esto corrige también instalaciones que ya guardaron Supabase.
+        const effectiveDbKey: DBKey = DEFAULT_DB_KEY;
+        setDbKey(effectiveDbKey);
 
-        if (!isValidDbKey(savedDbKeyRaw)) {
+        if (savedDbKeyRaw !== effectiveDbKey) {
           await SecureStore.setItemAsync(STORAGE_DB_KEY, effectiveDbKey);
         }
 
-        setDbKey(effectiveDbKey);
-        console.log("[Auth] Base activa recuperada:", effectiveDbKey);
+        console.log(
+          "[Auth] Base de arranque:", effectiveDbKey,
+          "| anterior:", isValidDbKey(savedDbKeyRaw) ? savedDbKeyRaw : "sin selección válida"
+        );
 
         const savedToken = await SecureStore.getItemAsync(STORAGE_TOKEN_KEY);
 
