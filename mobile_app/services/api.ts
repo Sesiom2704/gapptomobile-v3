@@ -94,10 +94,12 @@ export const getApiBaseUrl = (): string => API_URL;
  * --------------------------------------------
  *
  * IMPORTANTE:
- * - La app usa "supabase" como base por defecto si no hay valor guardado.
+ * - La app usa Neon como base de arranque (base principal).
  * - AuthContext será quien lea SecureStore al arrancar y llame a setDbKey().
  */
-let currentDbKey: DBKey = "supabase";
+/** Base principal y único valor predeterminado de toda la aplicación. */
+export const DEFAULT_DB_KEY: DBKey = "neon";
+let currentDbKey: DBKey = DEFAULT_DB_KEY;
 
 /**
  * Guardamos el token en memoria y lo inyectamos SIEMPRE en cada request
